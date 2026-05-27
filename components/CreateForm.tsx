@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { StrKey } from "@stellar/stellar-sdk";
 import { createSchedule, CONTRACT_ID } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 
@@ -14,15 +15,25 @@ export default function CreateForm() {
   const [errMsg, setErrMsg] = useState("");
 
   const set = (k: string, v: any) => setForm((f) => ({ ...f, [k]: v }));
+  const beneficiary = form.beneficiary.trim();
+  const beneficiaryError =
+    beneficiary && !StrKey.isValidEd25519PublicKey(beneficiary)
+      ? "Enter a valid Stellar public key starting with G."
+      : "";
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!publicKey) return;
+    if (beneficiaryError) {
+      setErrMsg(beneficiaryError);
+      setStatus("error");
+      return;
+    }
     setStatus("loading"); setErrMsg("");
     try {
       const startTs = Math.floor(new Date(form.startDate).getTime() / 1000);
       const hash = await createSchedule(
-        publicKey, form.beneficiary, parseFloat(form.amount),
+        publicKey, beneficiary, parseFloat(form.amount),
         startTs, parseInt(form.durationDays), parseInt(form.cliffDays),
         form.kind, form.revocable,
       );
@@ -53,7 +64,21 @@ export default function CreateForm() {
       <h2 className="text-lg font-semibold">New Vesting Schedule</h2>
 
       <Field label="Beneficiary Address">
-        <input type="text" placeholder="G..." value={form.beneficiary} onChange={e => set("beneficiary", e.target.value)} required className="input" />
+        <input
+          type="text"
+          placeholder="G..."
+          value={form.beneficiary}
+          onChange={e => set("beneficiary", e.target.value)}
+          required
+          aria-invalid={!!beneficiaryError}
+          aria-describedby={beneficiaryError ? "beneficiary-error" : undefined}
+          className={`input ${beneficiaryError ? "border-red-500/60 focus:border-red-500" : ""}`}
+        />
+        {beneficiaryError && (
+          <p id="beneficiary-error" className="text-xs text-red-400">
+            {beneficiaryError}
+          </p>
+        )}
       </Field>
 
       <Field label="Total Amount (XLM)">
@@ -96,7 +121,7 @@ export default function CreateForm() {
 
       {status === "error" && <p className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{errMsg}</p>}
 
-      <button type="submit" disabled={status === "loading"} className="btn-primary rounded-xl py-3 font-semibold text-white disabled:opacity-60">
+      <button type="submit" disabled={status === "loading" || !!beneficiaryError} className="btn-primary rounded-xl py-3 font-semibold text-white disabled:opacity-60">
         {status === "loading" ? "Waiting for signature…" : "Lock & Create Schedule"}
       </button>
 
