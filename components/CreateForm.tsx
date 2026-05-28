@@ -6,7 +6,7 @@ import { useWallet } from "@/lib/WalletContext";
 export default function CreateForm() {
   const { publicKey } = useWallet();
   const [form, setForm] = useState({
-    beneficiary: "", amount: "", startDate: "", durationDays: "",
+    beneficiary: "", amount: "", startDateTime: "", durationDays: "",
     cliffDays: "0", kind: "Linear" as "Linear" | "Cliff", revocable: true,
   });
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
@@ -20,7 +20,7 @@ export default function CreateForm() {
     if (!publicKey) return;
     setStatus("loading"); setErrMsg("");
     try {
-      const startTs = Math.floor(new Date(form.startDate).getTime() / 1000);
+      const startTs = Math.floor(new Date(form.startDateTime).getTime() / 1000);
       const hash = await createSchedule(
         publicKey, form.beneficiary, parseFloat(form.amount),
         startTs, parseInt(form.durationDays), parseInt(form.cliffDays),
@@ -61,8 +61,8 @@ export default function CreateForm() {
       </Field>
 
       <div className="grid grid-cols-2 gap-4">
-        <Field label="Start Date">
-          <input type="date" value={form.startDate} onChange={e => set("startDate", e.target.value)} required className="input" />
+        <Field label="Start Date & Time">
+          <input type="datetime-local" value={form.startDateTime} onChange={e => set("startDateTime", e.target.value)} required className="input" />
         </Field>
         <Field label="Duration (days)">
           <input type="number" placeholder="365" min="1" value={form.durationDays} onChange={e => set("durationDays", e.target.value)} required className="input" />
