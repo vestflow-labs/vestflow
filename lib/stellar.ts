@@ -15,8 +15,11 @@ import {
   requestAccess,
 } from "@stellar/freighter-api";
 
-export const NETWORK_PASSPHRASE = Networks.TESTNET;
-export const RPC_URL = "https://soroban-testnet.stellar.org";
+export const NETWORK = process.env.NEXT_PUBLIC_NETWORK === "mainnet" ? "mainnet" : "testnet";
+export const NETWORK_PASSPHRASE = NETWORK === "mainnet" ? Networks.PUBLIC : Networks.TESTNET;
+export const RPC_URL = NETWORK === "mainnet"
+  ? "https://mainnet.sorobanrpc.com"
+  : "https://soroban-testnet.stellar.org";
 export const CONTRACT_ID =
   process.env.NEXT_PUBLIC_CONTRACT_ID ??
   "CCZ6AE75C27DMB3SOIHK7WZSBUG3NQPVLHSVEBQ2FSAEVGRJ5TXAZWCX";

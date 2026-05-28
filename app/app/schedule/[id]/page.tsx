@@ -8,12 +8,12 @@ import {
   getSchedule,
   ScheduleData,
   stroopsToXlm,
-  truncate,
   vestingProgress,
   formatDate,
   claimVested,
   revokeSchedule,
   parseContractError,
+  NETWORK,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 
@@ -132,11 +132,15 @@ export default function ScheduleDetailPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
             <div>
               <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Grantor</p>
-              <p className="font-mono text-zinc-300 break-all">{schedule.grantor}</p>
+              <a href={`https://stellar.expert/explorer/${NETWORK}/account/${schedule.grantor}`} target="_blank" rel="noopener noreferrer" className="font-mono text-zinc-300 hover:text-violet-300 break-all transition-colors">
+                {schedule.grantor}
+              </a>
             </div>
             <div>
               <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Beneficiary</p>
-              <p className="font-mono text-zinc-300 break-all">{schedule.beneficiary}</p>
+              <a href={`https://stellar.expert/explorer/${NETWORK}/account/${schedule.beneficiary}`} target="_blank" rel="noopener noreferrer" className="font-mono text-zinc-300 hover:text-violet-300 break-all transition-colors">
+                {schedule.beneficiary}
+              </a>
             </div>
             <div>
               <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Total Amount</p>
@@ -162,8 +166,18 @@ export default function ScheduleDetailPage() {
             )}
             <div>
               <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Token</p>
-              <p className="font-mono text-zinc-300">{truncate(schedule.token)}</p>
+              <a href={`https://stellar.expert/explorer/${NETWORK}/asset/${schedule.token}`} target="_blank" rel="noopener noreferrer" className="font-mono text-zinc-300 hover:text-violet-300 transition-colors">
+                {schedule.token}
+              </a>
             </div>
+          </div>
+
+          {/* Share link */}
+          <div className="border-t border-white/5 pt-4">
+            <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Shareable Link</p>
+            <p className="font-mono text-xs text-zinc-400 break-all select-all">
+              {typeof window !== "undefined" ? window.location.href : `/app/schedule/${schedule.id}`}
+            </p>
           </div>
 
           {err && (

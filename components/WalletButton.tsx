@@ -1,12 +1,21 @@
 "use client";
-import { useState } from "react";
-import { connectWallet, truncate } from "@/lib/stellar";
+import { useEffect, useState } from "react";
+import { getNetworkDetails } from "@stellar/freighter-api";
+import { connectWallet, truncate, NETWORK, NETWORK_PASSPHRASE } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 
 export default function WalletButton() {
   const { publicKey, setPublicKey } = useWallet();
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+  const [networkMismatch, setNetworkMismatch] = useState(false);
+
+  useEffect(() => {
+    if (!publicKey) { setNetworkMismatch(false); return; }
+    getNetworkDetails().then(details => {
+      setNetworkMismatch(details.networkPassphrase !== NETWORK_PASSPHRASE);
+    }).catch(() => {});
+  }, [publicKey]);
 
   const connect = async () => {
     setLoading(true); setErr("");
@@ -16,9 +25,16 @@ export default function WalletButton() {
   };
 
   if (publicKey) return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs font-mono bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-zinc-300">{truncate(publicKey)}</span>
-      <button onClick={() => setPublicKey(null)} className="text-xs text-zinc-500 hover:text-white transition-colors">Disconnect</button>
+    <div className="flex flex-col items-end gap-1">
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-mono bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-zinc-300">{truncate(publicKey)}</span>
+        <button onClick={() => setPublicKey(null)} className="text-xs text-zinc-500 hover:text-white transition-colors">Disconnect</button>
+      </div>
+      {networkMismatch && (
+        <p className="text-xs text-amber-400">
+          Network mismatch — switch Freighter to {NETWORK === "mainnet" ? "Mainnet" : "Testnet"}
+        </p>
+      )}
     </div>
   );
 

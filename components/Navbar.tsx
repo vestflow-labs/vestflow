@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import WalletButton from "./WalletButton";
+import { NETWORK } from "@/lib/stellar";
 
 function SunIcon() {
   return (
@@ -54,6 +55,9 @@ export default function Navbar() {
         <a href="https://github.com/libby-coder/vestflow/issues" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">Contribute</a>
       </div>
       <div className="flex items-center gap-3">
+        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${NETWORK === "mainnet" ? "bg-green-500/10 text-green-400 border border-green-500/20" : "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"}`}>
+          {NETWORK === "mainnet" ? "Mainnet" : "Testnet"}
+        </span>
         <button
           onClick={toggleTheme}
           aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
