@@ -14,6 +14,8 @@ export default function ScheduleCard({ schedule, onAction }: { schedule: Schedul
   const isGrantor = publicKey === schedule.grantor;
   const vested = BigInt(Math.floor(Number(schedule.total_amount) * progress / 100));
   const claimableAmt = vested > schedule.claimed ? vested - schedule.claimed : BigInt(0);
+  const cliffUnlockTime = schedule.start_time + schedule.cliff_duration;
+  const showCliffUnlock = schedule.kind === "Cliff" && now < cliffUnlockTime;
 
   const handleClaim = async () => {
     if (!publicKey) return;
@@ -65,6 +67,9 @@ export default function ScheduleCard({ schedule, onAction }: { schedule: Schedul
         <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
           <div className="h-full rounded-full bg-gradient-to-r from-violet-500 to-cyan-500 transition-all" style={{ width: `${progress}%` }} />
         </div>
+        {showCliffUnlock && (
+          <p className="text-xs text-zinc-500 mt-2">Unlocks on {formatDate(cliffUnlockTime)}</p>
+        )}
       </div>
 
       {err && <p className="text-xs text-red-400">{err}</p>}
