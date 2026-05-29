@@ -27,7 +27,7 @@ export default function ScheduleDetailPage() {
 
   const load = async () => {
     setLoading(true);
-    const s = await getSchedule(Number(id));
+    const s = await getSchedule(Number(id), publicKey ?? undefined);
     setSchedule(s);
     setLoading(false);
   };

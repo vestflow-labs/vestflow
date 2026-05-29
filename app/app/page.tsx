@@ -50,7 +50,7 @@ export default function DashboardPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const all = await getAllSchedules();
+      const all = await getAllSchedules(publicKey ?? undefined);
       if (publicKey) {
         setSchedules(all.filter(s => s.grantor === publicKey || s.beneficiary === publicKey));
       } else {

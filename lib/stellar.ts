@@ -29,6 +29,9 @@ export const NATIVE_TOKEN =
 
 const server = new StellarRpc.Server(RPC_URL);
 
+// Well-known funded testnet account used as fallback source for read-only simulations.
+const FALLBACK_ACCOUNT = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+
 // ---------- Wallet ----------
 
 export async function connectWallet(): Promise<string> {
@@ -42,11 +45,10 @@ export async function connectWallet(): Promise<string> {
 
 // ---------- Read ----------
 
-async function simulate(method: string, args: xdr.ScVal[]): Promise<xdr.ScVal> {
+async function simulate(method: string, args: xdr.ScVal[], publicKey?: string): Promise<xdr.ScVal> {
   const contract = new Contract(CONTRACT_ID);
-  const account = await server.getAccount(
-    "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN"
-  );
+  const source = publicKey ?? FALLBACK_ACCOUNT;
+  const account = await server.getAccount(source);
   const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
     networkPassphrase: NETWORK_PASSPHRASE,
@@ -60,9 +62,9 @@ async function simulate(method: string, args: xdr.ScVal[]): Promise<xdr.ScVal> {
   return (result as any).result!.retval;
 }
 
-export async function getSchedule(id: number): Promise<ScheduleData | null> {
+export async function getSchedule(id: number, publicKey?: string): Promise<ScheduleData | null> {
   try {
-    const val = await simulate("get_schedule", [nativeToScVal(id, { type: "u64" })]);
+    const val = await simulate("get_schedule", [nativeToScVal(id, { type: "u64" })], publicKey);
     return parseSchedule(scValToNative(val));
   } catch { return null; }
 }
@@ -74,17 +76,17 @@ export async function getScheduleCount(): Promise<number> {
   } catch { return 0; }
 }
 
-export async function getClaimable(id: number): Promise<bigint> {
+export async function getClaimable(id: number, publicKey?: string): Promise<bigint> {
   try {
-    const val = await simulate("claimable", [nativeToScVal(id, { type: "u64" })]);
+    const val = await simulate("claimable", [nativeToScVal(id, { type: "u64" })], publicKey);
     return BigInt(scValToNative(val));
   } catch { return 0n; }
 }
 
-export async function getAllSchedules(): Promise<ScheduleData[]> {
+export async function getAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
   const count = await getScheduleCount();
   const results = await Promise.all(
-    Array.from({ length: count }, (_, i) => getSchedule(i + 1))
+    Array.from({ length: count }, (_, i) => getSchedule(i + 1, publicKey))
   );
   return results.filter(Boolean) as ScheduleData[];
 }
