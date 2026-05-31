@@ -8,6 +8,121 @@ Live on **Stellar Testnet** · Contract: `CCZ6AE75C27DMB3SOIHK7WZSBUG3NQPVLHSVEB
 
 ---
 
+## Architecture
+
+### System Overview
+
+```mermaid
+graph TB
+    subgraph "Frontend Layer"
+        UI[Next.js UI]
+        Wallet[Freighter Wallet]
+        Components[React Components]
+    end
+    
+    subgraph "Blockchain Layer"
+        Stellar[Stellar Network]
+        Soroban[Soroban Smart Contracts]
+        RPC[Soroban RPC]
+    end
+    
+    subgraph "Smart Contract"
+        VestFlow[VestFlow Contract]
+        SAC[Stellar Asset Contract]
+        Events[Contract Events]
+    end
+    
+    subgraph "Data Flow"
+        Create[Create Schedule]
+        Claim[Claim Tokens]
+        Revoke[Revoke Schedule]
+    end
+    
+    UI --> Wallet
+    Wallet --> RPC
+    RPC --> Soroban
+    Soroban --> VestFlow
+    VestFlow --> SAC
+    VestFlow --> Events
+    
+    Create --> VestFlow
+    Claim --> VestFlow
+    Revoke --> VestFlow
+```
+
+### Component Architecture
+
+```mermaid
+graph LR
+    subgraph "Frontend Components"
+        App[App Layout]
+        Dashboard[Dashboard]
+        CreateForm[Create Form]
+        ScheduleCard[Schedule Card]
+        WalletButton[Wallet Button]
+    end
+    
+    subgraph "Context & Hooks"
+        WalletContext[Wallet Context]
+        StellarLib[Stellar Library]
+        ContractAPI[Contract API]
+    end
+    
+    subgraph "Contract Functions"
+        CreateSchedule[create_schedule]
+        ClaimTokens[claim]
+        RevokeSchedule[revoke]
+        GetClaimable[claimable]
+    end
+    
+    App --> WalletContext
+    Dashboard --> ScheduleCard
+    CreateForm --> ContractAPI
+    ScheduleCard --> ContractAPI
+    WalletButton --> WalletContext
+    
+    ContractAPI --> StellarLib
+    StellarLib --> CreateSchedule
+    StellarLib --> ClaimTokens
+    StellarLib --> RevokeSchedule
+    StellarLib --> GetClaimable
+```
+
+### Vesting Flow Diagram
+
+```mermaid
+sequenceDiagram
+    participant G as Grantor
+    participant C as VestFlow Contract
+    participant SAC as Token Contract
+    participant B as Beneficiary
+    
+    Note over G,B: Schedule Creation
+    G->>SAC: approve(contract, amount)
+    G->>C: create_schedule(params)
+    C->>SAC: transfer_from(grantor, contract, amount)
+    C->>C: store schedule data
+    C-->>G: schedule_id
+    
+    Note over G,B: Vesting Period
+    loop Every claim
+        B->>C: claimable(schedule_id)
+        C-->>B: available_amount
+        B->>C: claim(schedule_id)
+        C->>C: calculate vested amount
+        C->>SAC: transfer(contract, beneficiary, amount)
+        C-->>B: tokens transferred
+    end
+    
+    Note over G,B: Optional Revocation
+    G->>C: revoke(schedule_id)
+    C->>C: calculate unvested amount
+    C->>SAC: transfer(contract, grantor, unvested)
+    C-->>G: unvested tokens returned
+```
+
+---
+
 ## What it does
 
 | Feature | Details |
