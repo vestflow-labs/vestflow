@@ -297,6 +297,7 @@ The contract panics with plain strings that callers can match on. All public-fac
 | `"Amount must be positive"` | `create_schedule` with `total_amount` ≤ 0 |
 | `"Duration must be positive"` | `create_schedule` with `duration` = 0 |
 | `"Cliff cannot exceed duration"` | `create_schedule` with `cliff_duration` > `duration` |
+| `"Beneficiary must differ from grantor"` | `create_schedule` with `beneficiary == grantor` |
 
 ---
 

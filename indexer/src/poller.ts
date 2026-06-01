@@ -42,7 +42,7 @@ function decodeValue(raw: xdr.ScVal): unknown {
 
 function inferEventType(topics: unknown[]): EventType {
   const tag = topics[0];
-  if (tag === "schedule_created") return "schedule_created";
+  if (tag === "created") return "schedule_created";
   if (tag === "claimed") return "claimed";
   if (tag === "revoked") return "revoked";
   return "unknown";
@@ -51,6 +51,23 @@ function inferEventType(topics: unknown[]): EventType {
 function toStr(v: unknown): string | null {
   if (v == null) return null;
   try { return String(v); } catch { return null; }
+}
+
+/**
+ * Decode the event value, which may be an array (from Vec ScVal tuple) or
+ * an object with numeric keys. Returns an array for consistent access.
+ */
+function asArray(v: unknown): unknown[] {
+  if (Array.isArray(v)) return v;
+  if (v && typeof v === "object") {
+    // Object with numeric keys, e.g. {"0": ..., "1": ...}
+    const keys = Object.keys(v).map(Number).filter((k) => !isNaN(k));
+    if (keys.length > 0) {
+      keys.sort((a, b) => a - b);
+      return keys.map((k) => (v as Record<string, unknown>)[String(k)]);
+    }
+  }
+  return [];
 }
 
 // ── Core poll ─────────────────────────────────────────────────────────
@@ -83,26 +100,34 @@ async function poll(): Promise<void> {
       for (const raw of events) {
         const topics = decodeTopics(raw.topic ?? []);
         const value = decodeValue(raw.value);
+        const valueArr = asArray(value);
         const eventType = inferEventType(topics);
 
-        const scheduleId =
-          topics[1] != null ? Number(topics[1]) : null;
-
+        let scheduleId: number | null = null;
         let grantor: string | null = null;
         let beneficiary: string | null = null;
         let amount: string | null = null;
 
         switch (eventType) {
           case "schedule_created":
-            grantor = toStr(topics[2]);
-            beneficiary = toStr(topics[3]);
+            // topics: ["created", grantor, beneficiary, token]
+            // value: [id, total_amount]
+            grantor = toStr(topics[1]);
+            beneficiary = toStr(topics[2]);
+            scheduleId = valueArr[0] != null ? Number(valueArr[0]) : null;
             break;
           case "claimed":
-            beneficiary = toStr(topics[2]);
-            amount = toStr(topics[3]);
+            // topics: ["claimed", beneficiary, token]
+            // value: [schedule_id, claimable, total_claimed]
+            beneficiary = toStr(topics[1]);
+            scheduleId = valueArr[0] != null ? Number(valueArr[0]) : null;
+            amount = valueArr[1] != null ? String(valueArr[1]) : null;
             break;
           case "revoked":
-            grantor = toStr(topics[2]);
+            // topics: ["revoked", grantor, token]
+            // value: [schedule_id, unvested, vested]
+            grantor = toStr(topics[1]);
+            scheduleId = valueArr[0] != null ? Number(valueArr[0]) : null;
             break;
         }
 

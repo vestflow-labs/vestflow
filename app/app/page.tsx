@@ -3,13 +3,27 @@ import { useEffect, useMemo, useState } from "react";
 import Navbar from "@/components/Navbar";
 import ScheduleCard from "@/components/ScheduleCard";
 import ScheduleCardSkeleton from "@/components/ScheduleCardSkeleton";
-import { getAllSchedules, ScheduleData, vestingProgress, formatDate } from "@/lib/stellar";
+import {
+  getAllSchedules,
+  getClaimableBulk,
+  ScheduleData,
+  stroopsToXlm,
+  vestingProgress,
+  formatDate,
+} from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import Link from "next/link";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
 type SortKey = "newest" | "ending-soon" | "largest-amount" | "status";
 const PAGE_SIZE = 10;
+
+interface DashboardStats {
+  totalGranted: bigint;
+  totalReceiving: bigint;
+  claimableNow: bigint;
+  activeSchedules: number;
+}
 
 function buildCSV(rows: ScheduleData[]): string {
   const now = Math.floor(Date.now() / 1000);
@@ -45,6 +59,7 @@ function buildCSV(rows: ScheduleData[]): string {
 export default function DashboardPage() {
   const { publicKey } = useWallet();
   const [schedules, setSchedules] = useState<ScheduleData[]>([]);
+  const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [roleFilter, setRoleFilter] = useState<RoleFilter>("all");
   const [sortBy, setSortBy] = useState<SortKey>("newest");
@@ -56,9 +71,38 @@ export default function DashboardPage() {
     try {
       const all = await getAllSchedules(publicKey ?? undefined);
       if (publicKey) {
-        setSchedules(all.filter(s => s.grantor === publicKey || s.beneficiary === publicKey));
+        const userSchedules = all.filter(s => s.grantor === publicKey || s.beneficiary === publicKey);
+        setSchedules(userSchedules);
+
+        // Compute aggregate stats
+        const userIds = userSchedules.map(s => s.id);
+        const claimableAmounts = await getClaimableBulk(userIds, publicKey);
+        const claimableMap = new Map<number, bigint>();
+        userIds.forEach((id, i) => claimableMap.set(id, claimableAmounts[i] ?? 0n));
+
+        const now = Math.floor(Date.now() / 1000);
+        let totalGranted = 0n;
+        let totalReceiving = 0n;
+        let claimableNow = 0n;
+        let activeSchedules = 0;
+
+        for (const s of userSchedules) {
+          if (s.grantor === publicKey) {
+            totalGranted += s.total_amount;
+          }
+          if (s.beneficiary === publicKey) {
+            totalReceiving += s.total_amount;
+            claimableNow += claimableMap.get(s.id) ?? 0n;
+          }
+          if (!s.revoked && vestingProgress(s, now) < 100) {
+            activeSchedules++;
+          }
+        }
+
+        setStats({ totalGranted, totalReceiving, claimableNow, activeSchedules });
       } else {
         setSchedules(all.slice(0, 6));
+        setStats(null);
       }
     } finally { setLoading(false); }
   };
@@ -155,6 +199,32 @@ export default function DashboardPage() {
             </Link>
           </div>
         </div>
+
+        {/* Summary stats */}
+        {publicKey && stats && (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+            <div className="card p-4">
+              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Total Granted</p>
+              <p className="text-xl font-bold text-white">{stroopsToXlm(stats.totalGranted)}</p>
+              <p className="text-xs text-zinc-500">XLM as grantor</p>
+            </div>
+            <div className="card p-4">
+              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Total Receiving</p>
+              <p className="text-xl font-bold text-white">{stroopsToXlm(stats.totalReceiving)}</p>
+              <p className="text-xs text-zinc-500">XLM as beneficiary</p>
+            </div>
+            <div className="card p-4">
+              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Claimable Now</p>
+              <p className="text-xl font-bold text-emerald-400">{stroopsToXlm(stats.claimableNow)}</p>
+              <p className="text-xs text-zinc-500">XLM available</p>
+            </div>
+            <div className="card p-4">
+              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Active Schedules</p>
+              <p className="text-xl font-bold text-white">{stats.activeSchedules}</p>
+              <p className="text-xs text-zinc-500">Currently vesting</p>
+            </div>
+          </div>
+        )}
 
         {/* Role filter tabs (only when wallet connected and there are schedules) */}
         {publicKey && schedules.length > 0 && (
