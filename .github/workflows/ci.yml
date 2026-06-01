@@ -36,7 +36,7 @@ jobs:
         run: npm run build
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-build
           path: .next/
@@ -69,7 +69,7 @@ jobs:
           npm run build
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: indexer-build
           path: indexer/dist/
@@ -112,7 +112,7 @@ jobs:
           cargo build --release --target wasm32-unknown-unknown
 
       - name: Upload contract artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: contract-wasm
           path: contracts/target/wasm32-unknown-unknown/release/*.wasm
