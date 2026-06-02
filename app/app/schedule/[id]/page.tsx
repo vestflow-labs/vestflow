@@ -15,6 +15,7 @@ import {
   revokeSchedule,
   parseContractError,
   NETWORK,
+  NATIVE_TOKEN,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 
@@ -88,6 +89,8 @@ export default function ScheduleDetailPage() {
   const isGrantor = publicKey === schedule.grantor;
   const vested = BigInt(Math.floor(Number(schedule.total_amount) * progress / 100));
   const claimableAmt = vested > schedule.claimed ? vested - schedule.claimed : 0n;
+  const isNative = schedule.token === NATIVE_TOKEN;
+  const tokenSymbol = isNative ? "XLM" : `Token (${schedule.token.slice(0, 4)}...${schedule.token.slice(-4)})`;
 
   const statusColor = schedule.revoked
     ? "bg-red-500/10 text-red-400"
@@ -154,11 +157,11 @@ export default function ScheduleDetailPage() {
             </div>
             <div>
               <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Total Amount</p>
-              <p className="text-zinc-300">{stroopsToXlm(schedule.total_amount)} XLM</p>
+              <p className="text-zinc-300">{stroopsToXlm(schedule.total_amount)} {tokenSymbol}</p>
             </div>
             <div>
               <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Claimed</p>
-              <p className="text-zinc-300">{stroopsToXlm(schedule.claimed)} XLM</p>
+              <p className="text-zinc-300">{stroopsToXlm(schedule.claimed)} {tokenSymbol}</p>
             </div>
             <div>
               <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Start Date</p>
@@ -218,7 +221,7 @@ export default function ScheduleDetailPage() {
                   disabled={!!actionLoading}
                   className="btn-primary rounded-xl px-5 py-2.5 font-semibold text-white text-sm disabled:opacity-60"
                 >
-                  {actionLoading === "claim" ? "Processing…" : `Claim ${stroopsToXlm(claimableAmt)} XLM`}
+                  {actionLoading === "claim" ? "Processing…" : `Claim ${stroopsToXlm(claimableAmt)} ${tokenSymbol}`}
                 </button>
               )}
               {isGrantor && schedule.revocable && progress < 100 && (

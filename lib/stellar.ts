@@ -174,6 +174,7 @@ async function buildAndSend(publicKey: string, method: string, args: xdr.ScVal[]
 export async function createSchedule(
   publicKey: string,
   beneficiary: string,
+  tokenAddress: string,
   totalAmountXlm: number,
   startTime: number,
   durationDays: number,
@@ -190,7 +191,7 @@ export async function createSchedule(
   const args: xdr.ScVal[] = [
     nativeToScVal(publicKey, { type: "address" }),
     nativeToScVal(beneficiary, { type: "address" }),
-    nativeToScVal(NATIVE_TOKEN, { type: "address" }),
+    nativeToScVal(tokenAddress || NATIVE_TOKEN, { type: "address" }),
     nativeToScVal(totalStroops, { type: "i128" }),
     nativeToScVal(startTime, { type: "u64" }),
     nativeToScVal(durationSecs, { type: "u64" }),
@@ -278,15 +279,20 @@ export function formatCliffDate(cliffDuration: number, startTime: number): strin
 
 export function parseContractError(e: Error): string {
   const msg = e.message;
-  if (msg.includes("Nothing to claim yet")) return "No tokens are available to claim yet.";
-  if (msg.includes("Schedule is not revocable")) return "This schedule cannot be revoked.";
-  if (msg.includes("Already revoked")) return "This schedule has already been revoked.";
+  // Map Soroban VestFlowError variants (Error(Contract, #X))
+  if (msg.includes("Contract error: 1") || msg.includes("Contract, #1") || msg.includes("Not authorized")) return "Not authorized to perform this action.";
+  if (msg.includes("Contract error: 2") || msg.includes("Contract, #2") || msg.includes("Schedule is not revocable")) return "This schedule cannot be revoked.";
+  if (msg.includes("Contract error: 3") || msg.includes("Contract, #3") || msg.includes("Already revoked")) return "This schedule has already been revoked.";
+  if (msg.includes("Contract error: 4") || msg.includes("Contract, #4") || msg.includes("Nothing to claim yet")) return "No tokens are available to claim yet.";
+  if (msg.includes("Contract error: 5") || msg.includes("Contract, #5") || msg.includes("Schedule not found")) return "Schedule not found.";
+  if (msg.includes("Contract error: 6") || msg.includes("Contract, #6") || msg.includes("Duration too short")) return "The vesting duration is too short.";
+  if (msg.includes("Contract error: 7") || msg.includes("Contract, #7") || msg.includes("Cliff exceeds duration")) return "The cliff duration cannot exceed the total duration.";
+  if (msg.includes("Contract error: 8") || msg.includes("Contract, #8") || msg.includes("Schedule has been revoked")) return "This schedule was revoked.";
+
   if (msg.includes("Not the grantor")) return "Only the grantor can perform this action.";
   if (msg.includes("Not the beneficiary")) return "Only the beneficiary can claim tokens.";
-  if (msg.includes("Schedule not found")) return "Schedule not found.";
   if (msg.includes("Insufficient balance")) return "Insufficient balance to complete this action.";
   if (msg.includes("Schedule has ended")) return "This vesting schedule has already ended.";
   if (msg.includes("Start time in the past")) return "The start time must be in the future.";
-  if (msg.includes("Duration too short")) return "The vesting duration is too short.";
   return msg;
 }

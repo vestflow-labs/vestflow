@@ -43,8 +43,25 @@
 //! | `"Upgrade executable time overflow"` | Upgrade announcement timestamp cannot safely add the timelock |
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN, Env, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
+    Env, Vec,
 };
+
+pub const VERSION: u32 = 1;
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum VestFlowError {
+    NotFound = 1,
+    NotRevocable = 2,
+    AlreadyRevoked = 3,
+    NothingToClaim = 4,
+    AmountZero = 5,
+    DurationZero = 6,
+    CliffExceedsDuration = 7,
+    ScheduleRevoked = 8,
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -62,6 +79,12 @@ pub enum DataKey {
     GrantorSchedules(Address),
     /// Index of schedule IDs where an address is the beneficiary.
     BeneficiarySchedules(Address),
+    /// NFT token contract address for vesting receipts.
+    NftContract,
+    /// Performance milestone attestations for a schedule.
+    PerformanceMilestones(u64),
+    /// Oracle address authorized to attest milestones.
+    PerformanceOracle,
 }
 
 /// Mandatory delay between an on-chain upgrade announcement and execution.
@@ -96,6 +119,26 @@ pub enum VestingKind {
     /// This models the most common real-world employee vesting schedule:
     /// a 1-year cliff followed by linear vesting over the remaining term.
     LinearWithCliff,
+    /// Tokens unlock at discrete milestones defined as (offset_seconds,
+    /// basis_points) pairs stored in `VestingSchedule::milestones`.
+    /// Each milestone unlocks `total_amount * bps / 10_000` tokens once
+    /// `start_time + offset_seconds` is reached.
+    Graded,
+}
+
+/// A single milestone for graded vesting.
+///
+/// `offset_secs` — seconds after `start_time` when this tranche unlocks.
+/// `bps`         — basis points (1/10_000) of `total_amount` that unlock.
+///
+/// The milestones in a schedule must sum to exactly 10_000 bps.
+#[contracttype]
+#[derive(Clone)]
+pub struct GradedMilestone {
+    /// Seconds after `start_time` when this tranche unlocks.
+    pub offset_secs: u64,
+    /// Basis points (out of 10_000) of `total_amount` that unlock.
+    pub bps: u32,
 }
 
 #[contracttype]
@@ -121,6 +164,7 @@ pub struct VestingSchedule {
     /// - `Linear`: ignored.
     /// - `Cliff`: tokens unlock all-at-once after this many seconds.
     /// - `LinearWithCliff`: no tokens until this point; linear from here to end.
+    /// - `Graded`: ignored (milestones define the schedule).
     pub cliff_duration: u64,
     pub kind: VestingKind,
     /// Whether the grantor can revoke unvested tokens.
@@ -131,6 +175,29 @@ pub struct VestingSchedule {
     /// Zero for non-revoked schedules. Used so the beneficiary can still
     /// claim already-vested tokens after a revocation.
     pub vested_at_revoke: i128,
+    /// Whether this schedule is currently paused.
+    pub paused: bool,
+    /// Cumulative time (in seconds) the schedule has been paused.
+    pub paused_duration: u64,
+    /// Timestamp when the schedule was last paused (0 if not paused).
+    pub paused_at: u64,
+    /// Whether performance milestones are required for this schedule.
+    pub requires_milestones: bool,
+    /// Milestone tranches for `VestingKind::Graded` schedules.
+    /// Empty for all other kinds.
+    pub milestones: Vec<GradedMilestone>,
+}
+
+/// Performance milestone attestation for gating vesting releases.
+#[contracttype]
+#[derive(Clone)]
+pub struct PerformanceMilestone {
+    /// Percentage of total vesting unlocked by this milestone (0-100).
+    pub unlock_percentage: u32,
+    /// Whether the milestone has been attested by the oracle.
+    pub attested: bool,
+    /// Timestamp when the milestone was attested.
+    pub attested_at: u64,
 }
 
 impl VestingSchedule {
@@ -148,7 +215,18 @@ impl VestingSchedule {
         if now < self.start_time {
             return 0;
         }
-        let elapsed = now - self.start_time;
+
+        // Calculate effective elapsed time accounting for pauses
+        let mut elapsed = now - self.start_time;
+
+        // Subtract paused duration
+        elapsed = elapsed.saturating_sub(self.paused_duration);
+
+        // If currently paused, subtract additional time since pause started
+        if self.paused && self.paused_at > 0 {
+            let current_pause_duration = now.saturating_sub(self.paused_at);
+            elapsed = elapsed.saturating_sub(current_pause_duration);
+        }
         match self.kind {
             VestingKind::Cliff => {
                 if elapsed >= self.cliff_duration {
@@ -188,6 +266,22 @@ impl VestingSchedule {
                     .checked_mul(linear_elapsed)
                     .and_then(|n| n.checked_div(linear_duration))
                     .unwrap_or(self.total_amount)
+            }
+            VestingKind::Graded => {
+                // Sum the bps of every milestone whose offset has been reached.
+                let mut vested_bps: u64 = 0;
+                for milestone in self.milestones.iter() {
+                    if elapsed >= milestone.offset_secs {
+                        vested_bps += milestone.bps as u64;
+                    }
+                }
+                // vested = total_amount * vested_bps / 10_000
+                // Use checked arithmetic; saturate to total_amount on overflow.
+                self.total_amount
+                    .checked_mul(vested_bps as i128)
+                    .and_then(|n| n.checked_div(10_000))
+                    .unwrap_or(self.total_amount)
+                    .min(self.total_amount)
             }
         }
     }
@@ -233,6 +327,11 @@ impl VestFlowContract {
             .instance()
             .get(&DataKey::UpgradeAuthority)
             .expect("Upgrade authority not initialized")
+    }
+
+    /// Return the contract version.
+    pub fn version(_env: Env) -> u32 {
+        VERSION
     }
 
     /// Initialize the address that may announce and execute contract upgrades.
@@ -400,13 +499,22 @@ impl VestFlowContract {
         cliff_duration: u64,
         kind: VestingKind,
         revocable: bool,
-    ) -> u64 {
+    ) -> Result<u64, VestFlowError> {
         grantor.require_auth();
 
-        assert!(beneficiary != grantor, "Beneficiary must differ from grantor");
-        assert!(total_amount > 0, "Amount must be positive");
-        assert!(duration > 0, "Duration must be positive");
-        assert!(cliff_duration <= duration, "Cliff cannot exceed duration");
+        assert!(
+            beneficiary != grantor,
+            "Beneficiary must differ from grantor"
+        );
+        if total_amount <= 0 {
+            return Err(VestFlowError::AmountZero);
+        }
+        if duration == 0 {
+            return Err(VestFlowError::DurationZero);
+        }
+        if cliff_duration > duration {
+            return Err(VestFlowError::CliffExceedsDuration);
+        }
 
         let count: u64 = env
             .storage()
@@ -438,6 +546,11 @@ impl VestFlowContract {
             revocable,
             revoked: false,
             vested_at_revoke: 0,
+            paused: false,
+            paused_duration: 0,
+            paused_at: 0,
+            requires_milestones: false,
+            milestones: vec![&env],
         };
 
         env.storage()
@@ -463,9 +576,117 @@ impl VestFlowContract {
             .get(&DataKey::BeneficiarySchedules(beneficiary.clone()))
             .unwrap_or(vec![&env]);
         beneficiary_ids.push_back(id);
+        env.storage().instance().set(
+            &DataKey::BeneficiarySchedules(beneficiary.clone()),
+            &beneficiary_ids,
+        );
+
+        env.events().publish(
+            (symbol_short!("created"), grantor, beneficiary, token),
+            (id, total_amount),
+        );
+
+        Ok(id)
+    }
+
+    /// Create a new graded (percentage-based) vesting schedule.
+    ///
+    /// Tokens unlock at discrete milestones. Each milestone specifies an
+    /// offset in seconds from `start_time` and a share in basis points
+    /// (1 bps = 0.01%). The milestones must sum to exactly 10 000 bps.
+    ///
+    /// Example: 10% at month 6, 20% at month 12, 70% at month 24 would use
+    /// milestones with offset_secs 15_552_000 / 31_104_000 / 62_208_000 and
+    /// bps 1_000 / 2_000 / 7_000 respectively.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"Amount must be positive"` if `total_amount` ≤ 0.
+    /// Panics with `"Milestones required"` if the milestones list is empty.
+    /// Panics with `"Milestones must sum to 10000 bps"` if the bps total ≠ 10 000.
+    pub fn create_graded_schedule(
+        env: Env,
+        grantor: Address,
+        beneficiary: Address,
+        token: Address,
+        total_amount: i128,
+        start_time: u64,
+        revocable: bool,
+        milestones: Vec<GradedMilestone>,
+    ) -> u64 {
+        grantor.require_auth();
+
+        assert!(
+            beneficiary != grantor,
+            "Beneficiary must differ from grantor"
+        );
+        assert!(total_amount > 0, "Amount must be positive");
+        assert!(!milestones.is_empty(), "Milestones required");
+
+        let total_bps: u64 = milestones.iter().map(|m| m.bps as u64).sum();
+        assert!(total_bps == 10_000, "Milestones must sum to 10000 bps");
+
+        // Derive duration from the last milestone offset so existing logic works.
+        let duration = milestones.iter().map(|m| m.offset_secs).max().unwrap_or(0);
+
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ScheduleCount)
+            .unwrap_or(0);
+        let id = count + 1;
+
+        let contract_address = env.current_contract_address();
+        token::Client::new(&env, &token).transfer(&grantor, &contract_address, &total_amount);
+
+        let schedule = VestingSchedule {
+            id,
+            grantor: grantor.clone(),
+            beneficiary: beneficiary.clone(),
+            token: token.clone(),
+            total_amount,
+            claimed: 0,
+            start_time,
+            duration,
+            cliff_duration: 0,
+            kind: VestingKind::Graded,
+            revocable,
+            revoked: false,
+            vested_at_revoke: 0,
+            paused: false,
+            paused_duration: 0,
+            paused_at: 0,
+            requires_milestones: false,
+            milestones,
+        };
+
         env.storage()
             .instance()
-            .set(&DataKey::BeneficiarySchedules(beneficiary.clone()), &beneficiary_ids);
+            .set(&DataKey::Schedule(id), &schedule);
+        env.storage().instance().set(&DataKey::ScheduleCount, &id);
+
+        // Maintain grantor schedule index
+        let mut grantor_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::GrantorSchedules(grantor.clone()))
+            .unwrap_or(vec![&env]);
+        grantor_ids.push_back(id);
+        env.storage()
+            .instance()
+            .set(&DataKey::GrantorSchedules(grantor.clone()), &grantor_ids);
+
+        // Maintain beneficiary schedule index
+        let mut beneficiary_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::BeneficiarySchedules(beneficiary.clone()))
+            .unwrap_or(vec![&env]);
+        beneficiary_ids.push_back(id);
+        env.storage().instance().set(
+            &DataKey::BeneficiarySchedules(beneficiary.clone()),
+            &beneficiary_ids,
+        );
 
         env.events().publish(
             (symbol_short!("created"), grantor, beneficiary, token),
@@ -475,6 +696,228 @@ impl VestFlowContract {
         id
     }
 
+    /// Pause an active vesting schedule (grantor only).
+    ///
+    /// While paused, no additional tokens vest. The beneficiary can still claim
+    /// already-vested tokens. The grantor can resume the schedule later.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"Schedule not found"` if `schedule_id` does not exist.
+    /// Panics with `"Not the grantor"` if caller is not the grantor.
+    /// Panics with `"Schedule already paused"` if already paused.
+    /// Panics with `"Cannot pause revoked schedule"` if schedule is revoked.
+    pub fn pause_schedule(env: Env, schedule_id: u64) {
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .expect("Schedule not found");
+
+        schedule.grantor.require_auth();
+        assert!(!schedule.paused, "Schedule already paused");
+        assert!(!schedule.revoked, "Cannot pause revoked schedule");
+
+        schedule.paused = true;
+        schedule.paused_at = env.ledger().timestamp();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Schedule(schedule_id), &schedule);
+        env.events().publish(
+            (symbol_short!("paused"), schedule.grantor.clone()),
+            schedule_id,
+        );
+    }
+
+    /// Resume a paused vesting schedule (grantor only).
+    ///
+    /// Accumulates the paused duration and resumes vesting from the current time.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"Schedule not found"` if `schedule_id` does not exist.
+    /// Panics with `"Not the grantor"` if caller is not the grantor.
+    /// Panics with `"Schedule not paused"` if not currently paused.
+    pub fn resume_schedule(env: Env, schedule_id: u64) {
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .expect("Schedule not found");
+
+        schedule.grantor.require_auth();
+        assert!(schedule.paused, "Schedule not paused");
+
+        let now = env.ledger().timestamp();
+        let pause_duration = now.saturating_sub(schedule.paused_at);
+        schedule.paused_duration += pause_duration;
+        schedule.paused = false;
+        schedule.paused_at = 0;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Schedule(schedule_id), &schedule);
+        env.events().publish(
+            (symbol_short!("resumed"), schedule.grantor.clone()),
+            (schedule_id, pause_duration),
+        );
+    }
+
+    /// Initialize the oracle address authorized to attest performance milestones.
+    ///
+    /// Can only be called once by the upgrade authority.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"Oracle already initialized"` if called again.
+    pub fn initialize_performance_oracle(env: Env, oracle: Address) {
+        let authority = Self::read_upgrade_authority(&env);
+        authority.require_auth();
+
+        assert!(
+            !env.storage().instance().has(&DataKey::PerformanceOracle),
+            "Oracle already initialized"
+        );
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PerformanceOracle, &oracle);
+        env.events()
+            .publish((symbol_short!("orc_init"), oracle), ());
+    }
+
+    /// Get the configured performance oracle address.
+    pub fn performance_oracle(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PerformanceOracle)
+    }
+
+    /// Enable performance-based vesting for a schedule (grantor only).
+    ///
+    /// Once enabled, the beneficiary can only claim tokens after the oracle
+    /// attests the required milestones.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"Schedule not found"` if `schedule_id` does not exist.
+    /// Panics with `"Not the grantor"` if caller is not the grantor.
+    /// Panics with `"Milestones already enabled"` if already enabled.
+    pub fn enable_performance_milestones(env: Env, schedule_id: u64, milestones: Vec<u32>) {
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .expect("Schedule not found");
+
+        schedule.grantor.require_auth();
+        assert!(!schedule.requires_milestones, "Milestones already enabled");
+
+        schedule.requires_milestones = true;
+
+        // Initialize milestone data
+        let mut milestone_data: Vec<PerformanceMilestone> = vec![&env];
+        for percentage in milestones.iter() {
+            milestone_data.push_back(PerformanceMilestone {
+                unlock_percentage: percentage,
+                attested: false,
+                attested_at: 0,
+            });
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Schedule(schedule_id), &schedule);
+        env.storage().instance().set(
+            &DataKey::PerformanceMilestones(schedule_id),
+            &milestone_data,
+        );
+
+        env.events().publish(
+            (symbol_short!("mile_en"), schedule.grantor.clone()),
+            schedule_id,
+        );
+    }
+
+    /// Attest a performance milestone (oracle only).
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"Oracle not initialized"` if oracle is not configured.
+    /// Panics with `"Not the oracle"` if caller is not the oracle.
+    /// Panics with `"Milestone index out of bounds"` if invalid index.
+    /// Panics with `"Milestone already attested"` if already attested.
+    pub fn attest_milestone(env: Env, schedule_id: u64, milestone_index: u32) {
+        let oracle: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PerformanceOracle)
+            .expect("Oracle not initialized");
+
+        oracle.require_auth();
+
+        let mut milestones: Vec<PerformanceMilestone> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PerformanceMilestones(schedule_id))
+            .expect("Schedule has no milestones");
+
+        assert!(
+            milestone_index < milestones.len(),
+            "Milestone index out of bounds"
+        );
+
+        let mut milestone = milestones.get(milestone_index).unwrap();
+        assert!(!milestone.attested, "Milestone already attested");
+
+        milestone.attested = true;
+        milestone.attested_at = env.ledger().timestamp();
+        milestones.set(milestone_index, milestone);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PerformanceMilestones(schedule_id), &milestones);
+
+        env.events().publish(
+            (symbol_short!("mile_att"), oracle),
+            (schedule_id, milestone_index),
+        );
+    }
+
+    /// Get performance milestones for a schedule.
+    pub fn get_milestones(env: Env, schedule_id: u64) -> Option<Vec<PerformanceMilestone>> {
+        env.storage()
+            .instance()
+            .get(&DataKey::PerformanceMilestones(schedule_id))
+    }
+
+    /// Initialize the NFT contract for vesting receipt tokens.
+    ///
+    /// Can only be called once by the upgrade authority.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"NFT contract already initialized"` if called again.
+    pub fn initialize_nft_contract(env: Env, nft_contract: Address) {
+        let authority = Self::read_upgrade_authority(&env);
+        authority.require_auth();
+
+        assert!(
+            !env.storage().instance().has(&DataKey::NftContract),
+            "NFT contract already initialized"
+        );
+
+        env.storage()
+            .instance()
+            .set(&DataKey::NftContract, &nft_contract);
+        env.events()
+            .publish((symbol_short!("nft_init"), nft_contract), ());
+    }
+
+    /// Get the configured NFT contract address.
+    pub fn nft_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::NftContract)
+    }
+
     /// Claim all currently vested but unclaimed tokens.
     ///
     /// Vested-but-unclaimed tokens remain claimable even after a revocation.
@@ -482,21 +925,48 @@ impl VestFlowContract {
     /// # Errors
     ///
     /// Panics with `"Schedule not found"` if `schedule_id` does not exist.
-    /// Panics with `"Nothing to claim yet"` if no tokens are currently claimable.
-    pub fn claim(env: Env, schedule_id: u64) {
+    pub fn claim(env: Env, schedule_id: u64) -> Result<(), VestFlowError> {
         Self::acquire_lock(&env);
 
         let mut schedule: VestingSchedule = env
             .storage()
             .instance()
             .get(&DataKey::Schedule(schedule_id))
-            .expect("Schedule not found");
+            .ok_or(VestFlowError::NotFound)?;
 
         schedule.beneficiary.require_auth();
 
         let now = env.ledger().timestamp();
-        let claimable = schedule.claimable_at(now);
-        assert!(claimable > 0, "Nothing to claim yet");
+        let mut claimable = schedule.claimable_at(now);
+
+        // If performance milestones are required, limit claimable amount
+        if schedule.requires_milestones {
+            let milestones: Vec<PerformanceMilestone> = env
+                .storage()
+                .instance()
+                .get(&DataKey::PerformanceMilestones(schedule_id))
+                .unwrap_or(vec![&env]);
+
+            let mut max_unlock_percentage: u32 = 0;
+            for milestone in milestones.iter() {
+                if milestone.attested && milestone.unlock_percentage > max_unlock_percentage {
+                    max_unlock_percentage = milestone.unlock_percentage;
+                }
+            }
+
+            let max_claimable = schedule
+                .total_amount
+                .checked_mul(max_unlock_percentage as i128)
+                .and_then(|n| n.checked_div(100))
+                .unwrap_or(0)
+                - schedule.claimed;
+
+            claimable = claimable.min(max_claimable.max(0));
+        }
+
+        if claimable <= 0 {
+            return Err(VestFlowError::NothingToClaim);
+        }
 
         schedule.claimed += claimable;
 
@@ -511,11 +981,16 @@ impl VestFlowContract {
             .instance()
             .set(&DataKey::Schedule(schedule_id), &schedule);
         env.events().publish(
-            (symbol_short!("claimed"), schedule.beneficiary.clone(), schedule.token.clone()),
+            (
+                symbol_short!("claimed"),
+                schedule.beneficiary.clone(),
+                schedule.token.clone(),
+            ),
             (schedule_id, claimable, schedule.claimed),
         );
 
         Self::release_lock(&env);
+        Ok(())
     }
 
     /// Revoke a vesting schedule (grantor only, revocable schedules only).
@@ -527,18 +1002,22 @@ impl VestFlowContract {
     /// Panics with `"Schedule not found"` if `schedule_id` does not exist.
     /// Panics with `"Schedule is not revocable"` if the schedule is irrevocable.
     /// Panics with `"Already revoked"` if the schedule has already been revoked.
-    pub fn revoke(env: Env, schedule_id: u64) {
+    pub fn revoke(env: Env, schedule_id: u64) -> Result<(), VestFlowError> {
         Self::acquire_lock(&env);
 
         let mut schedule: VestingSchedule = env
             .storage()
             .instance()
             .get(&DataKey::Schedule(schedule_id))
-            .expect("Schedule not found");
+            .ok_or(VestFlowError::NotFound)?;
 
         schedule.grantor.require_auth();
-        assert!(schedule.revocable, "Schedule is not revocable");
-        assert!(!schedule.revoked, "Already revoked");
+        if !schedule.revocable {
+            return Err(VestFlowError::NotRevocable);
+        }
+        if schedule.revoked {
+            return Err(VestFlowError::AlreadyRevoked);
+        }
 
         let now = env.ledger().timestamp();
         let vested = schedule.vested_at(now);
@@ -561,11 +1040,16 @@ impl VestFlowContract {
             .instance()
             .set(&DataKey::Schedule(schedule_id), &schedule);
         env.events().publish(
-            (symbol_short!("revoked"), schedule.grantor.clone(), schedule.token.clone()),
+            (
+                symbol_short!("revoked"),
+                schedule.grantor.clone(),
+                schedule.token.clone(),
+            ),
             (schedule_id, unvested, vested),
         );
 
         Self::release_lock(&env);
+        Ok(())
     }
 
     /// Transfer beneficiary rights to a new address.
@@ -578,15 +1062,21 @@ impl VestFlowContract {
     ///
     /// Panics with `"Schedule not found"` if `schedule_id` does not exist.
     /// Panics with `"Schedule has been revoked"` if the schedule was revoked.
-    pub fn transfer_beneficiary(env: Env, schedule_id: u64, new_beneficiary: Address) {
+    pub fn transfer_beneficiary(
+        env: Env,
+        schedule_id: u64,
+        new_beneficiary: Address,
+    ) -> Result<(), VestFlowError> {
         let mut schedule: VestingSchedule = env
             .storage()
             .instance()
             .get(&DataKey::Schedule(schedule_id))
-            .expect("Schedule not found");
+            .ok_or(VestFlowError::NotFound)?;
 
         schedule.beneficiary.require_auth();
-        assert!(!schedule.revoked, "Schedule has been revoked");
+        if schedule.revoked {
+            return Err(VestFlowError::ScheduleRevoked);
+        }
 
         let old_beneficiary = schedule.beneficiary.clone();
         schedule.beneficiary = new_beneficiary.clone();
@@ -599,6 +1089,7 @@ impl VestFlowContract {
             (symbol_short!("bnf_chng"), schedule_id),
             (old_beneficiary, new_beneficiary),
         );
+        Ok(())
     }
 
     /// Read a vesting schedule by ID.
@@ -606,11 +1097,11 @@ impl VestFlowContract {
     /// # Errors
     ///
     /// Panics with `"Schedule not found"` if `schedule_id` does not exist.
-    pub fn get_schedule(env: Env, schedule_id: u64) -> VestingSchedule {
+    pub fn get_schedule(env: Env, schedule_id: u64) -> Result<VestingSchedule, VestFlowError> {
         env.storage()
             .instance()
             .get(&DataKey::Schedule(schedule_id))
-            .expect("Schedule not found")
+            .ok_or(VestFlowError::NotFound)
     }
 
     /// How many schedules have been created in total.
@@ -685,6 +1176,7 @@ impl VestFlowContract {
 #[cfg(test)]
 mod test {
     use super::*;
+    use proptest::prelude::*;
     use soroban_sdk::{
         testutils::{Address as _, Ledger, LedgerInfo},
         token::{Client as TokenClient, StellarAssetClient},
@@ -947,7 +1439,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "Nothing to claim yet")]
+    #[should_panic(expected = "Error(Contract, #4)")]
     fn test_cannot_claim_before_vesting_starts() {
         let env = Env::default();
         env.mock_all_auths();
@@ -969,7 +1461,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "Schedule is not revocable")]
+    #[should_panic(expected = "Error(Contract, #2)")]
     fn test_cannot_revoke_irrevocable() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1143,6 +1635,11 @@ mod test {
             revocable: false,
             revoked: false,
             vested_at_revoke: 0,
+            paused: false,
+            paused_duration: 0,
+            paused_at: 0,
+            requires_milestones: false,
+            milestones: vec![&env],
         };
         // elapsed >> duration — must return exactly total_amount, not overflow
         assert_eq!(schedule.vested_at(u64::MAX), 1_000_000);
@@ -1169,6 +1666,11 @@ mod test {
             revocable: false,
             revoked: false,
             vested_at_revoke: 0,
+            paused: false,
+            paused_duration: 0,
+            paused_at: 0,
+            requires_milestones: false,
+            milestones: vec![&env],
         };
         // elapsed = duration / 2 → would overflow without checked_mul
         let half_elapsed = u64::MAX / 2;
@@ -1198,6 +1700,11 @@ mod test {
             revocable: false,
             revoked: false,
             vested_at_revoke: 0,
+            paused: false,
+            paused_duration: 0,
+            paused_at: 0,
+            requires_milestones: false,
+            milestones: vec![&env],
         };
         // Midpoint between cliff and end
         let mid = cliff + (duration - cliff) / 2;
@@ -1223,6 +1730,11 @@ mod test {
             revocable: false,
             revoked: false,
             vested_at_revoke: 0,
+            paused: false,
+            paused_duration: 0,
+            paused_at: 0,
+            requires_milestones: false,
+            milestones: vec![&env],
         };
         assert_eq!(schedule.claimable_at(u64::MAX), 0);
     }
@@ -1246,6 +1758,11 @@ mod test {
             revocable: false,
             revoked: false,
             vested_at_revoke: 0,
+            paused: false,
+            paused_duration: 0,
+            paused_at: 0,
+            requires_milestones: false,
+            milestones: vec![&env],
         };
         // Before end: 0 elapsed → 0 vested
         assert_eq!(schedule.vested_at(0), 0);
@@ -1280,7 +1797,7 @@ mod test {
     // --- Issue #11: double-claim same ledger ---
 
     #[test]
-    #[should_panic(expected = "Nothing to claim yet")]
+    #[should_panic(expected = "Error(Contract, #4)")]
     fn test_double_claim_same_ledger() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1305,6 +1822,116 @@ mod test {
         client.claim(&id);
         // Second claim at same timestamp — should panic
         client.claim(&id);
+    }
+
+    // --- Issue #65: graded vesting tests ---
+
+    #[test]
+    fn test_graded_vesting_milestones_unlock_at_correct_times() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        // 10% at t=600, 20% at t=1200, 70% at t=2400
+        set_time(&env, 0);
+        let milestones = soroban_sdk::vec![
+            &env,
+            GradedMilestone {
+                offset_secs: 600,
+                bps: 1_000
+            },
+            GradedMilestone {
+                offset_secs: 1200,
+                bps: 2_000
+            },
+            GradedMilestone {
+                offset_secs: 2400,
+                bps: 7_000
+            },
+        ];
+        let id = client.create_graded_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &10_000,
+            &0,
+            &false,
+            &milestones,
+        );
+
+        // Before first milestone: nothing
+        set_time(&env, 599);
+        assert_eq!(client.claimable(&id), 0);
+
+        // At first milestone: 10%
+        set_time(&env, 600);
+        assert_eq!(client.claimable(&id), 1_000);
+        client.claim(&id);
+        assert_eq!(token.balance(&beneficiary), 1_000);
+
+        // At second milestone: 20% more
+        set_time(&env, 1200);
+        assert_eq!(client.claimable(&id), 2_000);
+        client.claim(&id);
+        assert_eq!(token.balance(&beneficiary), 3_000);
+
+        // At final milestone: remaining 70%
+        set_time(&env, 2400);
+        assert_eq!(client.claimable(&id), 7_000);
+        client.claim(&id);
+        assert_eq!(token.balance(&beneficiary), 10_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "Milestones must sum to 10000 bps")]
+    fn test_graded_vesting_rejects_invalid_bps_sum() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        // Only 9000 bps — should panic
+        let milestones = soroban_sdk::vec![
+            &env,
+            GradedMilestone {
+                offset_secs: 600,
+                bps: 5_000
+            },
+            GradedMilestone {
+                offset_secs: 1200,
+                bps: 4_000
+            },
+        ];
+        client.create_graded_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &10_000,
+            &0,
+            &false,
+            &milestones,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Milestones required")]
+    fn test_graded_vesting_rejects_empty_milestones() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let milestones: soroban_sdk::Vec<GradedMilestone> = soroban_sdk::vec![&env];
+        client.create_graded_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &10_000,
+            &0,
+            &false,
+            &milestones,
+        );
     }
 
     // --- Issue #7: transfer_beneficiary tests ---
@@ -1336,7 +1963,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "Schedule has been revoked")]
+    #[should_panic(expected = "Error(Contract, #8)")]
     fn test_transfer_beneficiary_revoked_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1391,12 +2018,187 @@ mod test {
                 args: soroban_sdk::vec![
                     &env,
                     soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&id, &env),
-                    soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&attacker, &env),
+                    soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(
+                        &attacker, &env
+                    ),
                 ]
                 .into(),
                 sub_invokes: &[],
             },
         }]);
         client.transfer_beneficiary(&id, &attacker);
+    }
+
+    #[test]
+    fn test_second_token_support() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, first_token_addr, _) = setup(&env);
+
+        // Register a second token contract
+        let second_token_admin = Address::generate(&env);
+        let second_token_contract =
+            env.register_stellar_asset_contract_v2(second_token_admin.clone());
+        let second_token_addr = second_token_contract.address();
+
+        // Mint second token to grantor
+        StellarAssetClient::new(&env, &second_token_addr)
+            .mock_all_auths()
+            .mint(&grantor, &5000);
+
+        let first_token = TokenClient::new(&env, &first_token_addr);
+        let second_token = TokenClient::new(&env, &second_token_addr);
+
+        assert_eq!(first_token.balance(&grantor), 10_000);
+        assert_eq!(second_token.balance(&grantor), 5000);
+
+        // Create schedule with the second token
+        set_time(&env, 1000);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &second_token_addr,
+            &2000,
+            &1000,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+
+        // Verify balance after create_schedule: grantor sent 2000 second_token, contract received it
+        assert_eq!(second_token.balance(&grantor), 3000);
+        assert_eq!(second_token.balance(&client.address), 2000);
+        // First token grantor balance is unchanged
+        assert_eq!(first_token.balance(&grantor), 10_000);
+
+        // Halfway through vesting (500 elapsed of 1000 duration)
+        set_time(&env, 1500);
+        assert_eq!(client.claimable(&id), 1000);
+        client.claim(&id);
+
+        assert_eq!(second_token.balance(&beneficiary), 1000);
+        assert_eq!(second_token.balance(&client.address), 1000);
+        assert_eq!(first_token.balance(&beneficiary), 0);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+        #[test]
+        fn test_fuzz_vested_at_linear_cliff(
+            total_amount in 0..1_000_000_000_i128,
+            start_time in 0..1_000_000_u64,
+            duration in 1..1_000_000_u64,
+            cliff_duration in 0..1_000_000_u64,
+            now in 0..3_000_000_u64,
+            paused in any::<bool>(),
+            paused_duration in 0..1_000_000_u64,
+        ) {
+            let env = Env::default();
+            let cliff_duration = cliff_duration.min(duration);
+
+            let schedule = VestingSchedule {
+                id: 1,
+                grantor: Address::generate(&env),
+                beneficiary: Address::generate(&env),
+                token: Address::generate(&env),
+                total_amount,
+                claimed: 0,
+                start_time,
+                duration,
+                cliff_duration,
+                kind: VestingKind::LinearWithCliff,
+                revocable: false,
+                revoked: false,
+                vested_at_revoke: 0,
+                paused,
+                paused_duration,
+                paused_at: if paused { start_time + duration / 2 } else { 0 },
+                requires_milestones: false,
+                milestones: vec![&env],
+            };
+
+            let vested = schedule.vested_at(now);
+            prop_assert!(vested >= 0);
+            prop_assert!(vested <= total_amount);
+
+            if now < start_time {
+                prop_assert_eq!(vested, 0);
+            }
+        }
+
+        #[test]
+        fn test_fuzz_monotonicity_linear(
+            total_amount in 0..1_000_000_000_i128,
+            start_time in 0..1_000_000_u64,
+            duration in 1..1_000_000_u64,
+            now1 in 0..3_000_000_u64,
+            now2 in 0..3_000_000_u64,
+        ) {
+            let env = Env::default();
+            let schedule = VestingSchedule {
+                id: 1,
+                grantor: Address::generate(&env),
+                beneficiary: Address::generate(&env),
+                token: Address::generate(&env),
+                total_amount,
+                claimed: 0,
+                start_time,
+                duration,
+                cliff_duration: 0,
+                kind: VestingKind::Linear,
+                revocable: false,
+                revoked: false,
+                vested_at_revoke: 0,
+                paused: false,
+                paused_duration: 0,
+                paused_at: 0,
+                requires_milestones: false,
+                milestones: vec![&env],
+            };
+
+            let v1 = schedule.vested_at(now1);
+            let v2 = schedule.vested_at(now2);
+            if now1 <= now2 {
+                prop_assert!(v1 <= v2);
+            } else {
+                prop_assert!(v1 >= v2);
+            }
+        }
+
+        #[test]
+        fn test_fuzz_claimable_at(
+            total_amount in 0..1_000_000_000_i128,
+            claimed in 0..1_000_000_000_i128,
+            start_time in 0..1_000_000_u64,
+            duration in 1..1_000_000_u64,
+            now in 0..3_000_000_u64,
+        ) {
+            let env = Env::default();
+            let schedule = VestingSchedule {
+                id: 1,
+                grantor: Address::generate(&env),
+                beneficiary: Address::generate(&env),
+                token: Address::generate(&env),
+                total_amount,
+                claimed,
+                start_time,
+                duration,
+                cliff_duration: 0,
+                kind: VestingKind::Linear,
+                revocable: false,
+                revoked: false,
+                vested_at_revoke: 0,
+                paused: false,
+                paused_duration: 0,
+                paused_at: 0,
+                requires_milestones: false,
+                milestones: vec![&env],
+            };
+
+            let claimable = schedule.claimable_at(now);
+            prop_assert!(claimable >= 0);
+            prop_assert!(claimable <= total_amount);
+        }
     }
 }

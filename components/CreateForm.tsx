@@ -1,13 +1,13 @@
 "use client";
 import { useState } from "react";
-import { createSchedule, CONTRACT_ID, parseContractError, NETWORK } from "@/lib/stellar";
+import { createSchedule, CONTRACT_ID, parseContractError, NETWORK, NATIVE_TOKEN } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 
 export default function CreateForm() {
   const { publicKey } = useWallet();
   const [step, setStep] = useState<"form" | "confirm">("form");
   const [form, setForm] = useState({
-    beneficiary: "", amount: "", startDate: "", startTime: "00:00", durationDays: "",
+    beneficiary: "", tokenAddress: NATIVE_TOKEN, amount: "", startDate: "", startTime: "00:00", durationDays: "",
     cliffDays: "0", kind: "Linear" as "Linear" | "Cliff", revocable: true,
   });
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
@@ -32,7 +32,7 @@ export default function CreateForm() {
       const startTs = Math.floor(startDateTime.getTime() / 1000);
 
       const hash = await createSchedule(
-        publicKey, form.beneficiary, parseFloat(form.amount),
+        publicKey, form.beneficiary, form.tokenAddress, parseFloat(form.amount),
         startTs, parseInt(form.durationDays), parseInt(form.cliffDays),
         form.kind, form.revocable,
       );
@@ -72,8 +72,9 @@ export default function CreateForm() {
 
         <div className="flex flex-col gap-4 bg-zinc-900/50 rounded-xl p-4 border border-zinc-800">
           <SummaryItem label="Beneficiary" value={form.beneficiary} full />
+          <SummaryItem label="Token Address" value={form.tokenAddress} full />
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <SummaryItem label="Amount" value={`${form.amount} XLM`} />
+            <SummaryItem label="Amount" value={`${form.amount} ${form.tokenAddress === NATIVE_TOKEN ? "XLM" : "Tokens"}`} />
             <SummaryItem label="Vesting Type" value={form.kind} />
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -116,7 +117,11 @@ export default function CreateForm() {
         <input type="text" placeholder="G..." value={form.beneficiary} onChange={e => set("beneficiary", e.target.value)} required className="input" />
       </Field>
 
-      <Field label="Total Amount (XLM)">
+      <Field label="Token Address (SEP-41)">
+        <input type="text" placeholder="CDLZ..." value={form.tokenAddress} onChange={e => set("tokenAddress", e.target.value)} required className="input" />
+      </Field>
+
+      <Field label={`Total Amount (${form.tokenAddress === NATIVE_TOKEN ? "XLM" : "Tokens"})`}>
         <input type="number" placeholder="0.00" min="0.0000001" step="any" value={form.amount} onChange={e => set("amount", e.target.value)} required className="input" />
       </Field>
 

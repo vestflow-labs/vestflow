@@ -32,6 +32,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build generated contract bindings
+        run: npm run bindings:build
+
       - name: Build application
         run: npm run build
 
@@ -88,8 +91,14 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          target: wasm32-unknown-unknown
+          target: wasm32v1-none
           components: clippy, rustfmt
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli --version 26.0.0
 
       - name: Check formatting
         run: |
@@ -106,16 +115,37 @@ jobs:
           cd contracts
           cargo test --verbose
 
+      - name: Generate Rust coverage
+        run: |
+          cd contracts
+          cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+      - name: Upload Rust coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: contracts/lcov.info
+          flags: rust-contracts
+          name: vestflow-rust-contracts
+          fail_ci_if_error: false
+
       - name: Build contracts
         run: |
           cd contracts
-          cargo build --release --target wasm32-unknown-unknown
+          cargo build --release --target wasm32v1-none
+
+      - name: Report contract size and storage metrics
+        run: npm run contracts:metrics
+
+      - name: Verify generated TypeScript bindings are current
+        run: |
+          npm run bindings:generate
+          git diff --exit-code -- lib/bindings/vestflow
 
       - name: Upload contract artifacts
         uses: actions/upload-artifact@v4
         with:
           name: contract-wasm
-          path: contracts/target/wasm32-unknown-unknown/release/*.wasm
+          path: contracts/target/wasm32v1-none/release/*.wasm
           retention-days: 7
 
   # Security audit
