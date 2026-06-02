@@ -4,12 +4,14 @@ import Link from "next/link";
 import { ScheduleData, stroopsToXlm, truncate, vestingProgress, formatDate, claimVested, revokeSchedule, parseContractError } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import VestingChart from "@/components/VestingChart";
+import { useXlmPrice, formatUsd } from "@/lib/price";
 
 export default function ScheduleCard({ schedule, onAction }: { schedule: ScheduleData; onAction: () => void }) {
   const { publicKey } = useWallet();
   const [loading, setLoading] = useState<"claim" | "revoke" | null>(null);
   const [err, setErr] = useState("");
   const [showChart, setShowChart] = useState(false);
+  const xlmPrice = useXlmPrice();
 
   const now = Math.floor(Date.now() / 1000);
   const progress = vestingProgress(schedule, now);
@@ -57,8 +59,20 @@ export default function ScheduleCard({ schedule, onAction }: { schedule: Schedul
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-zinc-400">
         <div><span className="text-zinc-600">Grantor</span><p className="font-mono text-zinc-300 mt-0.5"><span className="sm:hidden">{truncate(schedule.grantor, 4, 3)}</span><span className="hidden sm:inline">{truncate(schedule.grantor)}</span></p></div>
         <div><span className="text-zinc-600">Beneficiary</span><p className="font-mono text-zinc-300 mt-0.5"><span className="sm:hidden">{truncate(schedule.beneficiary, 4, 3)}</span><span className="hidden sm:inline">{truncate(schedule.beneficiary)}</span></p></div>
-        <div><span className="text-zinc-600">Total</span><p className="text-zinc-300 mt-0.5">{stroopsToXlm(schedule.total_amount)} XLM</p></div>
-        <div><span className="text-zinc-600">Claimed</span><p className="text-zinc-300 mt-0.5">{stroopsToXlm(schedule.claimed)} XLM</p></div>
+        <div>
+          <span className="text-zinc-600">Total</span>
+          <p className="text-zinc-300 mt-0.5">{stroopsToXlm(schedule.total_amount)} XLM</p>
+          {xlmPrice !== null && (
+            <p className="text-zinc-500 text-xs">{formatUsd(schedule.total_amount, xlmPrice)}</p>
+          )}
+        </div>
+        <div>
+          <span className="text-zinc-600">Claimed</span>
+          <p className="text-zinc-300 mt-0.5">{stroopsToXlm(schedule.claimed)} XLM</p>
+          {xlmPrice !== null && (
+            <p className="text-zinc-500 text-xs">{formatUsd(schedule.claimed, xlmPrice)}</p>
+          )}
+        </div>
         <div><span className="text-zinc-600">Starts</span><p className="text-zinc-300 mt-0.5">{formatDate(schedule.start_time)}</p></div>
         <div><span className="text-zinc-600">Ends</span><p className="text-zinc-300 mt-0.5">{formatDate(schedule.start_time + schedule.duration)}</p></div>
       </div>
@@ -103,7 +117,9 @@ export default function ScheduleCard({ schedule, onAction }: { schedule: Schedul
         <div className="flex gap-2 mt-1">
           {isBeneficiary && claimableAmt > 0n && (
             <button onClick={handleClaim} disabled={!!loading} className="btn-primary text-xs rounded-lg px-3 py-1.5 font-semibold text-white disabled:opacity-60">
-              {loading === "claim" ? "Processing…" : `Claim ${stroopsToXlm(claimableAmt)} XLM`}
+              {loading === "claim"
+                ? "Processing…"
+                : `Claim ${stroopsToXlm(claimableAmt)} XLM${xlmPrice !== null ? ` (${formatUsd(claimableAmt, xlmPrice)})` : ""}`}
             </button>
           )}
           {isGrantor && schedule.revocable && progress < 100 && (

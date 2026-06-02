@@ -16,6 +16,7 @@ import {
   NETWORK,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
+import { useXlmPrice, formatUsd } from "@/lib/price";
 
 export default function ScheduleDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -25,6 +26,7 @@ export default function ScheduleDetailPage() {
   const [actionLoading, setActionLoading] = useState<"claim" | "revoke" | null>(null);
   const [err, setErr] = useState("");
   const [lastTxHash, setLastTxHash] = useState<string | null>(null);
+  const xlmPrice = useXlmPrice();
 
   const load = async () => {
     setLoading(true);
@@ -154,10 +156,16 @@ export default function ScheduleDetailPage() {
             <div>
               <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Total Amount</p>
               <p className="text-zinc-300">{stroopsToXlm(schedule.total_amount)} XLM</p>
+              {xlmPrice !== null && (
+                <p className="text-zinc-500 text-xs mt-0.5">{formatUsd(schedule.total_amount, xlmPrice)}</p>
+              )}
             </div>
             <div>
               <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Claimed</p>
               <p className="text-zinc-300">{stroopsToXlm(schedule.claimed)} XLM</p>
+              {xlmPrice !== null && (
+                <p className="text-zinc-500 text-xs mt-0.5">{formatUsd(schedule.claimed, xlmPrice)}</p>
+              )}
             </div>
             <div>
               <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Start Date</p>
@@ -217,7 +225,9 @@ export default function ScheduleDetailPage() {
                   disabled={!!actionLoading}
                   className="btn-primary rounded-xl px-5 py-2.5 font-semibold text-white text-sm disabled:opacity-60"
                 >
-                  {actionLoading === "claim" ? "Processing…" : `Claim ${stroopsToXlm(claimableAmt)} XLM`}
+                  {actionLoading === "claim"
+                    ? "Processing…"
+                    : `Claim ${stroopsToXlm(claimableAmt)} XLM${xlmPrice !== null ? ` (${formatUsd(claimableAmt, xlmPrice)})` : ""}`}
                 </button>
               )}
               {isGrantor && schedule.revocable && progress < 100 && (

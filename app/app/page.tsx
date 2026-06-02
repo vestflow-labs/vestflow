@@ -13,6 +13,7 @@ import {
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import Link from "next/link";
+import { useXlmPrice, formatUsd } from "@/lib/price";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
 type SortKey = "newest" | "ending-soon" | "largest-amount" | "status";
@@ -65,6 +66,7 @@ export default function DashboardPage() {
   const [sortBy, setSortBy] = useState<SortKey>("newest");
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState("");
+  const xlmPrice = useXlmPrice();
 
   const load = async () => {
     setLoading(true);
@@ -205,23 +207,32 @@ export default function DashboardPage() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
             <div className="card p-4">
               <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Total Granted</p>
-              <p className="text-xl font-bold text-white">{stroopsToXlm(stats.totalGranted)}</p>
-              <p className="text-xs text-zinc-500">XLM as grantor</p>
+              <p className="text-xl font-bold text-white">{stroopsToXlm(stats.totalGranted)} XLM</p>
+              {xlmPrice !== null && (
+                <p className="text-xs text-zinc-500 mt-0.5">{formatUsd(stats.totalGranted, xlmPrice)}</p>
+              )}
+              <p className="text-xs text-zinc-500 mt-1">as grantor</p>
             </div>
             <div className="card p-4">
               <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Total Receiving</p>
-              <p className="text-xl font-bold text-white">{stroopsToXlm(stats.totalReceiving)}</p>
-              <p className="text-xs text-zinc-500">XLM as beneficiary</p>
+              <p className="text-xl font-bold text-white">{stroopsToXlm(stats.totalReceiving)} XLM</p>
+              {xlmPrice !== null && (
+                <p className="text-xs text-zinc-500 mt-0.5">{formatUsd(stats.totalReceiving, xlmPrice)}</p>
+              )}
+              <p className="text-xs text-zinc-500 mt-1">as beneficiary</p>
             </div>
             <div className="card p-4">
               <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Claimable Now</p>
-              <p className="text-xl font-bold text-emerald-400">{stroopsToXlm(stats.claimableNow)}</p>
-              <p className="text-xs text-zinc-500">XLM available</p>
+              <p className="text-xl font-bold text-emerald-400">{stroopsToXlm(stats.claimableNow)} XLM</p>
+              {xlmPrice !== null && (
+                <p className="text-xs text-zinc-500 mt-0.5">{formatUsd(stats.claimableNow, xlmPrice)}</p>
+              )}
+              <p className="text-xs text-zinc-500 mt-1">available</p>
             </div>
             <div className="card p-4">
               <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Active Schedules</p>
               <p className="text-xl font-bold text-white">{stats.activeSchedules}</p>
-              <p className="text-xs text-zinc-500">Currently vesting</p>
+              <p className="text-xs text-zinc-500 mt-1">currently vesting</p>
             </div>
           </div>
         )}
