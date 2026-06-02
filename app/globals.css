@@ -63,6 +63,8 @@ body {
 
 .input {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   background: var(--input-bg);
   border: 1px solid var(--input-border);
   border-radius: 0.5rem;
@@ -71,6 +73,14 @@ body {
   color: var(--foreground);
   outline: none;
   transition: border-color 0.15s;
+}
+
+/* Fix date/time picker overflow and styling on mobile */
+input[type="date"],
+input[type="time"] {
+  min-height: 2.5rem;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .input:focus { border-color: #7c3aed; }

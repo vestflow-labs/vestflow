@@ -18,6 +18,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   };
 
   useEffect(() => {
+    if (process.env.NODE_ENV === "development") {
+      (window as any).setPublicKey = setPublicKey;
+    }
     const cached = localStorage.getItem(LS_KEY);
     if (cached) setPublicKeyState(cached);
     isConnected().then(connected => {
