@@ -120,6 +120,19 @@ export function queryEvents(params: EventQueryParams): IndexedEvent[] {
   const limit = Math.min(params.limit ?? 50, 200);
   const offset = params.offset ?? 0;
 
+  // Special-case: when requesting created schedules, exclude schedules
+  // that have been revoked so paginated results don't contain gaps
+  // caused by client-side filtering. Apply the exclusion in SQL so
+  // LIMIT/OFFSET operate on the final filtered set.
+  if (params.event_type === "schedule_created") {
+    const sql = `SELECT * FROM schedule_events ${where}
+                 AND schedule_id NOT IN (
+                   SELECT schedule_id FROM schedule_events WHERE event_type = 'revoked'
+                 )
+                 ORDER BY ledger DESC LIMIT ? OFFSET ?`;
+    return getDb().prepare(sql).all(...values, limit, offset) as IndexedEvent[];
+  }
+
   return getDb()
     .prepare(
       `SELECT * FROM schedule_events ${where} ORDER BY ledger DESC LIMIT ? OFFSET ?`

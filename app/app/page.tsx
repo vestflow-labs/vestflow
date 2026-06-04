@@ -12,6 +12,7 @@ import {
   formatDate,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
+import { useCountUp } from "@/lib/useCountUp";
 import Link from "next/link";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
@@ -25,18 +26,34 @@ interface DashboardStats {
   activeSchedules: number;
 }
 
+/**
+ * Build a CSV string for the given schedules.
+ * Columns: id, kind, grantor, beneficiary, token,
+ *          total_amount_xlm, vested_xlm, claimed_xlm,
+ *          start_date, end_date, cliff_date,
+ *          revocable, revoked, status
+ * (#87 – CSV export for vesting schedule history)
+ */
 function buildCSV(rows: ScheduleData[]): string {
   const now = Math.floor(Date.now() / 1000);
   const headers = [
     "id", "kind", "grantor", "beneficiary", "token",
-    "total_amount_xlm", "claimed_xlm",
+    "total_amount_xlm", "vested_xlm", "claimed_xlm",
     "start_date", "end_date", "cliff_date",
     "revocable", "revoked", "status",
   ];
-  const escape = (v: string | number | boolean) => `"${String(v).replace(/"/g, '""')}"`;
-  const dataRows = rows.map(s => {
+  const escape = (v: string | number | boolean) =>
+    `"${String(v).replace(/"/g, '""')}"`;
+
+  const dataRows = rows.map((s) => {
     const progress = vestingProgress(s, now);
-    const status = s.revoked ? "Revoked" : progress >= 100 ? "Fully Vested" : "Vesting";
+    const vestedXlm = (Number(s.total_amount) * progress) / 100 / 10_000_000;
+    const status = s.revoked
+      ? "Revoked"
+      : progress >= 100
+      ? "Fully Vested"
+      : "Vesting";
+
     return [
       s.id,
       s.kind,
@@ -44,6 +61,7 @@ function buildCSV(rows: ScheduleData[]): string {
       s.beneficiary,
       s.token,
       (Number(s.total_amount) / 10_000_000).toFixed(7),
+      vestedXlm.toFixed(7),
       (Number(s.claimed) / 10_000_000).toFixed(7),
       formatDate(s.start_time),
       formatDate(s.start_time + s.duration),
@@ -51,9 +69,88 @@ function buildCSV(rows: ScheduleData[]): string {
       s.revocable,
       s.revoked,
       status,
-    ].map(escape).join(",");
+    ]
+      .map(escape)
+      .join(",");
   });
+
   return [headers.map(escape).join(","), ...dataRows].join("\n");
+}
+
+// ── Animated stats bar (#94) ──────────────────────────────────────────────────
+
+function AnimatedStatCard({
+  label,
+  value,
+  unit,
+  color,
+  decimals = 4,
+  enabled,
+}: {
+  label: string;
+  value: number;
+  unit: string;
+  color?: string;
+  decimals?: number;
+  enabled: boolean;
+}) {
+  const animated = useCountUp(value, 1200, enabled);
+  const display = animated.toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: decimals,
+  });
+  return (
+    <div className="card p-4">
+      <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">{label}</p>
+      <p className={`text-xl font-bold tabular-nums ${color ?? "text-white"}`}>{display}</p>
+      <p className="text-xs text-zinc-500">{unit}</p>
+    </div>
+  );
+}
+
+function AnimatedStats({ stats }: { stats: DashboardStats }) {
+  const [fired, setFired] = useState(false);
+  useEffect(() => {
+    // Trigger animation on the frame after mount so we get the count-up from 0
+    const id = requestAnimationFrame(() => setFired(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
+
+  const toXlm = (v: bigint) => Number(v) / 10_000_000;
+
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+      <AnimatedStatCard
+        label="Total Granted"
+        value={toXlm(stats.totalGranted)}
+        unit="XLM as grantor"
+        decimals={4}
+        enabled={fired}
+      />
+      <AnimatedStatCard
+        label="Total Receiving"
+        value={toXlm(stats.totalReceiving)}
+        unit="XLM as beneficiary"
+        decimals={4}
+        enabled={fired}
+      />
+      <AnimatedStatCard
+        label="Claimable Now"
+        value={toXlm(stats.claimableNow)}
+        unit="XLM available"
+        color="text-emerald-400"
+        decimals={4}
+        enabled={fired}
+      />
+      <AnimatedStatCard
+        label="Active Schedules"
+        value={stats.activeSchedules}
+        unit="Currently vesting"
+        decimals={0}
+        enabled={fired}
+      />
+    </div>
+  );
 }
 
 export default function DashboardPage() {
@@ -202,28 +299,7 @@ export default function DashboardPage() {
 
         {/* Summary stats */}
         {publicKey && stats && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-            <div className="card p-4">
-              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Total Granted</p>
-              <p className="text-xl font-bold text-white">{stroopsToXlm(stats.totalGranted)}</p>
-              <p className="text-xs text-zinc-500">XLM as grantor</p>
-            </div>
-            <div className="card p-4">
-              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Total Receiving</p>
-              <p className="text-xl font-bold text-white">{stroopsToXlm(stats.totalReceiving)}</p>
-              <p className="text-xs text-zinc-500">XLM as beneficiary</p>
-            </div>
-            <div className="card p-4">
-              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Claimable Now</p>
-              <p className="text-xl font-bold text-emerald-400">{stroopsToXlm(stats.claimableNow)}</p>
-              <p className="text-xs text-zinc-500">XLM available</p>
-            </div>
-            <div className="card p-4">
-              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Active Schedules</p>
-              <p className="text-xl font-bold text-white">{stats.activeSchedules}</p>
-              <p className="text-xs text-zinc-500">Currently vesting</p>
-            </div>
-          </div>
+          <AnimatedStats stats={stats} />
         )}
 
         {/* Role filter tabs (only when wallet connected and there are schedules) */}

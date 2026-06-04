@@ -17,7 +17,9 @@ const cspHeader = [
 ].join("; ");
 
 const nextConfig: NextConfig = {
-  turbopack: {},
+  turbopack: {
+    root: process.cwd(),
+  },
   async headers() {
     return [
       {

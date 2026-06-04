@@ -1,0 +1,59 @@
+{
+  "name": "@vestflow/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for interacting with the VestFlow vesting contract on Stellar/Soroban.",
+  "license": "MIT",
+  "author": "VestFlow Labs",
+  "homepage": "https://github.com/vestflow-labs/vestflow",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vestflow-labs/vestflow.git",
+    "directory": "sdk"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^15.1.0"
+  },
+  "peerDependencies": {
+    "@stellar/freighter-api": "^6.0.1"
+  },
+  "peerDependenciesMeta": {
+    "@stellar/freighter-api": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  },
+  "keywords": [
+    "stellar",
+    "soroban",
+    "vesting",
+    "blockchain",
+    "sdk",
+    "vestflow"
+  ]
+}

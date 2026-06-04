@@ -8,6 +8,7 @@
     "dev": "ts-node --esm src/poller.ts",
     "dev:server": "ts-node --esm src/server.ts",
     "dev:all": "concurrently \"npm run dev\" \"npm run dev:server\"",
+    "test:pagination": "ts-node --esm test/pagination_test.ts",
     "build": "tsc",
     "start": "node dist/poller.js",
     "start:server": "node dist/server.js"

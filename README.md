@@ -1,5 +1,8 @@
 # VestFlow
 
+[![CI](https://github.com/vestflow-labs/vestflow/actions/workflows/ci.yml/badge.svg)](https://github.com/vestflow-labs/vestflow/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/vestflow-labs/vestflow/branch/main/graph/badge.svg)](https://codecov.io/gh/vestflow-labs/vestflow)
+
 **Trustless token vesting schedules on Stellar / Soroban.**
 
 VestFlow lets anyone lock tokens into a smart contract and release them to a beneficiary over time — linearly or all-at-once after a cliff. No custodian, no multisig, no trust required.
@@ -344,6 +347,25 @@ cargo test
 cargo build --target wasm32v1-none --release
 ```
 
+Contract CI also tracks release Wasm size and the worst-case storage entries touched when a schedule is created:
+
+```bash
+npm run contracts:metrics
+```
+
+The current storage benchmark for `create_schedule` is 4 instance-storage entries: the schedule record, schedule count, grantor schedule index, and beneficiary schedule index.
+
+### Contract TypeScript bindings
+
+Typed contract bindings are generated from the release Wasm and committed under `lib/bindings/vestflow`.
+
+```bash
+npm run bindings:generate
+npm run bindings:build
+```
+
+CI regenerates the bindings and fails if the generated files drift from the committed ABI.
+
 The test suite covers:
 
 | Test | What it verifies |
@@ -398,6 +420,8 @@ DEPLOYER_KEY=my-mainnet-key ./scripts/deploy-mainnet.sh
 ```
 
 The script builds the WASM, prompts for confirmation, deploys, and prints the contract ID to add to `.env.local`.
+
+Each deploy script records successful deployments in [DEPLOYMENTS.md](DEPLOYMENTS.md). Set `VERSION=vX.Y.Z` when deploying a tagged release, and use `UPDATE_DEPLOYMENTS=0` to skip registry updates for dry runs or one-off experiments.
 
 ---
 
