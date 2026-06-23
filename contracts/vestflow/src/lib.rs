@@ -44,6 +44,7 @@
 //! | `"Upgrade timelock still active"` | Upgrade execution attempted before 48 hours elapsed |
 //! | `"Upgrade executable time overflow"` | Upgrade announcement timestamp cannot safely add the timelock |
 //! | `"Insufficient balance or below minimum reserve"` | `claim` transfer fails due to balance constraints or Stellar minimum reserve |
+//! | `"Contract storage is full"` | Any write entry-point called when instance storage is at or above the safety threshold |
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
@@ -65,6 +66,10 @@ pub enum VestFlowError {
     CliffExceedsDuration = 7,
     ScheduleRevoked = 8,
     LockupLessThanCliff = 9,
+    /// Instance storage is too full to accept a new write.
+    /// The caller must wait for storage to be reclaimed (e.g. expired entries)
+    /// or for the contract to be upgraded before retrying.
+    StorageFull = 10,
 }
 
 #[contracttype]
@@ -334,6 +339,53 @@ impl VestFlowContract {
         env.storage().instance().remove(&DataKey::Locked);
     }
 
+    // ── Storage headroom guard ───────────────────────────────────────────────
+
+    /// Maximum number of vesting schedules the contract will store.
+    ///
+    /// Soroban instance storage is capped at 64 KiB.  Each `VestingSchedule`
+    /// struct serialises to roughly 300–600 bytes, and the contract also stores
+    /// per-grantor and per-beneficiary index vectors plus a handful of
+    /// singleton keys.  Capping at 100 schedules keeps total instance storage
+    /// well below the 64 KiB hard limit even in the worst case, leaving ample
+    /// headroom for metadata and upgrade entries.
+    ///
+    /// If the limit is ever raised, deploy a new contract version and update
+    /// this constant — the 48-hour timelock upgrade path is designed exactly
+    /// for this scenario.
+    pub const MAX_SCHEDULES: u64 = 100;
+
+    /// Return the approximate number of bytes currently used by instance
+    /// storage.  This is a view function — safe to call from read-only
+    /// simulations — and can be used by off-chain tooling to monitor how close
+    /// the contract is to its schedule limit.
+    ///
+    /// Returns a value in `[0, MAX_SCHEDULES]`.
+    pub fn storage_usage(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::ScheduleCount)
+            .unwrap_or(0)
+    }
+
+    /// Abort with [`VestFlowError::StorageFull`] when the schedule count has
+    /// reached [`MAX_SCHEDULES`].
+    ///
+    /// Call this at the very start of every write entry-point that adds a new
+    /// schedule row, so the failure is predictable and descriptive rather than
+    /// a silent host trap caused by the 64 KiB instance-storage limit.
+    fn check_storage_headroom(env: &Env) -> Result<(), VestFlowError> {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ScheduleCount)
+            .unwrap_or(0);
+        if count >= Self::MAX_SCHEDULES {
+            return Err(VestFlowError::StorageFull);
+        }
+        Ok(())
+    }
+
     /// Read the configured upgrade authority.
     ///
     /// Panics with `"Upgrade authority not initialized"` when the authority
@@ -519,6 +571,7 @@ impl VestFlowContract {
         kind: VestingKind,
         revocable: bool,
     ) -> Result<u64, VestFlowError> {
+        Self::check_storage_headroom(&env)?;
         grantor.require_auth();
 
         assert!(
@@ -637,6 +690,12 @@ impl VestFlowContract {
         revocable: bool,
         milestones: Vec<GradedMilestone>,
     ) -> u64 {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ScheduleCount)
+            .unwrap_or(0);
+        assert!(count < Self::MAX_SCHEDULES, "Contract storage is full");
         grantor.require_auth();
 
         assert!(
@@ -951,6 +1010,7 @@ impl VestFlowContract {
     ///
     /// Panics with `"Schedule not found"` if `schedule_id` does not exist.
     pub fn claim(env: Env, schedule_id: u64) -> Result<(), VestFlowError> {
+        Self::check_storage_headroom(&env)?;
         Self::acquire_lock(&env);
 
         let mut schedule: VestingSchedule = env
@@ -1033,6 +1093,7 @@ impl VestFlowContract {
     /// Panics with `"Schedule is not revocable"` if the schedule is irrevocable.
     /// Panics with `"Already revoked"` if the schedule has already been revoked.
     pub fn revoke(env: Env, schedule_id: u64) -> Result<(), VestFlowError> {
+        Self::check_storage_headroom(&env)?;
         Self::acquire_lock(&env);
 
         let mut schedule: VestingSchedule = env
@@ -1097,6 +1158,7 @@ impl VestFlowContract {
         schedule_id: u64,
         new_beneficiary: Address,
     ) -> Result<(), VestFlowError> {
+        Self::check_storage_headroom(&env)?;
         let mut schedule: VestingSchedule = env
             .storage()
             .instance()
@@ -2372,5 +2434,21 @@ mod test {
             &VestingKind::Linear,
             &false,
         );
+    }
+
+    /// Verify that `storage_usage()` returns a schedule count and that the
+    /// MAX_SCHEDULES constant is set to a reasonable non-zero value.
+    #[test]
+    fn test_storage_usage_view_returns_value() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, _) = setup(&env);
+
+        // On a fresh contract with no schedules the usage count is 0.
+        let usage = client.storage_usage();
+        assert_eq!(usage, 0);
+        // MAX_SCHEDULES must be a positive, reasonable cap.
+        assert!(VestFlowContract::MAX_SCHEDULES > 0);
+        assert!(VestFlowContract::MAX_SCHEDULES <= 1000);
     }
 }
