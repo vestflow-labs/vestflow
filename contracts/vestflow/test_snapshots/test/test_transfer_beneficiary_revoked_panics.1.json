@@ -83,6 +83,9 @@
                   "u64": 0
                 },
                 {
+                  "u64": 0
+                },
+                {
                   "vec": [
                     {
                       "symbol": "Linear"
@@ -350,6 +353,14 @@
                                     "symbol": "Linear"
                                   }
                                 ]
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "lockup_duration"
+                              },
+                              "val": {
+                                "u64": 0
                               }
                             },
                             {

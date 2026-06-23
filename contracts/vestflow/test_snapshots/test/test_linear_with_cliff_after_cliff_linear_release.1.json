@@ -83,6 +83,9 @@
                   "u64": 400
                 },
                 {
+                  "u64": 400
+                },
+                {
                   "vec": [
                     {
                       "symbol": "LinearWithCliff"
@@ -373,6 +376,14 @@
                                     "symbol": "LinearWithCliff"
                                   }
                                 ]
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "lockup_duration"
+                              },
+                              "val": {
+                                "u64": 400
                               }
                             },
                             {

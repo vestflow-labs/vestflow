@@ -1,0 +1,241 @@
+cargo : warning: 
+unused `core::result::
+Result` that must be 
+used
+At line:1 char:1
++ cargo test --no-run 
+2>&1 | Out-File 
+-Encoding ASCII 
+test_err.ascii.tx ...
++ ~~~~~~~~~~~~~~~~~~~~
+~~~~
+    + CategoryInfo    
+          : NotSpeci  
+  fied: (warning: u   
+ nused...at must b    
+e used:String) []    
+, RemoteException
+    + FullyQualifiedE 
+   rrorId : NativeCo  
+  mmandError
+ 
+    --> vestflow\src\l
+ib.rs:1002:9
+     |
+1002 | /         
+token_client
+1003 | |             
+.try_transfer(
+1004 | |              
+   &contract_address,
+1005 | |              
+   
+&schedule.beneficiary,
+...    |
+1008 | |             
+.expect("Insufficient 
+balance or below 
+minimum reserve");
+     | |______________
+______________________
+______________________
+__________^
+     |
+     = note: this 
+`Result` may be an 
+`Err` variant, which 
+should be handled
+     = note: `#[warn(u
+nused_must_use)]` 
+(part of 
+`#[warn(unused)]`) on 
+by default
+help: use `let _ = 
+...` to ignore the 
+resulting value
+     |
+1002 |         let _ 
+= token_client
+     |         +++++++
+
+warning: `vestflow` 
+(lib) generated 1 
+warning
+   Compiling vestflow 
+v0.1.0 (C:\Users\ADMIN
+\Desktop\midea-drips\v
+estflow\contracts\vest
+flow)
+error[E0061]: this 
+method takes 10 
+arguments but 9 
+arguments were 
+supplied
+    --> vestflow\src\l
+ib.rs:1865:16
+     |
+1865 |         client.
+create_schedule(
+     |                
+^^^^^^^^^^^^^^^
+...
+1873 |             
+&VestingKind::Linear,
+     |             
+-------------------- 
+argument #8 of type 
+`&u64` is missing
+     |
+note: method defined 
+here
+    --> vestflow\src\l
+ib.rs:509:12
+     |
+ 509 |     pub fn 
+create_schedule(
+     |            
+^^^^^^^^^^^^^^^
+...
+ 518 |         
+lockup_duration: u64,
+     |         
+--------------------
+help: provide the 
+argument
+     |
+1865 ~         client.
+create_schedule(
+1866 +             
+&grantor,
+1867 +             
+&grantor,
+1868 +             
+&token_addr,
+1869 +             
+&1000,
+1870 +             &0,
+1871 +             
+&1000,
+1872 +             &0,
+1873 +             /* 
+&u64 */,
+1874 +             
+&VestingKind::Linear,
+1875 +             
+&false,
+1876 ~         );
+     |
+
+error[E0061]: this 
+method takes 10 
+arguments but 9 
+arguments were 
+supplied
+    --> vestflow\src\l
+ib.rs:2145:25
+     |
+2145 |         let id 
+= client.create_schedu
+le(
+     |                
+         
+^^^^^^^^^^^^^^^
+...
+2153 |             
+&VestingKind::Linear,
+     |             
+-------------------- 
+argument #8 of type 
+`&u64` is missing
+     |
+note: method defined 
+here
+    --> vestflow\src\l
+ib.rs:509:12
+     |
+ 509 |     pub fn 
+create_schedule(
+     |            
+^^^^^^^^^^^^^^^
+...
+ 518 |         
+lockup_duration: u64,
+     |         
+--------------------
+help: provide the 
+argument
+     |
+2145 |         let id 
+= client.create_schedu
+le(
+ ...
+2152 |             &0,
+2153 ~             /* 
+&u64 */,
+2154 ~             
+&VestingKind::Linear,
+     |
+
+error[E0063]: missing 
+field 
+`lockup_duration` in 
+initializer of 
+`VestingSchedule`
+    --> vestflow\src\l
+ib.rs:2188:28
+     |
+2188 |             
+let schedule = 
+VestingSchedule {
+     |                
+            
+^^^^^^^^^^^^^^^ 
+missing 
+`lockup_duration`
+
+error[E0063]: missing 
+field 
+`lockup_duration` in 
+initializer of 
+`VestingSchedule`
+    --> vestflow\src\l
+ib.rs:2227:28
+     |
+2227 |             
+let schedule = 
+VestingSchedule {
+     |                
+            
+^^^^^^^^^^^^^^^ 
+missing 
+`lockup_duration`
+
+error[E0063]: missing 
+field 
+`lockup_duration` in 
+initializer of 
+`VestingSchedule`
+    --> vestflow\src\l
+ib.rs:2266:28
+     |
+2266 |             
+let schedule = 
+VestingSchedule {
+     |                
+            
+^^^^^^^^^^^^^^^ 
+missing 
+`lockup_duration`
+
+Some errors have 
+detailed 
+explanations: E0061, 
+E0063.
+For more information 
+about an error, try 
+`rustc --explain 
+E0061`.
+error: could not 
+compile `vestflow` 
+(lib test) due to 5 
+previous errors

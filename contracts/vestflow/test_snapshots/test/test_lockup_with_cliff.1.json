@@ -80,15 +80,15 @@
                   "u64": 1000
                 },
                 {
-                  "u64": 0
+                  "u64": 200
                 },
                 {
-                  "u64": 0
+                  "u64": 400
                 },
                 {
                   "vec": [
                     {
-                      "symbol": "Linear"
+                      "symbol": "LinearWithCliff"
                     }
                   ]
                 },
@@ -126,6 +126,8 @@
         }
       ]
     ],
+    [],
+    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
@@ -150,7 +152,7 @@
   "ledger": {
     "protocol_version": 22,
     "sequence_number": 0,
-    "timestamp": 500,
+    "timestamp": 400,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 10,
     "min_persistent_entry_ttl": 10,
@@ -307,7 +309,7 @@
                               "val": {
                                 "i128": {
                                   "hi": 0,
-                                  "lo": 500
+                                  "lo": 250
                                 }
                               }
                             },
@@ -316,7 +318,7 @@
                                 "symbol": "cliff_duration"
                               },
                               "val": {
-                                "u64": 0
+                                "u64": 200
                               }
                             },
                             {
@@ -350,7 +352,7 @@
                               "val": {
                                 "vec": [
                                   {
-                                    "symbol": "Linear"
+                                    "symbol": "LinearWithCliff"
                                   }
                                 ]
                               }
@@ -360,7 +362,7 @@
                                 "symbol": "lockup_duration"
                               },
                               "val": {
-                                "u64": 0
+                                "u64": 400
                               }
                             },
                             {
@@ -625,7 +627,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 500
+                          "lo": 750
                         }
                       }
                     },
@@ -771,7 +773,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 500
+                          "lo": 250
                         }
                       }
                     },

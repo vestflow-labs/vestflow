@@ -77,6 +77,9 @@
                   "u64": 0
                 },
                 {
+                  "u64": 0
+                },
+                {
                   "bool": false
                 },
                 {
@@ -445,6 +448,14 @@
                                     "symbol": "Graded"
                                   }
                                 ]
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "lockup_duration"
+                              },
+                              "val": {
+                                "u64": 0
                               }
                             },
                             {

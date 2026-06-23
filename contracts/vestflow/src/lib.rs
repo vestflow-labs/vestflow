@@ -682,7 +682,7 @@ impl VestFlowContract {
             paused_duration: 0,
             paused_at: 0,
             requires_milestones: false,
-            milestones,
+            milestones: milestones.clone(),
         };
 
         env.storage()
@@ -715,7 +715,7 @@ impl VestFlowContract {
 
         env.events().publish(
             (symbol_short!("created"), id),
-            (grantor, beneficiary, token, total_amount, start_time, duration, lockup_duration, VestingKind::Graded, revocable, milestones),
+            (grantor, beneficiary, token, total_amount, start_time, duration, lockup_duration, VestingKind::Graded, revocable, milestones.clone()),
         );
 
         id
@@ -1373,6 +1373,48 @@ mod test {
     }
 
     #[test]
+    fn test_linear_vesting_non_divisible_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        // 100 stroops over 3 seconds
+        set_time(&env, 1000);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &100_i128,
+            &1000,
+            &3,
+            &0,   // cliff_duration
+            &0,   // lockup_duration
+            &VestingKind::Linear,
+            &true, // revocable
+        );
+
+        // t=1001 (1s elapsed): floor(100 * 1 / 3) = 33
+        set_time(&env, 1001);
+        assert_eq!(client.claimable(&id), 33);
+        client.claim(&id);
+        assert_eq!(token.balance(&beneficiary), 33);
+
+        // t=1002 (2s elapsed): floor(100 * 2 / 3) = 66. claimed=33. claimable = 66 - 33 = 33.
+        set_time(&env, 1002);
+        assert_eq!(client.claimable(&id), 33);
+        client.claim(&id);
+        assert_eq!(token.balance(&beneficiary), 66);
+
+        // t=1003 (3s elapsed): fully vested. claimed=66. claimable = 100 - 66 = 34.
+        // The remainder (1 stroop) is correctly included in the final release.
+        set_time(&env, 1003);
+        assert_eq!(client.claimable(&id), 34);
+        client.claim(&id);
+        assert_eq!(token.balance(&beneficiary), 100);
+    }
+
+    #[test]
     fn test_cliff_vesting() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1828,6 +1870,7 @@ mod test {
             &0,
             &1000,
             &0,
+            &0,
             &VestingKind::Linear,
             &false,
         );
@@ -2108,6 +2151,7 @@ mod test {
             &1000,
             &1000,
             &0,
+            &0,
             &VestingKind::Linear,
             &true,
         );
@@ -2153,6 +2197,7 @@ mod test {
                 start_time,
                 duration,
                 cliff_duration,
+                lockup_duration: 0,
                 kind: VestingKind::LinearWithCliff,
                 revocable: false,
                 revoked: false,
@@ -2192,6 +2237,7 @@ mod test {
                 start_time,
                 duration,
                 cliff_duration: 0,
+                lockup_duration: 0,
                 kind: VestingKind::Linear,
                 revocable: false,
                 revoked: false,
@@ -2231,6 +2277,7 @@ mod test {
                 start_time,
                 duration,
                 cliff_duration: 0,
+                lockup_duration: 0,
                 kind: VestingKind::Linear,
                 revocable: false,
                 revoked: false,
@@ -2247,7 +2294,6 @@ mod test {
             prop_assert!(claimable <= total_amount);
         }
     }
-}
 
     #[test]
     fn test_lockup_prevents_early_claim() {
@@ -2301,9 +2347,9 @@ mod test {
         assert_eq!(client.claimable(&id), 0);
 
         set_time(&env, 400);
-        assert_eq!(client.claimable(&id), 200);
+        assert_eq!(client.claimable(&id), 250);
         client.claim(&id);
-        assert_eq!(token.balance(&beneficiary), 200);
+        assert_eq!(token.balance(&beneficiary), 250);
     }
 
     #[test]

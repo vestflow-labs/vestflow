@@ -83,6 +83,9 @@
                   "u64": 500
                 },
                 {
+                  "u64": 500
+                },
+                {
                   "vec": [
                     {
                       "symbol": "Cliff"
@@ -352,6 +355,14 @@
                                     "symbol": "Cliff"
                                   }
                                 ]
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "lockup_duration"
+                              },
+                              "val": {
+                                "u64": 500
                               }
                             },
                             {

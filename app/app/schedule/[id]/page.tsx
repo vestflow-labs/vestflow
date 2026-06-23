@@ -120,7 +120,36 @@ export default function ScheduleDetailPage() {
   const progress = vestingProgress(schedule, now);
   const isBeneficiary = publicKey === schedule.beneficiary;
   const isGrantor = publicKey === schedule.grantor;
-  const vested = BigInt(Math.floor(Number(schedule.total_amount) * progress / 100));
+  
+  // Precise vested calculation matching contract lib.rs
+  let vested = 0n;
+  const elapsed = BigInt(Math.max(0, now - schedule.start_time));
+  const duration = BigInt(schedule.duration);
+  const total = schedule.total_amount;
+
+  if (schedule.revoked) {
+    // Note: in a real app we'd need vested_at_revoke from the contract
+    // For now we use the claimed amount as a floor if revoked
+    vested = schedule.claimed; 
+  } else if (now >= schedule.start_time) {
+    if (schedule.kind === "Linear") {
+      vested = elapsed >= duration ? total : (total * elapsed) / duration;
+    } else if (schedule.kind === "Cliff") {
+      vested = elapsed >= BigInt(schedule.cliff_duration) ? total : 0n;
+    } else if (schedule.kind === "LinearWithCliff") {
+      const cliff = BigInt(schedule.cliff_duration);
+      if (elapsed < cliff) {
+        vested = 0n;
+      } else if (elapsed >= duration) {
+        vested = total;
+      } else {
+        const linearDuration = duration - cliff;
+        const linearElapsed = elapsed - cliff;
+        vested = (total * linearElapsed) / linearDuration;
+      }
+    }
+  }
+
   const claimableAmt = vested > schedule.claimed ? vested - schedule.claimed : 0n;
   const isNative = schedule.token === NATIVE_TOKEN;
   const tokenSymbol = isNative ? "XLM" : `Token (${schedule.token.slice(0, 4)}...${schedule.token.slice(-4)})`;
