@@ -209,6 +209,89 @@ export async function revokeSchedule(publicKey: string, scheduleId: number): Pro
   return buildAndSend(publicKey, "revoke", [nativeToScVal(scheduleId, { type: "u64" })]);
 }
 
+// ---------- Admin Recovery ----------
+
+export interface RecoveryRequest {
+  schedule_id: number;
+  new_beneficiary: string;
+  requested_by: string;
+  requested_at: number;
+  executable_at: number;
+}
+
+/**
+ * Read the pending recovery request for a schedule, if any.
+ * Returns null if no request is open.
+ */
+export async function getRecoveryRequest(
+  scheduleId: number,
+  publicKey?: string
+): Promise<RecoveryRequest | null> {
+  try {
+    const val = await simulate(
+      "recovery_request",
+      [nativeToScVal(scheduleId, { type: "u64" })],
+      publicKey
+    );
+    const native = scValToNative(val);
+    if (!native) return null;
+    return {
+      schedule_id: Number(native.schedule_id ?? scheduleId),
+      new_beneficiary: native.new_beneficiary?.toString() ?? "",
+      requested_by: native.requested_by?.toString() ?? "",
+      requested_at: Number(native.requested_at ?? 0),
+      executable_at: Number(native.executable_at ?? 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * File an emergency recovery request.
+ * Only the grantor of the schedule may call this.
+ * Starts a 7-day timelock before the admin can redirect the beneficiary.
+ */
+export async function requestAdminRecovery(
+  publicKey: string,
+  scheduleId: number,
+  newBeneficiary: string
+): Promise<string> {
+  return buildAndSend(publicKey, "request_admin_recovery", [
+    nativeToScVal(publicKey, { type: "address" }),
+    nativeToScVal(scheduleId, { type: "u64" }),
+    nativeToScVal(newBeneficiary, { type: "address" }),
+  ]);
+}
+
+/**
+ * Cancel a pending recovery request.
+ * May be called by the grantor who filed it, or by the upgrade authority.
+ */
+export async function cancelAdminRecovery(
+  publicKey: string,
+  scheduleId: number
+): Promise<string> {
+  return buildAndSend(publicKey, "cancel_admin_recovery", [
+    nativeToScVal(publicKey, { type: "address" }),
+    nativeToScVal(scheduleId, { type: "u64" }),
+  ]);
+}
+
+/**
+ * Execute a pending recovery after the 7-day timelock.
+ * Only callable by the upgrade authority address.
+ */
+export async function executeAdminRecovery(
+  publicKey: string,
+  scheduleId: number
+): Promise<string> {
+  return buildAndSend(publicKey, "execute_admin_recovery", [
+    nativeToScVal(publicKey, { type: "address" }),
+    nativeToScVal(scheduleId, { type: "u64" }),
+  ]);
+}
+
 // ---------- Types ----------
 
 export interface ScheduleData {
@@ -278,5 +361,10 @@ export function parseContractError(e: Error): string {
   if (msg.includes("Schedule has ended")) return "This vesting schedule has already ended.";
   if (msg.includes("Start time in the past")) return "The start time must be in the future.";
   if (msg.includes("Duration too short")) return "The vesting duration is too short.";
+  if (msg.includes("Recovery request already pending")) return "A recovery request is already pending for this schedule.";
+  if (msg.includes("No pending recovery")) return "No recovery request found for this schedule.";
+  if (msg.includes("Recovery timelock still active")) return "The 7-day recovery timelock has not elapsed yet.";
+  if (msg.includes("New beneficiary must differ from current")) return "The new beneficiary address must differ from the current one.";
+  if (msg.includes("Unauthorized upgrade authority")) return "Only the upgrade authority can execute recoveries.";
   return msg;
 }

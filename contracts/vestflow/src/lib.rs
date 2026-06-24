@@ -41,6 +41,11 @@
 //! | `"No pending upgrade"` | Upgrade execution/cancellation attempted without an announcement |
 //! | `"Upgrade timelock still active"` | Upgrade execution attempted before 48 hours elapsed |
 //! | `"Upgrade executable time overflow"` | Upgrade announcement timestamp cannot safely add the timelock |
+//! | `"Recovery request already pending"` | `request_admin_recovery` called while a request is already open |
+//! | `"Not the grantor"` | `request_admin_recovery` called by someone other than the schedule's grantor |
+//! | `"No pending recovery"` | `execute_admin_recovery` or `cancel_admin_recovery` with no open request |
+//! | `"Recovery timelock still active"` | `execute_admin_recovery` called before 7-day window elapses |
+//! | `"New beneficiary must differ from current"` | Recovery request targets the current beneficiary address |
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN, Env, Vec,
@@ -62,10 +67,15 @@ pub enum DataKey {
     GrantorSchedules(Address),
     /// Index of schedule IDs where an address is the beneficiary.
     BeneficiarySchedules(Address),
+    /// A pending admin recovery request for a specific schedule.
+    RecoveryRequest(u64),
 }
 
 /// Mandatory delay between an on-chain upgrade announcement and execution.
 pub const UPGRADE_TIMELOCK_SECONDS: u64 = 48 * 60 * 60;
+
+/// Mandatory delay between a recovery request and admin execution (7 days).
+pub const RECOVERY_TIMELOCK_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 /// A contract WASM upgrade that has been announced on-chain but not yet executed.
 #[contracttype]
@@ -76,6 +86,25 @@ pub struct PendingUpgrade {
     /// Ledger timestamp when the upgrade was announced.
     pub announced_at: u64,
     /// Earliest ledger timestamp when the upgrade may be executed.
+    pub executable_at: u64,
+}
+
+/// A pending admin recovery request that will redirect a schedule's
+/// beneficiary after the [`RECOVERY_TIMELOCK_SECONDS`] window elapses.
+///
+/// Filed by the grantor, executed by the upgrade authority.
+#[contracttype]
+#[derive(Clone, PartialEq)]
+pub struct RecoveryRequest {
+    /// The schedule whose beneficiary will be replaced.
+    pub schedule_id: u64,
+    /// The new beneficiary address to redirect tokens to.
+    pub new_beneficiary: Address,
+    /// Address of the grantor who filed this request.
+    pub requested_by: Address,
+    /// Ledger timestamp when the request was filed.
+    pub requested_at: u64,
+    /// Earliest ledger timestamp when the admin may execute the recovery.
     pub executable_at: u64,
 }
 
@@ -563,11 +592,188 @@ impl VestFlowContract {
         Self::release_lock(&env);
     }
 
-    /// Transfer beneficiary rights to a new address.
+    // -----------------------------------------------------------------------
+    // Admin recovery
+    // -----------------------------------------------------------------------
+
+    /// Read the pending recovery request for a given schedule, if any.
+    pub fn recovery_request(env: Env, schedule_id: u64) -> Option<RecoveryRequest> {
+        env.storage()
+            .instance()
+            .get(&DataKey::RecoveryRequest(schedule_id))
+    }
+
+    /// File an emergency recovery request to redirect a schedule's beneficiary.
     ///
-    /// Only the current beneficiary may call this. The schedule must not be
-    /// revoked. Emits a `bnf_chng` event with
-    /// `(schedule_id, old_beneficiary, new_beneficiary)`.
+    /// Only the schedule's **grantor** may open a recovery request. This is
+    /// an escape hatch for the case where the beneficiary's private key has
+    /// been permanently lost, rendering the tokens unclaimable.
+    ///
+    /// After [`RECOVERY_TIMELOCK_SECONDS`] (7 days) the upgrade authority
+    /// may execute the recovery via [`execute_admin_recovery`]. During the
+    /// window either the grantor or the authority may cancel it.
+    ///
+    /// The 7-day public window gives the beneficiary a chance to object or
+    /// prove their key is still accessible.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"Schedule not found"` if `schedule_id` does not exist.
+    /// Panics with `"Not the grantor"` if `caller` is not the schedule's grantor.
+    /// Panics with `"Recovery request already pending"` if a request is already open.
+    /// Panics with `"New beneficiary must differ from current"` if `new_beneficiary` equals the current one.
+    pub fn request_admin_recovery(
+        env: Env,
+        caller: Address,
+        schedule_id: u64,
+        new_beneficiary: Address,
+    ) {
+        caller.require_auth();
+
+        let schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .expect("Schedule not found");
+
+        assert!(caller == schedule.grantor, "Not the grantor");
+        assert!(
+            !env.storage()
+                .instance()
+                .has(&DataKey::RecoveryRequest(schedule_id)),
+            "Recovery request already pending"
+        );
+        assert!(
+            new_beneficiary != schedule.beneficiary,
+            "New beneficiary must differ from current"
+        );
+
+        let requested_at = env.ledger().timestamp();
+        let request = RecoveryRequest {
+            schedule_id,
+            new_beneficiary: new_beneficiary.clone(),
+            requested_by: caller.clone(),
+            requested_at,
+            executable_at: requested_at
+                .checked_add(RECOVERY_TIMELOCK_SECONDS)
+                .expect("Recovery executable time overflow"),
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::RecoveryRequest(schedule_id), &request);
+
+        env.events().publish(
+            (symbol_short!("adm_req"), schedule_id),
+            (
+                caller,
+                schedule.beneficiary,
+                new_beneficiary,
+                request.requested_at,
+                request.executable_at,
+            ),
+        );
+    }
+
+    /// Cancel a pending admin recovery request.
+    ///
+    /// May be called by **either** the schedule's grantor (who filed it) or
+    /// the upgrade authority. This lets the admin abort a suspicious request,
+    /// and lets the grantor withdraw their own request if the situation
+    /// resolves (e.g. the beneficiary recovers their key).
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"No pending recovery"` if no request exists for `schedule_id`.
+    pub fn cancel_admin_recovery(env: Env, caller: Address, schedule_id: u64) {
+        caller.require_auth();
+
+        let request: RecoveryRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey::RecoveryRequest(schedule_id))
+            .expect("No pending recovery");
+
+        // Only the grantor who filed the request OR the upgrade authority may cancel.
+        let is_grantor = caller == request.requested_by;
+        let is_authority = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::UpgradeAuthority)
+            .map(|a| a == caller)
+            .unwrap_or(false);
+        assert!(is_grantor || is_authority, "Unauthorized");
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::RecoveryRequest(schedule_id));
+
+        env.events().publish(
+            (symbol_short!("adm_can"), schedule_id),
+            (caller, request.new_beneficiary, request.requested_at),
+        );
+    }
+
+    /// Execute a pending admin recovery after the 7-day timelock.
+    ///
+    /// Only the **upgrade authority** may execute a recovery. The request
+    /// must have been filed by the grantor via [`request_admin_recovery`] at
+    /// least [`RECOVERY_TIMELOCK_SECONDS`] ago.
+    ///
+    /// On success the schedule's beneficiary is updated to `new_beneficiary`
+    /// and the pending request is cleared.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"Upgrade authority not initialized"` if the authority is not configured.
+    /// Panics with `"Unauthorized upgrade authority"` if `caller` is not the authority.
+    /// Panics with `"No pending recovery"` if no request exists for `schedule_id`.
+    /// Panics with `"Recovery timelock still active"` if 7 days have not yet elapsed.
+    /// Panics with `"Schedule not found"` if the schedule was deleted (should not happen in normal operation).
+    pub fn execute_admin_recovery(env: Env, caller: Address, schedule_id: u64) {
+        let authority = Self::read_upgrade_authority(&env);
+        assert!(caller == authority, "Unauthorized upgrade authority");
+        caller.require_auth();
+
+        let request: RecoveryRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey::RecoveryRequest(schedule_id))
+            .expect("No pending recovery");
+
+        assert!(
+            env.ledger().timestamp() >= request.executable_at,
+            "Recovery timelock still active"
+        );
+
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .expect("Schedule not found");
+
+        let old_beneficiary = schedule.beneficiary.clone();
+        schedule.beneficiary = request.new_beneficiary.clone();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Schedule(schedule_id), &schedule);
+        env.storage()
+            .instance()
+            .remove(&DataKey::RecoveryRequest(schedule_id));
+
+        env.events().publish(
+            (symbol_short!("adm_exe"), schedule_id),
+            (
+                caller,
+                old_beneficiary,
+                request.new_beneficiary,
+                request.requested_at,
+            ),
+        );
+    }
+
+    /// Transfer beneficiary rights to a new address.
     ///
     /// # Errors
     ///
@@ -1393,5 +1599,372 @@ mod test {
             },
         }]);
         client.transfer_beneficiary(&id, &attacker);
+    }
+
+    // -----------------------------------------------------------------------
+    // Admin recovery tests
+    // -----------------------------------------------------------------------
+
+    fn setup_with_authority(
+        env: &Env,
+    ) -> (
+        VestFlowContractClient<'_>,
+        Address, // grantor
+        Address, // beneficiary
+        Address, // token_addr
+        Address, // authority
+    ) {
+        let (client, grantor, beneficiary, token_addr, token_admin) = setup(env);
+        let authority = token_admin; // reuse as upgrade authority
+        client.initialize_upgrade_authority(&authority);
+        (client, grantor, beneficiary, token_addr, authority)
+    }
+
+    #[test]
+    fn test_request_admin_recovery_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup_with_authority(&env);
+        let new_beneficiary = Address::generate(&env);
+
+        set_time(&env, 1_000);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &1000,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        client.request_admin_recovery(&grantor, &id, &new_beneficiary);
+
+        let req = client.recovery_request(&id).unwrap();
+        assert_eq!(req.schedule_id, id);
+        assert_eq!(req.new_beneficiary, new_beneficiary);
+        assert_eq!(req.requested_by, grantor);
+        assert_eq!(req.requested_at, 1_000);
+        assert_eq!(req.executable_at, 1_000 + RECOVERY_TIMELOCK_SECONDS);
+    }
+
+    #[test]
+    #[should_panic(expected = "Not the grantor")]
+    fn test_request_admin_recovery_rejects_non_grantor() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup_with_authority(&env);
+        let attacker = Address::generate(&env);
+        let new_beneficiary = Address::generate(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        client.request_admin_recovery(&attacker, &id, &new_beneficiary);
+    }
+
+    #[test]
+    #[should_panic(expected = "Recovery request already pending")]
+    fn test_request_admin_recovery_rejects_duplicate() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup_with_authority(&env);
+        let new_beneficiary = Address::generate(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        client.request_admin_recovery(&grantor, &id, &new_beneficiary);
+        // Second call should panic
+        client.request_admin_recovery(&grantor, &id, &new_beneficiary);
+    }
+
+    #[test]
+    #[should_panic(expected = "New beneficiary must differ from current")]
+    fn test_request_admin_recovery_rejects_same_beneficiary() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup_with_authority(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        // new_beneficiary == current beneficiary
+        client.request_admin_recovery(&grantor, &id, &beneficiary);
+    }
+
+    #[test]
+    fn test_execute_admin_recovery_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, authority) = setup_with_authority(&env);
+        let new_beneficiary = Address::generate(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        set_time(&env, 1_000);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &1000,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        // File recovery request
+        client.request_admin_recovery(&grantor, &id, &new_beneficiary);
+
+        // Advance past timelock
+        set_time(&env, 1_000 + RECOVERY_TIMELOCK_SECONDS + 1);
+        client.execute_admin_recovery(&authority, &id);
+
+        // Beneficiary should be updated
+        let schedule = client.get_schedule(&id);
+        assert_eq!(schedule.beneficiary, new_beneficiary);
+
+        // Pending request cleared
+        assert!(client.recovery_request(&id).is_none());
+
+        // New beneficiary can now claim once tokens vest
+        set_time(&env, 2_000);
+        client.claim(&id);
+        assert_eq!(token.balance(&new_beneficiary), 1000);
+        assert_eq!(token.balance(&beneficiary), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Recovery timelock still active")]
+    fn test_execute_admin_recovery_rejects_before_timelock() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, authority) = setup_with_authority(&env);
+        let new_beneficiary = Address::generate(&env);
+
+        set_time(&env, 1_000);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &1000,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        client.request_admin_recovery(&grantor, &id, &new_beneficiary);
+
+        // One second before timelock expires
+        set_time(&env, 1_000 + RECOVERY_TIMELOCK_SECONDS - 1);
+        client.execute_admin_recovery(&authority, &id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unauthorized upgrade authority")]
+    fn test_execute_admin_recovery_rejects_non_authority() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup_with_authority(&env);
+        let attacker = Address::generate(&env);
+        let new_beneficiary = Address::generate(&env);
+
+        set_time(&env, 1_000);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &1000,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        client.request_admin_recovery(&grantor, &id, &new_beneficiary);
+        set_time(&env, 1_000 + RECOVERY_TIMELOCK_SECONDS + 1);
+
+        // Attacker tries to execute — should panic
+        client.execute_admin_recovery(&attacker, &id);
+    }
+
+    #[test]
+    fn test_cancel_admin_recovery_by_grantor() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup_with_authority(&env);
+        let new_beneficiary = Address::generate(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        client.request_admin_recovery(&grantor, &id, &new_beneficiary);
+        assert!(client.recovery_request(&id).is_some());
+
+        client.cancel_admin_recovery(&grantor, &id);
+        assert!(client.recovery_request(&id).is_none());
+
+        // Original beneficiary unchanged
+        assert_eq!(client.get_schedule(&id).beneficiary, beneficiary);
+    }
+
+    #[test]
+    fn test_cancel_admin_recovery_by_authority() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, authority) = setup_with_authority(&env);
+        let new_beneficiary = Address::generate(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        client.request_admin_recovery(&grantor, &id, &new_beneficiary);
+        assert!(client.recovery_request(&id).is_some());
+
+        // Authority vetoes the request
+        client.cancel_admin_recovery(&authority, &id);
+        assert!(client.recovery_request(&id).is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "No pending recovery")]
+    fn test_execute_admin_recovery_no_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, authority) = setup_with_authority(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        // No request was filed
+        client.execute_admin_recovery(&authority, &id);
+    }
+
+    #[test]
+    #[should_panic(expected = "No pending recovery")]
+    fn test_cancel_admin_recovery_no_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup_with_authority(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        client.cancel_admin_recovery(&grantor, &id);
+    }
+
+    /// After a recovery, the new beneficiary can claim vested tokens and
+    /// the old address can no longer claim.
+    #[test]
+    fn test_recovered_schedule_old_beneficiary_cannot_claim() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, authority) = setup_with_authority(&env);
+        let new_beneficiary = Address::generate(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        // Schedule that starts immediately
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        // File and execute recovery
+        client.request_admin_recovery(&grantor, &id, &new_beneficiary);
+        set_time(&env, RECOVERY_TIMELOCK_SECONDS + 1);
+        client.execute_admin_recovery(&authority, &id);
+
+        // Fully vested
+        set_time(&env, 1001);
+        assert_eq!(token.balance(&beneficiary), 0);
+
+        // New beneficiary claims successfully
+        client.claim(&id);
+        assert_eq!(token.balance(&new_beneficiary), 1000);
+        assert_eq!(token.balance(&beneficiary), 0);
     }
 }
