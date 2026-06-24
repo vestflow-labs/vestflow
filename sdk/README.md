@@ -119,11 +119,13 @@ const hash = await client.createSchedule({ ... }, nodeSigner);
 | Function | Description |
 |---|---|
 | `stroopsToXlm(stroops)` | Convert stroops to XLM string |
+| `xlmToStroops(amount)` | Convert XLM string to stroops bigint |
 | `truncate(address)` | Shorten a Stellar address for display |
 | `vestingProgress(schedule, now)` | Vesting progress percentage (0-100) |
 | `formatDate(timestamp)` | Format Unix timestamp as date string |
+| `formatCliffDate(cliffDuration, startTime)` | Format cliff date or return "No cliff" |
 | `parseContractError(error)` | Map contract error to user-friendly message |
-
+| `connectWallet()` | Connect Freighter wallet and return public key |
 ## License
 
 MIT

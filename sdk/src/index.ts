@@ -6,10 +6,12 @@
 // ===========================================================================
 
 export { VestflowClient } from "./client";
-export { stroopsToXlm, truncate, vestingProgress, formatDate, parseContractError } from "./utils";
+export { stroopsToXlm, xlmToStroops, truncate, vestingProgress, formatDate, formatCliffDate, parseContractError } from "./utils";
 export type {
   ScheduleData,
   VestflowConfig,
   CreateScheduleParams,
   VestingKind,
 } from "./types";
+
+export { connectWallet } from "./wallet";

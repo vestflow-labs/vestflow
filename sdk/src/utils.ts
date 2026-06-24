@@ -99,3 +99,28 @@ export function parseContractError(e: Error): string {
     return "The cliff period cannot be longer than the total vesting duration.";
   return msg;
 }
+
+/**
+ * Convert an XLM amount string to stroops (base units).
+ *
+ * @example
+ * xlmToStroops("1.5") // 15_000_000n
+ */
+export function xlmToStroops(amountXlm: string): bigint {
+  const normalized = amountXlm.trim();
+  if (!/^[0-9]+(?:\.[0-9]+)?$/.test(normalized)) {
+    throw new Error("Invalid amount");
+  }
+  const [whole, fraction = ""] = normalized.split(".");
+  const fractionPadded = (fraction + "0000000").slice(0, 7);
+  return BigInt(whole) * 10_000_000n + BigInt(fractionPadded);
+}
+
+/**
+ * Format a cliff date for display.
+ * Returns "No cliff" when cliff_duration is 0.
+ */
+export function formatCliffDate(cliffDuration: number, startTime: number): string {
+  if (!cliffDuration || cliffDuration <= 0) return "No cliff";
+  return formatDate(startTime + cliffDuration);
+}
