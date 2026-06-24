@@ -1,11 +1,28 @@
 "use client";
+import { useEffect, useState } from "react";
 import { ScheduleData, stroopsToXlm } from "@/lib/stellar";
+import { getThemeColors } from "@/lib/theme";
 
 interface Props {
   schedule: ScheduleData;
 }
 
 export default function VestingChart({ schedule }: Props) {
+  const [colors, setColors] = useState(getThemeColors());
+
+  useEffect(() => {
+    // Update colors when theme changes
+    const updateColors = () => setColors(getThemeColors());
+    setColors(getThemeColors());
+    
+    // Listen for changes to theme
+    const observer = new MutationObserver(() => {
+      setColors(getThemeColors());
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    
+    return () => observer.disconnect();
+  }, []);
   const { id, start_time, duration, cliff_duration, total_amount, kind } = schedule;
   const end_time = start_time + duration;
   const now = Math.floor(Date.now() / 1000);
@@ -73,12 +90,12 @@ export default function VestingChart({ schedule }: Props) {
     <svg viewBox={`0 0 ${W} ${H}`} className="w-full" aria-label="Vesting curve chart">
       <defs>
         <linearGradient id={gLine} x1="0" y1="0" x2="1" y2="0">
-          <stop offset="0%" stopColor="#8b5cf6" />
-          <stop offset="100%" stopColor="#06b6d4" />
+          <stop offset="0%" stopColor={colors.accentPrimary} />
+          <stop offset="100%" stopColor={colors.accentSecondary} />
         </linearGradient>
         <linearGradient id={gArea} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#8b5cf6" stopOpacity="0.25" />
-          <stop offset="100%" stopColor="#8b5cf6" stopOpacity="0.02" />
+          <stop offset="0%" stopColor={colors.accentPrimary} stopOpacity="0.25" />
+          <stop offset="100%" stopColor={colors.accentPrimary} stopOpacity="0.02" />
         </linearGradient>
       </defs>
 
@@ -88,11 +105,11 @@ export default function VestingChart({ schedule }: Props) {
           key={f}
           x1={PAD.left} y1={toY(f)}
           x2={PAD.left + plotW} y2={toY(f)}
-          stroke="rgba(255,255,255,0.06)"
+          stroke={colors.borderSubtle}
           strokeWidth={f === 0 || f === 1 ? 1.5 : 1}
         />
       ))}
-      <line x1={PAD.left} y1={PAD.top} x2={PAD.left} y2={PAD.top + plotH} stroke="rgba(255,255,255,0.06)" strokeWidth={1.5} />
+      <line x1={PAD.left} y1={PAD.top} x2={PAD.left} y2={PAD.top + plotH} stroke={colors.borderSubtle} strokeWidth={1.5} />
 
       {/* Area fill */}
       <path d={areaD} fill={`url(#${gArea})`} />
@@ -103,32 +120,32 @@ export default function VestingChart({ schedule }: Props) {
       {/* Cliff marker dot */}
       {showCliff && (
         <>
-          <line x1={toX(cliffT)} y1={PAD.top} x2={toX(cliffT)} y2={PAD.top + plotH} stroke="#8b5cf6" strokeWidth={1} strokeDasharray="3,3" opacity={0.4} />
-          <circle cx={toX(cliffT)} cy={cliffDotY} r={4} fill="#8b5cf6" stroke="#08090f" strokeWidth={1.5} />
-          <text x={toX(cliffT)} y={H - 4} fill="#8b5cf6" fontSize={8} textAnchor="middle" fontFamily="sans-serif">Cliff</text>
+          <line x1={toX(cliffT)} y1={PAD.top} x2={toX(cliffT)} y2={PAD.top + plotH} stroke={colors.accentPrimary} strokeWidth={1} strokeDasharray="3,3" opacity={0.4} />
+          <circle cx={toX(cliffT)} cy={cliffDotY} r={4} fill={colors.accentPrimary} stroke="var(--background)" strokeWidth={1.5} />
+          <text x={toX(cliffT)} y={H - 4} fill={colors.accentPrimary} fontSize={8} textAnchor="middle" fontFamily="sans-serif">Cliff</text>
         </>
       )}
 
       {/* Current-time dashed line */}
       {nowX !== null && (
         <>
-          <line x1={nowX} y1={PAD.top} x2={nowX} y2={PAD.top + plotH} stroke="#06b6d4" strokeWidth={1.5} strokeDasharray="4,3" />
-          <text x={nowX + 3} y={PAD.top + 9} fill="#06b6d4" fontSize={8} fontFamily="sans-serif">Now</text>
+          <line x1={nowX} y1={PAD.top} x2={nowX} y2={PAD.top + plotH} stroke={colors.accentSecondary} strokeWidth={1.5} strokeDasharray="4,3" />
+          <text x={nowX + 3} y={PAD.top + 9} fill={colors.accentSecondary} fontSize={8} fontFamily="sans-serif">Now</text>
         </>
       )}
 
       {/* Y-axis labels */}
-      <text x={PAD.left - 4} y={toY(0) + 4} fill="#52525b" fontSize={8} textAnchor="end" fontFamily="monospace">0</text>
-      <text x={PAD.left - 4} y={toY(0.5) + 4} fill="#52525b" fontSize={8} textAnchor="end" fontFamily="monospace">
+      <text x={PAD.left - 4} y={toY(0) + 4} fill={colors.mutedLight} fontSize={8} textAnchor="end" fontFamily="monospace">0</text>
+      <text x={PAD.left - 4} y={toY(0.5) + 4} fill={colors.mutedLight} fontSize={8} textAnchor="end" fontFamily="monospace">
         {(Number(total_amount) / 2 / 10_000_000).toFixed(0)}
       </text>
-      <text x={PAD.left - 4} y={toY(1) + 4} fill="#52525b" fontSize={8} textAnchor="end" fontFamily="monospace">
+      <text x={PAD.left - 4} y={toY(1) + 4} fill={colors.mutedLight} fontSize={8} textAnchor="end" fontFamily="monospace">
         {stroopsToXlm(total_amount)}
       </text>
 
       {/* X-axis labels */}
-      <text x={toX(start_time)} y={H - 4} fill="#52525b" fontSize={8} textAnchor="middle" fontFamily="sans-serif">{fmt(start_time)}</text>
-      <text x={toX(end_time)} y={H - 4} fill="#52525b" fontSize={8} textAnchor="middle" fontFamily="sans-serif">{fmt(end_time)}</text>
+      <text x={toX(start_time)} y={H - 4} fill={colors.mutedLight} fontSize={8} textAnchor="middle" fontFamily="sans-serif">{fmt(start_time)}</text>
+      <text x={toX(end_time)} y={H - 4} fill={colors.mutedLight} fontSize={8} textAnchor="middle" fontFamily="sans-serif">{fmt(end_time)}</text>
     </svg>
   );
 }

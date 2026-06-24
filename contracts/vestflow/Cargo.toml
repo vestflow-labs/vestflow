@@ -11,6 +11,7 @@ soroban-sdk = { version = "22.0.11", features = ["alloc"] }
 
 [dev-dependencies]
 soroban-sdk = { version = "22.0.11", features = ["testutils", "alloc"] }
+proptest = "1.5.0"
 
 [features]
 testutils = ["soroban-sdk/testutils"]

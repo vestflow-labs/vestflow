@@ -25,9 +25,11 @@ NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 RPC_URL="https://soroban-testnet.stellar.org"
 WASM_PATH="target/wasm32v1-none/release/vestflow.wasm"
 DEPLOYER_KEY="${DEPLOYER_KEY:-deployer}"
-
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+VERSION="${VERSION:-$(git -C "${REPO_ROOT}" describe --tags --always --dirty 2>/dev/null || echo untagged)}"
+UPDATE_DEPLOYMENTS="${UPDATE_DEPLOYMENTS:-1}"
 ENV_FILE="${REPO_ROOT}/.env.local"
+WASM_HASH=""
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 echo ""
@@ -36,6 +38,10 @@ echo "▶ Building WASM..."
   cd "${REPO_ROOT}/contracts/vestflow"
   cargo build --target wasm32v1-none --release 2>&1
 )
+
+if command -v sha256sum >/dev/null 2>&1; then
+  WASM_HASH="$(sha256sum "${REPO_ROOT}/${WASM_PATH}" | awk '{print $1}')"
+fi
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
 echo ""
@@ -85,6 +91,18 @@ RESULT=$(stellar contract invoke \
 echo "   schedule_count returned: ${RESULT}"
 echo ""
 echo "✅  Smoke test passed!"
+
+if [[ "${UPDATE_DEPLOYMENTS}" != "0" ]]; then
+  echo ""
+  echo "▶ Recording deployment in DEPLOYMENTS.md..."
+  VERSION="${VERSION}" \
+    NETWORK="${NETWORK}" \
+    CONTRACT_ID="${CONTRACT_ID}" \
+    WASM_HASH="${WASM_HASH}" \
+    NOTES="${DEPLOYMENT_NOTES:-deployed by scripts/deploy-testnet.sh}" \
+    "${REPO_ROOT}/scripts/update-deployment-registry.sh"
+fi
+
 echo ""
 echo "Next steps:"
 echo "  1. Frontend will now use the contract at: ${CONTRACT_ID}"

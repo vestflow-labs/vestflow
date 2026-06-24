@@ -8,8 +8,8 @@ import {
   sendCliffReachedNotification,
   sendClaimableNotification,
   sendRevokedNotification,
-} from "@/lib/email";
-import { getSchedule, getClaimable } from "@/lib/stellar";
+} from "./email";
+import { getSchedule, getClaimable } from "./stellar";
 
 export async function processNotifications(): Promise<void> {
   try {
