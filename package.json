@@ -5,7 +5,10 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "contracts:metrics": "bash scripts/contract-metrics.sh",
+    "bindings:generate": "bash scripts/generate-bindings.sh",
+    "bindings:build": "npm --prefix lib/bindings/vestflow install && npm --prefix lib/bindings/vestflow run build"
   },
   "dependencies": {
     "@stellar/freighter-api": "^6.0.1",
@@ -17,8 +20,8 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
+    "@types/react": "^19.2.16",
+    "@types/react-dom": "^19.2.3",
     "lefthook": "^2.1.9",
     "tailwindcss": "^4",
     "typescript": "^5"

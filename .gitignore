@@ -12,7 +12,9 @@
 
 # testing
 /coverage
+contracts/lcov.info
 
+/target/
 # next.js
 /.next/
 /out/
@@ -42,3 +44,12 @@ next-env.d.ts
 
 # Rust / Soroban build artifacts
 contracts/vestflow/target/
+contracts/target/
+
+# Indexer build artifacts
+/indexer/dist/
+/indexer/node_modules/
+
+# Generated contract binding build artifacts
+/lib/bindings/vestflow/dist/
+/lib/bindings/vestflow/package-lock.json

@@ -3,6 +3,7 @@ import Navbar from "@/components/Navbar";
 import VestingChart from "@/components/VestingChart";
 import NotificationSubscription from "@/components/NotificationSubscription";
 import { formatDate, NETWORK } from "@/lib/stellar";
+import { useXlmPrice, formatUsd } from "@/lib/price";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -30,6 +31,7 @@ export default function PublicSchedulePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [claimable, setClaimable] = useState("0");
+  const xlmPrice = useXlmPrice();
 
   useEffect(() => {
     if (!scheduleId) return;
@@ -171,13 +173,19 @@ export default function PublicSchedulePage() {
           <div className="card p-6">
             <p className="text-zinc-400 text-sm mb-2">Total Amount</p>
             <p className="text-2xl font-bold mb-1">{formatAmount(schedule.total_amount)} XLM</p>
-            <p className="text-xs text-zinc-500">{schedule.total_amount} stroops</p>
+            {xlmPrice !== null && (
+              <p className="text-zinc-400 text-sm">{formatUsd(BigInt(schedule.total_amount), xlmPrice)}</p>
+            )}
+            <p className="text-xs text-zinc-500 mt-1">{schedule.total_amount} stroops</p>
           </div>
 
           <div className="card p-6">
             <p className="text-zinc-400 text-sm mb-2">Claimed</p>
             <p className="text-2xl font-bold mb-1">{formatAmount(schedule.claimed)} XLM</p>
-            <p className="text-xs text-zinc-500">{schedule.claimed} stroops</p>
+            {xlmPrice !== null && (
+              <p className="text-zinc-400 text-sm">{formatUsd(BigInt(schedule.claimed), xlmPrice)}</p>
+            )}
+            <p className="text-xs text-zinc-500 mt-1">{schedule.claimed} stroops</p>
           </div>
 
           <div className="card p-6">
@@ -185,7 +193,12 @@ export default function PublicSchedulePage() {
             <p className="text-2xl font-bold mb-1">
               {formatAmount(String(BigInt(schedule.total_amount) - BigInt(schedule.claimed)))} XLM
             </p>
-            <p className="text-xs text-zinc-500">
+            {xlmPrice !== null && (
+              <p className="text-zinc-400 text-sm">
+                {formatUsd(BigInt(schedule.total_amount) - BigInt(schedule.claimed), xlmPrice)}
+              </p>
+            )}
+            <p className="text-xs text-zinc-500 mt-1">
               {(BigInt(schedule.total_amount) - BigInt(schedule.claimed)).toString()} stroops
             </p>
           </div>
@@ -204,7 +217,10 @@ export default function PublicSchedulePage() {
             <div className="space-y-3">
               <div>
                 <p className="text-xs text-zinc-500 mb-1">Schedule ID</p>
-                <p className="font-mono text-sm">{schedule.id}</p>
+                <div className="flex items-center gap-2">
+                  <p className="font-mono text-sm">{schedule.id}</p>
+                  <CopyButton value={String(schedule.id)} label={`Copy schedule ${schedule.id}`} />
+                </div>
               </div>
               <div>
                 <p className="text-xs text-zinc-500 mb-1">Type</p>
@@ -231,7 +247,7 @@ export default function PublicSchedulePage() {
               {cliffTime && (
                 <div>
                   <p className="text-xs text-zinc-500 mb-1">Cliff Date</p>
-                  <p className="text-sm">{formatDate(cliffTime)}</p>
+                  <p className="text-sm">{formatCliffDate(schedule.cliff_duration, schedule.start_time)}</p>
                 </div>
               )}
             </div>
@@ -241,7 +257,10 @@ export default function PublicSchedulePage() {
         {/* Addresses */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div className="card p-6">
-            <h3 className="font-semibold mb-2">Grantor (Issuer)</h3>
+            <div className="flex items-start justify-between gap-3 mb-2">
+              <h3 className="font-semibold">Grantor (Issuer)</h3>
+              <CopyButton value={schedule.grantor} label="Copy grantor address" />
+            </div>
             <p className="font-mono text-sm break-all text-zinc-300">{schedule.grantor}</p>
             <a
               href={`https://stellar.expert/explorer/${NETWORK}/account/${schedule.grantor}`}
@@ -254,7 +273,10 @@ export default function PublicSchedulePage() {
           </div>
 
           <div className="card p-6">
-            <h3 className="font-semibold mb-2">Beneficiary (Recipient)</h3>
+            <div className="flex items-start justify-between gap-3 mb-2">
+              <h3 className="font-semibold">Beneficiary (Recipient)</h3>
+              <CopyButton value={schedule.beneficiary} label="Copy beneficiary address" />
+            </div>
             <p className="font-mono text-sm break-all text-zinc-300">{schedule.beneficiary}</p>
             <a
               href={`https://stellar.expert/explorer/${NETWORK}/account/${schedule.beneficiary}`}

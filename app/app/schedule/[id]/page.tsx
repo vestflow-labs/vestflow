@@ -10,10 +10,12 @@ import {
   stroopsToXlm,
   vestingProgress,
   formatDate,
+  formatCliffDate,
   claimVested,
   revokeSchedule,
   parseContractError,
   NETWORK,
+  NATIVE_TOKEN,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import { useXlmPrice, formatUsd } from "@/lib/price";
@@ -22,6 +24,7 @@ import AdminRecovery from "@/components/AdminRecovery";
 export default function ScheduleDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { publicKey } = useWallet();
+  const { addToast, updateToast } = useToast();
   const [schedule, setSchedule] = useState<ScheduleData | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<"claim" | "revoke" | null>(null);
@@ -43,24 +46,54 @@ export default function ScheduleDetailPage() {
   const handleClaim = async () => {
     if (!publicKey || !schedule) return;
     setActionLoading("claim"); setErr(""); setLastTxHash(null);
+    const toastId = addToast({
+      status: "pending",
+      title: "Claim pending…",
+      message: "Waiting for transaction to confirm.",
+    });
     try {
       const hash = await claimVested(publicKey, schedule.id);
       setLastTxHash(hash);
+      updateToast(toastId, {
+        status: "success",
+        title: "Tokens claimed!",
+        message: `${stroopsToXlm(claimableAmt)} XLM transferred to your wallet.`,
+        txHash: hash,
+        network: NETWORK,
+      });
       await load();
     }
-    catch (e: any) { setErr(parseContractError(e)); }
+    catch (e: any) {
+      setErr(parseContractError(e));
+      updateToast(toastId, { status: "error", title: "Claim failed", message: parseContractError(e) });
+    }
     finally { setActionLoading(null); }
   };
 
   const handleRevoke = async () => {
     if (!publicKey || !schedule) return;
     setActionLoading("revoke"); setErr(""); setLastTxHash(null);
+    const toastId = addToast({
+      status: "pending",
+      title: "Revoke pending…",
+      message: "Waiting for transaction to confirm.",
+    });
     try {
       const hash = await revokeSchedule(publicKey, schedule.id);
       setLastTxHash(hash);
+      updateToast(toastId, {
+        status: "success",
+        title: "Schedule revoked",
+        message: "Unvested tokens returned to your wallet.",
+        txHash: hash,
+        network: NETWORK,
+      });
       await load();
     }
-    catch (e: any) { setErr(parseContractError(e)); }
+    catch (e: any) {
+      setErr(parseContractError(e));
+      updateToast(toastId, { status: "error", title: "Revoke failed", message: parseContractError(e) });
+    }
     finally { setActionLoading(null); }
   };
 
@@ -90,6 +123,13 @@ export default function ScheduleDetailPage() {
   const isGrantor = publicKey === schedule.grantor;
   const vested = BigInt(Math.floor(Number(schedule.total_amount) * progress / 100));
   const claimableAmt = vested > schedule.claimed ? vested - schedule.claimed : 0n;
+  const isNative = schedule.token === NATIVE_TOKEN;
+  const tokenSymbol = isNative ? "XLM" : `Token (${schedule.token.slice(0, 4)}...${schedule.token.slice(-4)})`;
+
+  // Claimed percentage for the dual progress bar
+  const claimedPct = schedule.total_amount > 0n
+    ? Math.min(100, Math.round((Number(schedule.claimed) / Number(schedule.total_amount)) * 100))
+    : 0;
 
   const statusColor = schedule.revoked
     ? "bg-red-500/10 text-red-400"
@@ -126,17 +166,40 @@ export default function ScheduleDetailPage() {
             <VestingChart schedule={schedule} />
           </div>
 
-          {/* Progress bar */}
+          {/* Progress bar — dual layer: vested + claimed */}
           <div>
             <div className="flex justify-between text-sm text-zinc-400 mb-2">
-              <span>Vested</span>
-              <span>{progress}%</span>
+              <div className="flex items-center gap-3 text-xs">
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-2 h-2 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500" aria-hidden="true" />
+                  Vested {progress}%
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-2 h-2 rounded-full bg-emerald-500" aria-hidden="true" />
+                  Claimed {claimedPct}%
+                </span>
+              </div>
             </div>
-            <div className="h-2 rounded-full bg-white/5 overflow-hidden">
+            <div
+              className="relative h-2.5 rounded-full bg-white/5 overflow-hidden"
+              role="progressbar"
+              aria-label={`Vesting progress: ${progress}% vested, ${claimedPct}% claimed`}
+              aria-valuenow={progress}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            >
+              {/* Vested layer */}
               <div
-                className="h-full rounded-full bg-gradient-to-r from-violet-500 to-cyan-500 transition-all"
+                className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500 transition-all duration-700"
                 style={{ width: `${progress}%` }}
               />
+              {/* Claimed layer */}
+              {claimedPct > 0 && (
+                <div
+                  className="absolute inset-y-0 left-0 rounded-full bg-emerald-500/80 transition-all duration-700"
+                  style={{ width: `${claimedPct}%` }}
+                />
+              )}
             </div>
           </div>
 
@@ -179,7 +242,7 @@ export default function ScheduleDetailPage() {
             {schedule.cliff_duration > 0 && (
               <div>
                 <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Cliff Date</p>
-                <p className="text-zinc-300">{formatDate(schedule.start_time + schedule.cliff_duration)}</p>
+                <p className="text-zinc-300">{formatCliffDate(schedule.cliff_duration, schedule.start_time)}</p>
               </div>
             )}
             <div>

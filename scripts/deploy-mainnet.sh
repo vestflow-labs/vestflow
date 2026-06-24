@@ -25,6 +25,10 @@ NETWORK_PASSPHRASE="Public Global Stellar Network ; September 2015"
 RPC_URL="https://mainnet.sorobanrpc.com"
 WASM_PATH="target/wasm32v1-none/release/vestflow.wasm"
 DEPLOYER_KEY="${DEPLOYER_KEY:-deployer}"   # override via env var
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+VERSION="${VERSION:-$(git -C "${REPO_ROOT}" describe --tags --always --dirty 2>/dev/null || echo untagged)}"
+UPDATE_DEPLOYMENTS="${UPDATE_DEPLOYMENTS:-1}"
+WASM_HASH=""
 
 # ── Safety gate ──────────────────────────────────────────────────────────────
 echo ""
@@ -48,15 +52,19 @@ fi
 echo ""
 echo "▶ Building WASM..."
 (
-  cd "$(dirname "$0")/../contracts/vestflow"
+  cd "${REPO_ROOT}/contracts/vestflow"
   cargo build --target wasm32v1-none --release 2>&1
 )
+
+if command -v sha256sum >/dev/null 2>&1; then
+  WASM_HASH="$(sha256sum "${REPO_ROOT}/${WASM_PATH}" | awk '{print $1}')"
+fi
 
 # ── Deploy ────────────────────────────────────────────────────────────────────
 echo ""
 echo "▶ Deploying to ${NETWORK}..."
 CONTRACT_ID=$(stellar contract deploy \
-  --wasm "$(dirname "$0")/../${WASM_PATH}" \
+  --wasm "${REPO_ROOT}/${WASM_PATH}" \
   --source "${DEPLOYER_KEY}" \
   --network "${NETWORK}" \
   --rpc-url "${RPC_URL}" \
@@ -65,6 +73,18 @@ CONTRACT_ID=$(stellar contract deploy \
 echo ""
 echo "✅  Contract deployed successfully!"
 echo "   Contract ID: ${CONTRACT_ID}"
+
+if [[ "${UPDATE_DEPLOYMENTS}" != "0" ]]; then
+  echo ""
+  echo "▶ Recording deployment in DEPLOYMENTS.md..."
+  VERSION="${VERSION}" \
+    NETWORK="${NETWORK}" \
+    CONTRACT_ID="${CONTRACT_ID}" \
+    WASM_HASH="${WASM_HASH}" \
+    NOTES="${DEPLOYMENT_NOTES:-deployed by scripts/deploy-mainnet.sh}" \
+    "${REPO_ROOT}/scripts/update-deployment-registry.sh"
+fi
+
 echo ""
 echo "Next steps:"
 echo "  1. Add to .env.local:  NEXT_PUBLIC_CONTRACT_ID=${CONTRACT_ID}"

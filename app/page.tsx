@@ -1,5 +1,6 @@
 import Link from "next/link";
 import Navbar from "@/components/Navbar";
+import CopyButton from "@/components/CopyButton";
 
 const features = [
   { icon: "📈", title: "Linear Vesting", desc: "Tokens unlock gradually over the full vesting period — smooth and predictable." },
@@ -48,13 +49,21 @@ export default function LandingPage() {
 
         <div className="mt-16 card p-6 text-center">
           <p className="text-sm text-zinc-500 mb-2">Live contract on Stellar Testnet</p>
-          <a
-            href="https://stellar.expert/explorer/testnet/contract/CCZ6AE75C27DMB3SOIHK7WZSBUG3NQPVLHSVEBQ2FSAEVGRJ5TXAZWCX"
-            target="_blank" rel="noopener noreferrer"
-            className="font-mono text-sm text-violet-400 hover:underline break-all"
-          >
-            CCZ6AE75C27DMB3SOIHK7WZSBUG3NQPVLHSVEBQ2FSAEVGRJ5TXAZWCX
-          </a>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-center gap-3">
+            <a
+              href="https://stellar.expert/explorer/testnet/contract/CCZ6AE75C27DMB3SOIHK7WZSBUG3NQPVLHSVEBQ2FSAEVGRJ5TXAZWCX"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-mono text-sm text-violet-400 hover:underline break-all"
+            >
+              CCZ6AE75C27DMB3SOIHK7WZSBUG3NQPVLHSVEBQ2FSAEVGRJ5TXAZWCX
+            </a>
+            <CopyButton
+              value="CCZ6AE75C27DMB3SOIHK7WZSBUG3NQPVLHSVEBQ2FSAEVGRJ5TXAZWCX"
+              label="Copy contract address"
+              className="self-center"
+            />
+          </div>
         </div>
 
         {/* New Features Section */}
