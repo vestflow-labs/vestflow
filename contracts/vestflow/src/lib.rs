@@ -289,13 +289,13 @@ impl VestingSchedule {
     /// Tokens vested but not yet claimed.
     pub fn claimable_at(&self, now: u64) -> i128 {
         let vested = self.vested_at(now);
-        
+
         // Check if lockup period has expired
         let lockup_end = self.start_time.saturating_add(self.lockup_duration);
         if now < lockup_end {
             return 0;
         }
-        
+
         if vested > self.claimed_amount {
             vested - self.claimed_amount
         } else {
@@ -345,8 +345,10 @@ impl VestFlowContract {
         env.storage()
             .instance()
             .set(&DataKey::UpgradeAuthority, &authority);
-        env.events()
-            .publish((symbol_short!("upgr_auth"), authority.clone()), env.ledger().timestamp());
+        env.events().publish(
+            (symbol_short!("upgr_auth"), authority.clone()),
+            env.ledger().timestamp(),
+        );
     }
 
     /// Return the configured upgrade authority.
@@ -509,7 +511,10 @@ impl VestFlowContract {
         if cliff_duration > duration {
             return Err(VestFlowError::CliffExceedsDuration);
         }
-        assert!(lockup_duration >= cliff_duration, "Lockup cannot be less than cliff");
+        assert!(
+            lockup_duration >= cliff_duration,
+            "Lockup cannot be less than cliff"
+        );
         assert!(
             start_time >= env.ledger().timestamp(),
             "Start time cannot be in the past"
@@ -583,7 +588,18 @@ impl VestFlowContract {
 
         env.events().publish(
             (symbol_short!("created"), id),
-            (grantor, beneficiary, token, total_amount, start_time, duration, cliff_duration, lockup_duration, kind, revocable),
+            (
+                grantor,
+                beneficiary,
+                token,
+                total_amount,
+                start_time,
+                duration,
+                cliff_duration,
+                lockup_duration,
+                kind,
+                revocable,
+            ),
         );
 
         Ok(id)
@@ -623,7 +639,10 @@ impl VestFlowContract {
             "Beneficiary must differ from grantor"
         );
         assert!(total_amount > 0, "Amount must be positive");
-        assert!(start_time >= env.ledger().timestamp(), "Start time cannot be in the past");
+        assert!(
+            start_time >= env.ledger().timestamp(),
+            "Start time cannot be in the past"
+        );
         assert!(!milestones.is_empty(), "Milestones required");
 
         let total_bps: u64 = milestones.iter().map(|m| m.bps as u64).sum();
@@ -694,7 +713,18 @@ impl VestFlowContract {
 
         env.events().publish(
             (symbol_short!("created"), id),
-            (grantor, beneficiary, token, total_amount, start_time, duration, lockup_duration, VestingKind::Graded, revocable, milestones),
+            (
+                grantor,
+                beneficiary,
+                token,
+                total_amount,
+                start_time,
+                duration,
+                lockup_duration,
+                VestingKind::Graded,
+                revocable,
+                milestones,
+            ),
         );
 
         id
@@ -764,7 +794,11 @@ impl VestFlowContract {
             .set(&DataKey::Schedule(schedule_id), &schedule);
         env.events().publish(
             (symbol_short!("resumed"), schedule_id),
-            (schedule.grantor.clone(), pause_duration, env.ledger().timestamp()),
+            (
+                schedule.grantor.clone(),
+                pause_duration,
+                env.ledger().timestamp(),
+            ),
         );
     }
 
@@ -787,8 +821,10 @@ impl VestFlowContract {
         env.storage()
             .instance()
             .set(&DataKey::PerformanceOracle, &oracle);
-        env.events()
-            .publish((symbol_short!("orc_init"), oracle.clone()), env.ledger().timestamp());
+        env.events().publish(
+            (symbol_short!("orc_init"), oracle.clone()),
+            env.ledger().timestamp(),
+        );
     }
 
     /// Get the configured performance oracle address.
@@ -838,7 +874,11 @@ impl VestFlowContract {
 
         env.events().publish(
             (symbol_short!("mile_en"), schedule_id),
-            (schedule.grantor.clone(), milestones.len(), env.ledger().timestamp()),
+            (
+                schedule.grantor.clone(),
+                milestones.len(),
+                env.ledger().timestamp(),
+            ),
         );
     }
 
@@ -913,8 +953,10 @@ impl VestFlowContract {
         env.storage()
             .instance()
             .set(&DataKey::NftContract, &nft_contract);
-        env.events()
-            .publish((symbol_short!("nft_init"), nft_contract.clone()), env.ledger().timestamp());
+        env.events().publish(
+            (symbol_short!("nft_init"), nft_contract.clone()),
+            env.ledger().timestamp(),
+        );
     }
 
     /// Get the configured NFT contract address.
@@ -974,15 +1016,8 @@ impl VestFlowContract {
 
         let contract_address = env.current_contract_address();
         let token_client = token::Client::new(&env, &schedule.token);
-        
-        // Use try_transfer to catch balance-related errors and provide a clearer message
-        token_client
-            .try_transfer(
-                &contract_address,
-                &schedule.beneficiary,
-                &claimable,
-            )
-            .expect("Insufficient balance or below minimum reserve");
+
+        token_client.transfer(&contract_address, &schedule.beneficiary, &claimable);
 
         env.storage()
             .instance()
