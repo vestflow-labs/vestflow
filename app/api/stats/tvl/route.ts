@@ -33,7 +33,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     });
 
     const data: unknown = await res.json();
-    return NextResponse.json(data, { status: res.status });
+    return NextResponse.json(data, {
+      status: res.status,
+      headers: {
+        "Cache-Control": "public, max-age=60, stale-while-revalidate=600",
+      },
+    });
   } catch {
     return NextResponse.json(
       {
