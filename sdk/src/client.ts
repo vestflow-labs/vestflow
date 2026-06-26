@@ -281,6 +281,28 @@ export class VestflowClient {
   }
 
   /**
+   * Fetch total vested amounts (earned, including already-claimed) for multiple
+   * schedule IDs in a single simulation round-trip using the vested_amount_bulk
+   * contract view.
+   *
+   * Results are in the same order as the input ids.
+   * Unknown IDs return 0n.
+   */
+  async getVestedAmountBulk(ids: number[], publicKey?: string): Promise<bigint[]> {
+    if (ids.length === 0) return [];
+    try {
+      const idsVal = xdr.ScVal.scvVec(
+        ids.map((id) => nativeToScVal(id, { type: "u64" }))
+      );
+      const val = await this.simulate("vested_amount_bulk", [idsVal], publicKey);
+      const native = scValToNative(val) as bigint[];
+      return native.map((v) => BigInt(v));
+    } catch {
+      return ids.map(() => 0n);
+    }
+  }
+
+  /**
    * Fetch all schedules ever created, with their claimable amounts.
    */
   async getAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
