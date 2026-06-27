@@ -6,7 +6,7 @@
     "node": ">=20"
   },
   "overrides": {
-    "postcss": "^8.4.38"
+    "postcss": "8.4.38"
   },
   "scripts": {
     "dev": "next dev",
@@ -30,8 +30,9 @@
     "@types/node": "^20",
     "@types/react": "^19.2.16",
     "@types/react-dom": "^19.2.3",
+    "better-sqlite3": "^12.11.1",
     "lefthook": "^2.1.9",
-    "postcss": "^8.4.38",
+    "postcss": "8.4.38",
     "tailwindcss": "^4",
     "tsup": "^8.5.1",
     "typescript": "^5",
