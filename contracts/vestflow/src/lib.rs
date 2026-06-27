@@ -1364,6 +1364,82 @@ impl VestFlowContract {
         }
         results
     }
+
+    /// Destroy a schedule and reclaim storage for fully-claimed, irrevocable schedules.
+    ///
+    /// Only callable by the beneficiary or grantor.
+    ///
+    /// Panics if `claimed_amount < total_amount` or if the schedule is revocable.
+    /// Removes schedule entry and index entries and emits a `destroyed` event.
+    pub fn destroy_schedule(env: Env, schedule_id: u64) {
+        let schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .expect("Schedule not found");
+
+        // Authorization: beneficiary OR grantor.
+        // Use env.invoker() to avoid forcing both signatures.
+        let invoker = env.invoker();
+        if invoker == schedule.beneficiary {
+            schedule.beneficiary.require_auth();
+        } else if invoker == schedule.grantor {
+            schedule.grantor.require_auth();
+        } else {
+            // Match existing style: require_auth will panic on unauthorized access.
+            schedule.beneficiary.require_auth();
+        }
+
+        assert!(
+            schedule.claimed_amount == schedule.total_amount,
+            "Schedule not fully claimed"
+        );
+        assert!(!schedule.revocable, "Schedule is revocable");
+
+        // Remove schedule storage.
+        env.storage()
+            .instance()
+            .remove(&DataKey::Schedule(schedule_id));
+
+        // Remove from grantor index.
+        let mut grantor_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::GrantorSchedules(schedule.grantor.clone()))
+            .unwrap_or(vec![&env]);
+        let mut new_grantor_ids: Vec<u64> = vec![&env];
+        for gid in grantor_ids.iter() {
+            if gid != schedule_id {
+                new_grantor_ids.push_back(gid);
+            }
+        }
+        env.storage().instance().set(
+            &DataKey::GrantorSchedules(schedule.grantor.clone()),
+            &new_grantor_ids,
+        );
+
+        // Remove from beneficiary index.
+        let mut beneficiary_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::BeneficiarySchedules(schedule.beneficiary.clone()))
+            .unwrap_or(vec![&env]);
+        let mut new_beneficiary_ids: Vec<u64> = vec![&env];
+        for bid in beneficiary_ids.iter() {
+            if bid != schedule_id {
+                new_beneficiary_ids.push_back(bid);
+            }
+        }
+        env.storage().instance().set(
+            &DataKey::BeneficiarySchedules(schedule.beneficiary.clone()),
+            &new_beneficiary_ids,
+        );
+
+        env.events().publish(
+            (symbol_short!("destroyed"), schedule_id),
+            (schedule.grantor, schedule.beneficiary, schedule.token),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2832,4 +2908,145 @@ mod test {
         }]);
         client.transfer_grantor(&id, &attacker);
     }
+
+    // --- Issue #256: destroy_schedule ---
+
+    #[test]
+    fn test_destroy_schedule_success_irrevocable_fully_claimed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        let token = TokenClient::new(&env, &token_addr);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false, // revocable = false
+        );
+
+        // Fully vested
+        set_time(&env, 1000);
+        assert_eq!(client.claimable(&id), 1000);
+        client.claim(&id);
+        assert_eq!(token.balance(&beneficiary), 1000);
+
+        client.destroy_schedule(&id);
+
+        // Schedule removed
+        assert!(client.get_schedule(&id).is_err());
+
+        // Index removed
+        let grantor_ids = client.get_schedules_by_grantor(&grantor);
+        assert!(!grantor_ids.contains(&id));
+        let beneficiary_ids = client.get_schedules_by_beneficiary(&beneficiary);
+        assert!(!beneficiary_ids.contains(&id));
+    }
+
+    #[test]
+    #[should_panic(expected = "Schedule not fully claimed")]
+    fn test_destroy_schedule_panics_when_not_fully_claimed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        // Half vested
+        set_time(&env, 500);
+        client.claim(&id); // claim 500 only
+
+        client.destroy_schedule(&id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Schedule is revocable")]
+    fn test_destroy_schedule_panics_when_revocable() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true, // revocable
+        );
+
+        set_time(&env, 1000);
+        client.claim(&id);
+
+        client.destroy_schedule(&id);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_destroy_schedule_requires_beneficiary_or_grantor_auth() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let attacker = Address::generate(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        set_time(&env, 1000);
+        client.claim(&id);
+
+        // Only attacker auth should be present.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &attacker,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "destroy_schedule",
+                args: soroban_sdk::vec![
+                    &env,
+                    soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&id, &env),
+                ]
+                .into(),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.destroy_schedule(&id);
+    }
 }
+
