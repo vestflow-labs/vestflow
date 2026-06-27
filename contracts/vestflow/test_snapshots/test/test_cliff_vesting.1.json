@@ -83,6 +83,9 @@
                   "u64": 500
                 },
                 {
+                  "u64": 500
+                },
+                {
                   "vec": [
                     {
                       "symbol": "Cliff"
@@ -301,7 +304,7 @@
                             },
                             {
                               "key": {
-                                "symbol": "claimed"
+                                "symbol": "claimed_amount"
                               },
                               "val": {
                                 "i128": {
@@ -312,7 +315,7 @@
                             },
                             {
                               "key": {
-                                "symbol": "cliff_duration"
+                                "symbol": "cliff_seconds"
                               },
                               "val": {
                                 "u64": 500
@@ -320,7 +323,7 @@
                             },
                             {
                               "key": {
-                                "symbol": "duration"
+                                "symbol": "duration_seconds"
                               },
                               "val": {
                                 "u64": 1000
@@ -352,6 +355,14 @@
                                     "symbol": "Cliff"
                                   }
                                 ]
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "lockup_duration"
+                              },
+                              "val": {
+                                "u64": 500
                               }
                             },
                             {

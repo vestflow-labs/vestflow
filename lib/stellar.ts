@@ -102,6 +102,62 @@ export async function getClaimable(id: number, publicKey?: string): Promise<bigi
 }
 
 /**
+ * Preview how many tokens will be claimable at an arbitrary future timestamp.
+ *
+ * Calls the `claimable_at_timestamp` contract view, which projects the
+ * current schedule state forward to `ts`. Accurate for future timestamps;
+ * for past timestamps the result may differ from what was historically
+ * claimable because it uses the current claimed_amount.
+ *
+ * Returns 0n for unknown schedule IDs.
+ */
+export async function getClaimableAtTimestamp(
+  id: number,
+  ts: number,
+  publicKey?: string
+): Promise<bigint> {
+  try {
+    const val = await simulate(
+      "claimable_at_timestamp",
+      [nativeToScVal(id, { type: "u64" }), nativeToScVal(ts, { type: "u64" })],
+      publicKey
+    );
+    return BigInt(scValToNative(val));
+  } catch {
+    return 0n;
+  }
+}
+
+/**
+ * Fetch multiple schedules in a single simulation round-trip by calling
+ * the `get_schedule_batch` contract view.
+ *
+ * Returns results in the same order as `ids`. Unknown IDs return null.
+ * Replaces the Promise.all(getSchedule) N-call pattern, reducing N RPC
+ * calls to 1.
+ */
+export async function getScheduleBatch(
+  ids: number[],
+  publicKey?: string
+): Promise<(ScheduleData | null)[]> {
+  if (ids.length === 0) return [];
+  try {
+    const idsVal = xdr.ScVal.scvVec(
+      ids.map((id) => nativeToScVal(id, { type: "u64" }))
+    );
+    const val = await simulate("get_schedule_batch", [idsVal], publicKey);
+    // scValToNative decodes Option<VestingSchedule> as a raw JS object or
+    // null/undefined. We must run parseSchedule on each non-null item so
+    // Soroban field names (claimed_amount, duration_seconds) are mapped to
+    // the ScheduleData interface fields (claimed, duration).
+    const rawItems = scValToNative(val) as any[];
+    return rawItems.map((raw: any) => (raw == null ? null : parseSchedule(raw)));
+  } catch {
+    return ids.map(() => null);
+  }
+}
+
+/**
  * Fetch claimable amounts for every schedule ID in a single simulation
  * round-trip by calling the `claimable_bulk` contract view function.
  *
@@ -128,14 +184,9 @@ export async function getClaimableBulk(
 export async function getAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
   const count = await getScheduleCount();
   if (count === 0) return [];
-
-  // Fetch all schedule structs in parallel (N calls)
   const ids = Array.from({ length: count }, (_, i) => i + 1);
-  const [schedules, _claimableAmounts] = await Promise.all([
-    Promise.all(ids.map((id) => getSchedule(id, publicKey))),
-    getClaimableBulk(ids, publicKey), // single simulation round-trip
-  ]);
-
+  // Single batch call replaces the former Promise.all(getSchedule) N-call pattern.
+  const schedules = await getScheduleBatch(ids, publicKey);
   return schedules.filter(Boolean) as ScheduleData[];
 }
 
@@ -223,6 +274,17 @@ export async function revokeSchedule(publicKey: string, scheduleId: number): Pro
   return buildAndSend(publicKey, "revoke", [nativeToScVal(scheduleId, { type: "u64" })]);
 }
 
+export async function transferGrantor(
+  publicKey: string,
+  scheduleId: number,
+  newGrantor: string
+): Promise<string> {
+  return buildAndSend(publicKey, "transfer_grantor", [
+    nativeToScVal(scheduleId, { type: "u64" }),
+    nativeToScVal(newGrantor, { type: "address" }),
+  ]);
+}
+
 // ---------- Types ----------
 
 export interface ScheduleData {
@@ -235,9 +297,11 @@ export interface ScheduleData {
   start_time: number;
   duration: number;
   cliff_duration: number;
-  kind: "Linear" | "Cliff" | "LinearWithCliff";
+  lockup_duration: number;
+  kind: "Linear" | "Cliff" | "LinearWithCliff" | "Graded";
   revocable: boolean;
   revoked: boolean;
+  milestones?: { pct: number; timestamp: number }[];
 }
 
 function parseSchedule(raw: any): ScheduleData {
@@ -251,9 +315,23 @@ function parseSchedule(raw: any): ScheduleData {
     start_time: Number(raw.start_time ?? 0),
     duration: Number(raw.duration ?? raw.duration_seconds ?? 0),
     cliff_duration: Number(raw.cliff_duration ?? raw.cliff_seconds ?? 0),
-    kind: raw.kind === "Cliff" ? "Cliff" : raw.kind === "LinearWithCliff" ? "LinearWithCliff" : "Linear",
+    lockup_duration: Number(raw.lockup_duration ?? raw.lockup_seconds ?? 0),
+    kind:
+      raw.kind === "Cliff"
+        ? "Cliff"
+        : raw.kind === "LinearWithCliff"
+        ? "LinearWithCliff"
+        : raw.kind === "Graded"
+        ? "Graded"
+        : "Linear",
     revocable: Boolean(raw.revocable),
     revoked: Boolean(raw.revoked),
+    milestones: Array.isArray(raw.milestones)
+      ? (raw.milestones as any[]).map((m) => ({
+          pct: Number(m.pct ?? m.percent ?? 0),
+          timestamp: Number(m.timestamp ?? m.ts ?? 0),
+        }))
+      : undefined,
   };
 }
 
@@ -269,6 +347,14 @@ export function truncate(addr: string, prefixLen = 6, suffixLen = 4): string {
 }
 
 export function vestingProgress(s: ScheduleData, now: number): number {
+  if (s.kind === "Graded" && s.milestones && s.milestones.length > 0) {
+    return Math.min(
+      100,
+      s.milestones
+        .filter((m) => now >= m.timestamp)
+        .reduce((sum, m) => sum + m.pct, 0)
+    );
+  }
   if (now < s.start_time) return 0;
   const elapsed = now - s.start_time;
   return Math.min(100, Math.round((elapsed / s.duration) * 100));

@@ -108,6 +108,44 @@ export function insertEvent(row: InsertEventRow, network?: NetworkName): boolean
   return result.changes > 0;
 }
 
+// ── History ───────────────────────────────────────────────────────────
+
+export interface HistoryQueryParams {
+  address: string;
+  limit?: number;
+  offset?: number;
+  /** Asset contract address — maps to the token column. */
+  token?: string;
+  network?: NetworkName;
+}
+
+/**
+ * Return paginated claim and revoke events for a grantor/beneficiary address.
+ * Results are ordered by ledger descending (most recent first).
+ */
+export function queryHistory(params: HistoryQueryParams): IndexedEvent[] {
+  const db = getDb(params.network);
+  const conditions: string[] = [
+    "(grantor = ? OR beneficiary = ?)",
+    "event_type IN ('claimed', 'revoked')",
+  ];
+  const values: unknown[] = [params.address, params.address];
+
+  if (params.token) {
+    conditions.push("token = ?");
+    values.push(params.token);
+  }
+
+  const limit = Math.min(params.limit ?? 50, 200);
+  const offset = params.offset ?? 0;
+
+  return db
+    .prepare(
+      `SELECT * FROM schedule_events WHERE ${conditions.join(" AND ")} ORDER BY ledger DESC LIMIT ? OFFSET ?`
+    )
+    .all(...values, limit, offset) as IndexedEvent[];
+}
+
 /** Query events with optional filters. Results ordered by ledger DESC. */
 export function queryEvents(params: EventQueryParams): IndexedEvent[] {
   const db = getDb(params.network);
