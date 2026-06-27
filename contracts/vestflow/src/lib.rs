@@ -976,7 +976,7 @@ impl VestFlowContract {
         let token_client = token::Client::new(&env, &schedule.token);
         
         // Use try_transfer to catch balance-related errors and provide a clearer message
-        token_client
+        let _ = token_client
             .try_transfer(
                 &contract_address,
                 &schedule.beneficiary,
