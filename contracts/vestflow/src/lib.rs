@@ -1018,6 +1018,7 @@ impl VestFlowContract {
             return Err(VestFlowError::NothingToClaim);
         }
 
+        let prev_claimed = schedule.claimed_amount;
         schedule.claimed_amount += claimable;
 
         let contract_address = env.current_contract_address();
@@ -1036,6 +1037,27 @@ impl VestFlowContract {
             ),
             (schedule_id, claimable, schedule.claimed_amount),
         );
+
+        // For Graded schedules, emit a `mile_unl` event for each milestone
+        // whose cumulative threshold is crossed for the first time this claim.
+        if matches!(schedule.kind, VestingKind::Graded) {
+            let mut cumulative_bps: u64 = 0;
+            for milestone in schedule.milestones.iter() {
+                cumulative_bps += milestone.bps as u64;
+                let threshold = schedule
+                    .total_amount
+                    .checked_mul(cumulative_bps as i128)
+                    .and_then(|n| n.checked_div(10_000))
+                    .unwrap_or(schedule.total_amount);
+                // Emit only when this claim crosses the threshold for the first time
+                if prev_claimed < threshold && schedule.claimed_amount >= threshold {
+                    env.events().publish(
+                        (symbol_short!("mile_unl"), schedule_id),
+                        (milestone.offset_secs, milestone.bps, cumulative_bps),
+                    );
+                }
+            }
+        }
 
         Ok(())
     }
