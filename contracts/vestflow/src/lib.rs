@@ -86,6 +86,12 @@ pub enum DataKey {
 /// Mandatory delay between an on-chain upgrade announcement and execution.
 pub const UPGRADE_TIMELOCK_SECONDS: u64 = 48 * 60 * 60;
 
+/// Maximum number of milestones allowed in a graded vesting schedule.
+/// Bounds the stored schedule size and the per-claim iteration cost so a
+/// `create_graded_schedule` call cannot exceed the transaction instruction
+/// limit with an unbounded milestone vector.
+pub const MAX_MILESTONES: u32 = 100;
+
 /// A contract WASM upgrade that has been announced on-chain but not yet executed.
 #[contracttype]
 #[derive(Clone, PartialEq)]
@@ -621,6 +627,7 @@ impl VestFlowContract {
     /// Panics with `"Amount must be positive"` if `total_amount` ≤ 0.
     /// Panics with `"Start time cannot be in the past"` if `start_time` < current ledger time.
     /// Panics with `"Milestones required"` if the milestones list is empty.
+    /// Panics with `"Too many milestones"` if the list exceeds `MAX_MILESTONES`.
     /// Panics with `"Milestones must sum to 10000 bps"` if the bps total ≠ 10 000.
     pub fn create_graded_schedule(
         env: Env,
@@ -645,6 +652,7 @@ impl VestFlowContract {
             "Start time cannot be in the past"
         );
         assert!(!milestones.is_empty(), "Milestones required");
+        assert!(milestones.len() <= MAX_MILESTONES, "Too many milestones");
 
         let total_bps: u64 = milestones.iter().map(|m| m.bps as u64).sum();
         assert!(total_bps == 10_000, "Milestones must sum to 10000 bps");
@@ -2216,6 +2224,62 @@ mod test {
             &false,
             &milestones,
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "Too many milestones")]
+    fn test_graded_vesting_rejects_too_many_milestones() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        // MAX_MILESTONES + 1 entries — should panic before the bps-sum check.
+        let mut milestones: soroban_sdk::Vec<GradedMilestone> = soroban_sdk::vec![&env];
+        for i in 0..(MAX_MILESTONES + 1) {
+            milestones.push_back(GradedMilestone {
+                offset_secs: (i as u64 + 1) * 600,
+                bps: 1,
+            });
+        }
+        client.create_graded_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &10_000,
+            &0,
+            &0,
+            &false,
+            &milestones,
+        );
+    }
+
+    #[test]
+    fn test_graded_vesting_accepts_max_milestones() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        // Exactly MAX_MILESTONES entries summing to 10 000 bps — should succeed.
+        let mut milestones: soroban_sdk::Vec<GradedMilestone> = soroban_sdk::vec![&env];
+        for i in 0..MAX_MILESTONES {
+            milestones.push_back(GradedMilestone {
+                offset_secs: (i as u64 + 1) * 600,
+                bps: 100, // 100 bps × 100 milestones = 10 000 bps
+            });
+        }
+        let id = client.create_graded_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &10_000,
+            &0,
+            &0,
+            &false,
+            &milestones,
+        );
+        assert_eq!(client.get_schedule(&id).milestones.len(), MAX_MILESTONES);
     }
 
     // --- Issue #7: transfer_beneficiary tests ---

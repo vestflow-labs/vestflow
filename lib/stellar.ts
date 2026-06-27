@@ -242,12 +242,13 @@ export async function createSchedule(
   durationDays: number,
   cliffDays: number,
   kind: "Linear" | "Cliff" | "LinearWithCliff",
-  revocable: boolean
+  revocable: boolean,
+  lockupDays: number = cliffDays
 ): Promise<string> {
   const totalStroops = xlmToStroops(totalAmountXlm);
   const durationSecs = durationDays * 86400;
   const cliffSecs = cliffDays * 86400;
-  const lockupSecs = cliffSecs;
+  const lockupSecs = lockupDays * 86400;
 
   const kindVal = xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(kind)]);
 
@@ -301,6 +302,12 @@ export interface ScheduleData {
   kind: "Linear" | "Cliff" | "LinearWithCliff" | "Graded";
   revocable: boolean;
   revoked: boolean;
+  /**
+   * Tokens that were vested at the moment of revocation (stroops).
+   * Zero for schedules that have never been revoked. For a revoked schedule
+   * this is the frozen vested amount — see `vestingProgress`.
+   */
+  vested_at_revoke: bigint;
   milestones?: { pct: number; timestamp: number }[];
 }
 
@@ -326,6 +333,7 @@ function parseSchedule(raw: any): ScheduleData {
         : "Linear",
     revocable: Boolean(raw.revocable),
     revoked: Boolean(raw.revoked),
+    vested_at_revoke: BigInt(raw.vested_at_revoke ?? 0),
     milestones: Array.isArray(raw.milestones)
       ? (raw.milestones as any[]).map((m) => ({
           pct: Number(m.pct ?? m.percent ?? 0),
@@ -347,6 +355,17 @@ export function truncate(addr: string, prefixLen = 6, suffixLen = 4): string {
 }
 
 export function vestingProgress(s: ScheduleData, now: number): number {
+  // Revoked schedules freeze at the progress captured when revocation
+  // happened. The contract stores this as `vested_at_revoke`; using the
+  // time-based formula below would keep animating past the revocation point,
+  // which is misleading next to the "Revoked" badge.
+  if (s.revoked) {
+    if (s.total_amount <= 0n) return 0;
+    return Math.min(
+      100,
+      Math.round((Number(s.vested_at_revoke) / Number(s.total_amount)) * 100)
+    );
+  }
   if (s.kind === "Graded" && s.milestones && s.milestones.length > 0) {
     return Math.min(
       100,

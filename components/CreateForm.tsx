@@ -24,6 +24,7 @@ interface FormState {
   startTime: string;
   durationDays: string;
   cliffDays: string;
+  lockupDays: string;
   kind: VestingKind;
   revocable: boolean;
 }
@@ -88,6 +89,20 @@ function validateForm(form: FormState): FormErrors {
     } else if (!isNaN(cliff) && !isNaN(dur) && cliff > dur) {
       errors.cliffDays = "Cliff cannot exceed total duration.";
     }
+  }
+
+  // Lockup: tokens stay non-transferable until this many days after start.
+  // The contract requires lockup >= cliff, so mirror that here.
+  const cliffForLockup = parseInt(form.cliffDays || "0");
+  const lockup = parseInt(form.lockupDays);
+  if (!form.lockupDays && form.lockupDays !== "0") {
+    errors.lockupDays = "Lockup duration is required.";
+  } else if (isNaN(lockup) || lockup < 0) {
+    errors.lockupDays = "Lockup must be 0 or more days.";
+  } else if (!isNaN(cliffForLockup) && lockup < cliffForLockup) {
+    errors.lockupDays = "Lockup must be greater than or equal to the cliff duration.";
+  } else if (!isNaN(dur) && lockup > dur) {
+    errors.lockupDays = "Lockup cannot exceed total duration.";
   }
 
   return errors;
@@ -210,6 +225,7 @@ export default function CreateForm() {
     startTime: "00:00",
     durationDays: "",
     cliffDays: "0",
+    lockupDays: "0",
     kind: "Linear",
     revocable: true,
   });
@@ -231,6 +247,15 @@ export default function CreateForm() {
     setTouched(
       (t) => ({ ...t, [k]: true }) as Partial<Record<keyof FormState, boolean>>,
     );
+
+  // Update the cliff value, keeping the (un-edited) lockup in lockstep so the
+  // default behaviour matches the old hard-coded `lockup = cliff` mirror.
+  const setCliffDays = (v: string) =>
+    setForm((f) => ({
+      ...f,
+      cliffDays: v,
+      lockupDays: lockupEdited ? f.lockupDays : v,
+    }));
 
   const errors = validateForm(form);
 
@@ -281,6 +306,7 @@ export default function CreateForm() {
         parseInt(form.cliffDays),
         form.kind,
         form.revocable,
+        parseInt(form.lockupDays),
       );
       setTxHash(hash);
       setStatus("done");
@@ -313,6 +339,7 @@ export default function CreateForm() {
     setErrMsg("");
     setSubmitAttempted(false);
     setTouched({});
+    setLockupEdited(false);
     setForm({
       beneficiary: "",
       tokenAddress: NATIVE_TOKEN,
@@ -321,6 +348,7 @@ export default function CreateForm() {
       startTime: "00:00",
       durationDays: "",
       cliffDays: "0",
+      lockupDays: "0",
       kind: "Linear",
       revocable: true,
     });
@@ -708,7 +736,7 @@ export default function CreateForm() {
             min="0"
             step="1"
             value={form.cliffDays}
-            onChange={(e) => set("cliffDays", e.target.value)}
+            onChange={(e) => setCliffDays(e.target.value)}
             onBlur={() => touch("cliffDays")}
             aria-invalid={!!visibleErrors.cliffDays}
             className={`input ${visibleErrors.cliffDays ? "border-red-500/60 focus:border-red-500" : ""}`}
