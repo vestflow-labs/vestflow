@@ -38,6 +38,8 @@ function vestedAmount(schedule: {
 export async function GET(request: NextRequest): Promise<NextResponse> {
   try {
     const address = request.nextUrl.searchParams.get("address");
+    const pageParam = request.nextUrl.searchParams.get("page");
+    const limitParam = request.nextUrl.searchParams.get("limit");
 
     if (!address) {
       return NextResponse.json(
@@ -46,14 +48,28 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       );
     }
 
+    const page = pageParam ? Math.max(1, parseInt(pageParam, 10)) : 1;
+    const limit = limitParam ? Math.max(1, parseInt(limitParam, 10)) : 20;
+
     const allSchedules = await getAllSchedules();
     const filtered = allSchedules.filter(
       (s) => s.grantor === address || s.beneficiary === address
     );
 
-    if (filtered.length === 0) {
+    const total = filtered.length;
+    const totalPages = Math.ceil(total / limit);
+    const start = (page - 1) * limit;
+    const paginatedSchedules = filtered.slice(start, start + limit);
+
+    if (paginatedSchedules.length === 0) {
       return NextResponse.json(
-        { schedules: [], network: NETWORK },
+        {
+          schedules: [],
+          total,
+          page,
+          totalPages,
+          network: NETWORK,
+        },
         {
           headers: {
             "Cache-Control": "public, max-age=30, stale-while-revalidate=300",
@@ -62,11 +78,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       );
     }
 
-    const ids = filtered.map((s) => s.id);
+    const ids = paginatedSchedules.map((s) => s.id);
     const claimableAmounts = await getClaimableBulk(ids);
     const now = Math.floor(Date.now() / 1000);
 
-    const schedules = filtered.map((s, i) => {
+    const schedules = paginatedSchedules.map((s, i) => {
       const vested = vestedAmount(s, now);
       const claimable = claimableAmounts[i] ?? 0n;
       return {
@@ -88,7 +104,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     });
 
     return NextResponse.json(
-      { schedules, network: NETWORK },
+      {
+        schedules,
+        total,
+        page,
+        totalPages,
+        network: NETWORK,
+      },
       {
         headers: {
           "Cache-Control": "public, max-age=30, stale-while-revalidate=300",

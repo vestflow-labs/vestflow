@@ -21,6 +21,7 @@ import {
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import { useXlmPrice, formatUsd } from "@/lib/price";
+import { ScheduleDetailSkeleton } from "@/components/ScheduleCardSkeleton";
 
 export default function ScheduleDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -76,7 +77,7 @@ export default function ScheduleDetailPage() {
     <>
       <Navbar />
       <main className="max-w-3xl mx-auto px-6 pt-28 pb-20">
-        <div className="h-96 rounded-2xl bg-white/3 animate-pulse" />
+        <ScheduleDetailSkeleton />
       </main>
     </>
   );

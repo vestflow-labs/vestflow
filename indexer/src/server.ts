@@ -12,7 +12,7 @@
 
 import http from "http";
 import { URL } from "url";
-import { getCheckpoint, queryEvents } from "./db";
+import { getCheckpoint, queryEvents, queryHistory } from "./db";
 import type { EventQueryParams } from "./types";
 
 const PORT = Number(process.env.INDEXER_PORT ?? "3001");
@@ -88,6 +88,34 @@ function handleEvents(
   }
 }
 
+function handleHistory(
+  res: http.ServerResponse,
+  address: string,
+  searchParams: URLSearchParams
+): void {
+  try {
+    const limit = numParam(searchParams, "limit");
+    const offset = numParam(searchParams, "offset");
+    const asset = searchParams.get("asset") ?? undefined;
+
+    const events = queryHistory({ address, limit, offset, token: asset });
+
+    json(res, 200, {
+      events,
+      address,
+      limit: Math.min(limit ?? 50, 200),
+      offset: offset ?? 0,
+      checkpoint: getCheckpoint(),
+    });
+  } catch (error) {
+    console.error("[server] History query error:", error);
+
+    json(res, 500, {
+      error: "Query failed",
+    });
+  }
+}
+
 function createServer(): http.Server {
   return http.createServer((req, res) => {
     if (req.method !== "GET") {
@@ -106,6 +134,10 @@ function createServer(): http.Server {
       });
     }
 
+    const historyMatch = url.pathname.match(
+      /^\/schedules\/([A-Z0-9]{56})\/history$/
+    );
+
     switch (url.pathname) {
       case "/health":
         return handleHealth(res);
@@ -114,6 +146,9 @@ function createServer(): http.Server {
         return handleEvents(res, url.searchParams);
 
       default:
+        if (historyMatch) {
+          return handleHistory(res, historyMatch[1], url.searchParams);
+        }
         return json(res, 404, {
           error: "Not found",
         });

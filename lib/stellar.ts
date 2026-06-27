@@ -235,9 +235,11 @@ export interface ScheduleData {
   start_time: number;
   duration: number;
   cliff_duration: number;
-  kind: "Linear" | "Cliff" | "LinearWithCliff";
+  lockup_duration: number;
+  kind: "Linear" | "Cliff" | "LinearWithCliff" | "Graded";
   revocable: boolean;
   revoked: boolean;
+  milestones?: { pct: number; timestamp: number }[];
 }
 
 function parseSchedule(raw: any): ScheduleData {
@@ -251,9 +253,23 @@ function parseSchedule(raw: any): ScheduleData {
     start_time: Number(raw.start_time ?? 0),
     duration: Number(raw.duration ?? raw.duration_seconds ?? 0),
     cliff_duration: Number(raw.cliff_duration ?? raw.cliff_seconds ?? 0),
-    kind: raw.kind === "Cliff" ? "Cliff" : raw.kind === "LinearWithCliff" ? "LinearWithCliff" : "Linear",
+    lockup_duration: Number(raw.lockup_duration ?? raw.lockup_seconds ?? 0),
+    kind:
+      raw.kind === "Cliff"
+        ? "Cliff"
+        : raw.kind === "LinearWithCliff"
+        ? "LinearWithCliff"
+        : raw.kind === "Graded"
+        ? "Graded"
+        : "Linear",
     revocable: Boolean(raw.revocable),
     revoked: Boolean(raw.revoked),
+    milestones: Array.isArray(raw.milestones)
+      ? (raw.milestones as any[]).map((m) => ({
+          pct: Number(m.pct ?? m.percent ?? 0),
+          timestamp: Number(m.timestamp ?? m.ts ?? 0),
+        }))
+      : undefined,
   };
 }
 
@@ -269,6 +285,14 @@ export function truncate(addr: string, prefixLen = 6, suffixLen = 4): string {
 }
 
 export function vestingProgress(s: ScheduleData, now: number): number {
+  if (s.kind === "Graded" && s.milestones && s.milestones.length > 0) {
+    return Math.min(
+      100,
+      s.milestones
+        .filter((m) => now >= m.timestamp)
+        .reduce((sum, m) => sum + m.pct, 0)
+    );
+  }
   if (now < s.start_time) return 0;
   const elapsed = now - s.start_time;
   return Math.min(100, Math.round((elapsed / s.duration) * 100));
