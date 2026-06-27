@@ -38,6 +38,7 @@
 //! | `"Upgrade timelock still active"` | Upgrade execution attempted before 48 hours elapsed |
 //! | `"Upgrade executable time overflow"` | Upgrade announcement timestamp cannot safely add the timelock |
 //! | `"Insufficient balance or below minimum reserve"` | `claim` transfer fails due to balance constraints or Stellar minimum reserve |
+//! | `"Performance oracle must be initialized before enabling milestones"` | `enable_performance_milestones` called before `initialize_performance_oracle` |
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
@@ -843,6 +844,11 @@ impl VestFlowContract {
     /// Panics with `"Not the grantor"` if caller is not the grantor.
     /// Panics with `"Milestones already enabled"` if already enabled.
     pub fn enable_performance_milestones(env: Env, schedule_id: u64, milestones: Vec<u32>) {
+        assert!(
+            env.storage().instance().has(&DataKey::PerformanceOracle),
+            "Performance oracle must be initialized before enabling milestones"
+        );
+
         let mut schedule: VestingSchedule = env
             .storage()
             .instance()
@@ -1130,6 +1136,77 @@ impl VestFlowContract {
         Ok(())
     }
 
+    /// Transfer grantor rights to a new address (current grantor only).
+    ///
+    /// Moves revocation and pause rights to `new_grantor`. Updates the grantor
+    /// schedule index for both the old and new grantor. Emits a `"grnt_chng"`
+    /// event with `(old_grantor, new_grantor, timestamp)`.
+    ///
+    /// Returns `Ok(())` immediately when `new_grantor` is the same as the
+    /// current grantor (no-op).
+    ///
+    /// # Errors
+    ///
+    /// Returns `VestFlowError::NotFound` if `schedule_id` does not exist.
+    pub fn transfer_grantor(
+        env: Env,
+        schedule_id: u64,
+        new_grantor: Address,
+    ) -> Result<(), VestFlowError> {
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(VestFlowError::NotFound)?;
+
+        schedule.grantor.require_auth();
+
+        // No-op: avoid index churn when transferring to the same address.
+        if new_grantor == schedule.grantor {
+            return Ok(());
+        }
+
+        let old_grantor = schedule.grantor.clone();
+
+        // Remove this schedule from the old grantor's index.
+        let old_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::GrantorSchedules(old_grantor.clone()))
+            .unwrap_or(vec![&env]);
+        let mut filtered: Vec<u64> = vec![&env];
+        for gid in old_ids.iter() {
+            if gid != schedule_id {
+                filtered.push_back(gid);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::GrantorSchedules(old_grantor.clone()), &filtered);
+
+        // Add this schedule to the new grantor's index.
+        let mut new_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::GrantorSchedules(new_grantor.clone()))
+            .unwrap_or(vec![&env]);
+        new_ids.push_back(schedule_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::GrantorSchedules(new_grantor.clone()), &new_ids);
+
+        schedule.grantor = new_grantor.clone();
+        env.storage()
+            .instance()
+            .set(&DataKey::Schedule(schedule_id), &schedule);
+
+        env.events().publish(
+            (symbol_short!("grnt_chng"), schedule_id),
+            (old_grantor, new_grantor, env.ledger().timestamp()),
+        );
+        Ok(())
+    }
+
     /// Read a vesting schedule by ID.
     ///
     /// # Errors
@@ -1140,6 +1217,24 @@ impl VestFlowContract {
             .instance()
             .get(&DataKey::Schedule(schedule_id))
             .ok_or(VestFlowError::NotFound)
+    }
+
+    /// Batch view: fetch multiple schedules in a single simulation round-trip.
+    ///
+    /// Returns `None` for unknown IDs rather than panicking, so callers can
+    /// safely pass a contiguous range without knowing which IDs exist.
+    /// Results are returned in the same order as the input `ids` vector.
+    ///
+    /// This replaces the `Promise.all(getSchedule)` pattern in the frontend
+    /// dashboard, reducing N simulation round-trips to 1.
+    pub fn get_schedule_batch(env: Env, ids: Vec<u64>) -> Vec<Option<VestingSchedule>> {
+        let mut results: Vec<Option<VestingSchedule>> = vec![&env];
+        for id in ids.iter() {
+            let schedule: Option<VestingSchedule> =
+                env.storage().instance().get(&DataKey::Schedule(id));
+            results.push_back(schedule);
+        }
+        results
     }
 
     /// How many schedules have been created in total.
@@ -1180,6 +1275,26 @@ impl VestFlowContract {
             .get::<DataKey, VestingSchedule>(&DataKey::Schedule(schedule_id))
         {
             Some(schedule) => schedule.claimable_at(env.ledger().timestamp()),
+            None => 0,
+        }
+    }
+
+    /// Preview how many tokens will be claimable at an arbitrary timestamp `ts`.
+    ///
+    /// Intended for UI previews such as "how much can I claim at the 1-year
+    /// mark?". The result reflects current schedule state projected to `ts`:
+    /// it accounts for lockup, pauses (accumulated up to now), cliff, and
+    /// revocation, but uses the current `claimed_amount` — so the return value
+    /// is most meaningful for future timestamps.
+    ///
+    /// Returns 0 if `schedule_id` is unknown (does not panic).
+    pub fn claimable_at_timestamp(env: Env, schedule_id: u64, ts: u64) -> i128 {
+        match env
+            .storage()
+            .instance()
+            .get::<DataKey, VestingSchedule>(&DataKey::Schedule(schedule_id))
+        {
+            Some(schedule) => schedule.claimable_at(ts),
             None => 0,
         }
     }
@@ -2432,5 +2547,289 @@ mod test {
             &VestingKind::Linear,
             &false,
         );
+    }
+
+    // --- Issue #260: oracle guard on enable_performance_milestones ---
+
+    #[test]
+    #[should_panic(expected = "Performance oracle must be initialized before enabling milestones")]
+    fn test_enable_milestones_without_oracle_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        // No oracle initialized — must panic.
+        let milestones = soroban_sdk::vec![&env, 50_u32, 50_u32];
+        client.enable_performance_milestones(&id, &milestones);
+    }
+
+    // --- Issue #258: claimable_at_timestamp ---
+
+    #[test]
+    fn test_claimable_at_timestamp_future_linear() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        // At t=500 (halfway) 500 tokens will be claimable.
+        assert_eq!(client.claimable_at_timestamp(&id, &500), 500);
+        // At t=1000 (end) all 1000 tokens will be claimable.
+        assert_eq!(client.claimable_at_timestamp(&id, &1000), 1000);
+        // Before start: nothing claimable.
+        // (start_time=0, so t=0 means no elapsed time → 0 vested)
+        assert_eq!(client.claimable_at_timestamp(&id, &0), 0);
+    }
+
+    #[test]
+    fn test_claimable_at_timestamp_unknown_id_returns_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, _) = setup(&env);
+
+        // ID 999 does not exist — must return 0, not panic.
+        assert_eq!(client.claimable_at_timestamp(&999_u64, &9999_u64), 0);
+    }
+
+    #[test]
+    fn test_claimable_at_timestamp_respects_cliff() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        // Cliff at 500s; tokens unlock all-at-once then.
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &500,
+            &500,
+            &VestingKind::Cliff,
+            &false,
+        );
+
+        // Before cliff: nothing.
+        assert_eq!(client.claimable_at_timestamp(&id, &499), 0);
+        // At cliff: full amount.
+        assert_eq!(client.claimable_at_timestamp(&id, &500), 1000);
+    }
+
+    // --- Issue #257: get_schedule_batch ---
+
+    #[test]
+    fn test_get_schedule_batch_returns_in_order() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id1 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+        let id2 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &2000,
+            &0,
+            &2000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        let ids = soroban_sdk::vec![&env, id1, id2];
+        let batch = client.get_schedule_batch(&ids);
+        assert_eq!(batch.len(), 2);
+        assert!(batch.get(0).unwrap().is_some());
+        assert!(batch.get(1).unwrap().is_some());
+        assert_eq!(batch.get(0).unwrap().unwrap().total_amount, 1000);
+        assert_eq!(batch.get(1).unwrap().unwrap().total_amount, 2000);
+    }
+
+    #[test]
+    fn test_get_schedule_batch_unknown_id_returns_none() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, _) = setup(&env);
+
+        // ID 999 does not exist — must return None, not panic.
+        let ids = soroban_sdk::vec![&env, 999_u64];
+        let batch = client.get_schedule_batch(&ids);
+        assert_eq!(batch.len(), 1);
+        assert!(batch.get(0).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_get_schedule_batch_empty_input() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, _) = setup(&env);
+
+        let ids: soroban_sdk::Vec<u64> = soroban_sdk::vec![&env];
+        let batch = client.get_schedule_batch(&ids);
+        assert_eq!(batch.len(), 0);
+    }
+
+    // --- Issue #262: transfer_grantor ---
+
+    #[test]
+    fn test_transfer_grantor_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let new_grantor = Address::generate(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+
+        client.transfer_grantor(&id, &new_grantor);
+
+        let schedule = client.get_schedule(&id);
+        assert_eq!(schedule.grantor, new_grantor);
+
+        // Old grantor's index must no longer contain this schedule.
+        let old_ids = client.get_schedules_by_grantor(&grantor);
+        assert!(!old_ids.contains(&id));
+
+        // New grantor's index must contain this schedule.
+        let new_ids = client.get_schedules_by_grantor(&new_grantor);
+        assert!(new_ids.contains(&id));
+    }
+
+    #[test]
+    fn test_transfer_grantor_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, _) = setup(&env);
+        let new_grantor = Address::generate(&env);
+
+        // Expect Error(Contract, #1) = VestFlowError::NotFound
+        let result = client.try_transfer_grantor(&999_u64, &new_grantor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transfer_grantor_noop_same_address() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        // Transferring to the same address must succeed without modifying state.
+        client.transfer_grantor(&id, &grantor);
+        let schedule = client.get_schedule(&id);
+        assert_eq!(schedule.grantor, grantor);
+
+        // Index must still contain the schedule under the original grantor.
+        let ids = client.get_schedules_by_grantor(&grantor);
+        assert!(ids.contains(&id));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_transfer_grantor_non_grantor_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let attacker = Address::generate(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        // Mock only attacker auth — grantor.require_auth() will fail.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &attacker,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "transfer_grantor",
+                args: soroban_sdk::vec![
+                    &env,
+                    soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&id, &env),
+                    soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(
+                        &attacker, &env
+                    ),
+                ]
+                .into(),
+                sub_invokes: &[],
+            },
+        }]);
+        client.transfer_grantor(&id, &attacker);
     }
 }

@@ -303,15 +303,56 @@ export class VestflowClient {
   }
 
   /**
-   * Fetch all schedules ever created, with their claimable amounts.
+   * Fetch multiple schedules in a single simulation round-trip.
+   *
+   * Returns results in the same order as `ids`. Unknown IDs return null.
+   * Replaces the Promise.all(getSchedule) N-call pattern.
+   */
+  async getScheduleBatch(ids: number[], publicKey?: string): Promise<(ScheduleData | null)[]> {
+    if (ids.length === 0) return [];
+    try {
+      const idsVal = xdr.ScVal.scvVec(
+        ids.map((id) => nativeToScVal(id, { type: "u64" }))
+      );
+      const val = await this.simulate("get_schedule_batch", [idsVal], publicKey);
+      const rawItems = scValToNative(val) as any[];
+      return rawItems.map((raw: any) => (raw == null ? null : this.parseSchedule(raw)));
+    } catch {
+      return ids.map(() => null);
+    }
+  }
+
+  /**
+   * Preview how many tokens will be claimable at an arbitrary future timestamp.
+   *
+   * The result reflects current schedule state projected to `ts` — most
+   * meaningful for future timestamps.
+   * Returns 0n for unknown schedule IDs.
+   */
+  async getClaimableAtTimestamp(id: number, ts: number, publicKey?: string): Promise<bigint> {
+    try {
+      const val = await this.simulate(
+        "claimable_at_timestamp",
+        [nativeToScVal(id, { type: "u64" }), nativeToScVal(ts, { type: "u64" })],
+        publicKey
+      );
+      return BigInt(scValToNative(val));
+    } catch {
+      return 0n;
+    }
+  }
+
+  /**
+   * Fetch all schedules ever created.
+   *
+   * Uses get_schedule_batch to fetch all schedules in a single simulation
+   * round-trip instead of N individual calls.
    */
   async getAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
     const count = await this.getScheduleCount();
     if (count === 0) return [];
     const ids = Array.from({ length: count }, (_, i) => i + 1);
-    const schedules = await Promise.all(
-      ids.map((id) => this.getSchedule(id, publicKey))
-    );
+    const schedules = await this.getScheduleBatch(ids, publicKey);
     return schedules.filter(Boolean) as ScheduleData[];
   }
 
@@ -432,6 +473,34 @@ export class VestflowClient {
       publicKey,
       "revoke",
       [nativeToScVal(scheduleId, { type: "u64" })],
+      signer
+    );
+  }
+
+  /**
+   * Transfer grantor rights (revocation, pause) to a new address.
+   *
+   * Requires the current grantor's signature. Emits a `grnt_chng` event.
+   *
+   * @param publicKey - Current grantor's Stellar public key
+   * @param scheduleId - ID of the schedule to transfer
+   * @param newGrantor - New grantor address
+   * @param signer - Function that signs the transaction XDR
+   * @returns Transaction hash
+   */
+  async transferGrantor(
+    publicKey: string,
+    scheduleId: number,
+    newGrantor: string,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    return this.buildAndSend(
+      publicKey,
+      "transfer_grantor",
+      [
+        nativeToScVal(scheduleId, { type: "u64" }),
+        nativeToScVal(newGrantor, { type: "address" }),
+      ],
       signer
     );
   }

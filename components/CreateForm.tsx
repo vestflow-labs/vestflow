@@ -1,7 +1,25 @@
 "use client";
 import { useState } from "react";
-import { createSchedule, CONTRACT_ID, parseContractError, NETWORK, NATIVE_TOKEN } from "@/lib/stellar";
+import { createSchedule, CONTRACT_ID, parseContractError, NETWORK, NATIVE_TOKEN, stroopsToXlm, xlmToStroops } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
+
+function estimateClaimable(
+  totalStroops: bigint,
+  startTs: number,
+  durationSecs: number,
+  cliffSecs: number,
+  kind: "Linear" | "Cliff",
+  previewTs: number
+): bigint {
+  if (previewTs <= startTs || durationSecs <= 0) return 0n;
+  const elapsed = previewTs - startTs;
+  if (kind === "Cliff") {
+    return elapsed >= cliffSecs ? totalStroops : 0n;
+  }
+  // Linear
+  if (elapsed >= durationSecs) return totalStroops;
+  return (totalStroops * BigInt(elapsed)) / BigInt(durationSecs);
+}
 
 export default function CreateForm() {
   const { publicKey } = useWallet();
@@ -13,6 +31,7 @@ export default function CreateForm() {
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [txHash, setTxHash] = useState("");
   const [errMsg, setErrMsg] = useState("");
+  const [previewDate, setPreviewDate] = useState("");
 
   const set = (k: string, v: any) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -90,6 +109,36 @@ export default function CreateForm() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <SummaryItem label="Cliff" value={form.kind === "Cliff" ? `${form.cliffDays} days` : "None"} />
             <SummaryItem label="Revocable" value={form.revocable ? "Yes" : "No"} />
+          </div>
+
+          {/* Future claimable preview (#258) */}
+          <div className="border-t border-zinc-700/50 pt-3 flex flex-col gap-2">
+            <span className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Preview Claimable At Date</span>
+            <input
+              type="date"
+              value={previewDate}
+              onChange={(e) => setPreviewDate(e.target.value)}
+              className="input text-sm px-3 py-1.5 rounded-lg bg-zinc-800/60 border border-zinc-700 text-zinc-200 focus:outline-none focus:border-violet-500 w-full"
+            />
+            {previewDate && form.amount && form.startDate && form.durationDays && (() => {
+              try {
+                const totalStroops = xlmToStroops(form.amount);
+                const [hours, minutes] = form.startTime.split(":").map(Number);
+                const startDt = new Date(form.startDate);
+                startDt.setHours(hours, minutes, 0, 0);
+                const startTs = Math.floor(startDt.getTime() / 1000);
+                const durationSecs = parseInt(form.durationDays) * 86400;
+                const cliffSecs = parseInt(form.cliffDays || "0") * 86400;
+                const previewTs = Math.floor(new Date(previewDate).getTime() / 1000);
+                const estimated = estimateClaimable(totalStroops, startTs, durationSecs, cliffSecs, form.kind, previewTs);
+                return (
+                  <p className="text-sm text-zinc-400">
+                    At this date you could claim approximately{" "}
+                    <span className="font-semibold text-violet-300">{stroopsToXlm(estimated)} {form.tokenAddress === NATIVE_TOKEN ? "XLM" : "Tokens"}</span>
+                  </p>
+                );
+              } catch { return null; }
+            })()}
           </div>
         </div>
 
