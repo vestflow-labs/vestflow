@@ -14,6 +14,7 @@ import { useWallet } from "@/lib/WalletContext";
 import CopyButton from "@/components/CopyButton";
 import ClaimModal from "@/components/ClaimModal";
 import RevokeModal from "@/components/RevokeModal";
+import PauseResumeModal from "@/components/PauseResumeModal";
 import VestingChart from "@/components/VestingChart";
 import AddressLabel from "@/components/AddressLabel";
 import { useXlmPrice, formatUsd } from "@/lib/price";
@@ -29,6 +30,7 @@ export default function ScheduleCard({
   const [showChart, setShowChart] = useState(false);
   const [showClaimModal, setShowClaimModal] = useState(false);
   const [showRevokeModal, setShowRevokeModal] = useState(false);
+  const [showPauseResumeModal, setShowPauseResumeModal] = useState(false);
   const xlmPrice = useXlmPrice();
 
   const now = Math.floor(Date.now() / 1000);
@@ -58,12 +60,16 @@ export default function ScheduleCard({
 
   const statusColor = schedule.revoked
     ? "bg-red-500/10 text-red-400"
+    : schedule.paused
+    ? "bg-amber-500/10 text-amber-400"
     : progress >= 100
     ? "bg-green-500/10 text-green-400"
     : "bg-violet-500/10 text-violet-400";
 
   const statusLabel = schedule.revoked
     ? "Revoked"
+    : schedule.paused
+    ? "Paused"
     : progress >= 100
     ? "Fully Vested"
     : "Vesting";
@@ -262,6 +268,14 @@ export default function ScheduleCard({
               Revoke
             </button>
           )}
+          {isGrantor && (
+            <button
+              onClick={() => setShowPauseResumeModal(true)}
+              className="text-xs rounded-lg px-3 py-1.5 border border-violet-500/30 text-violet-300 hover:border-violet-500/60 transition-colors"
+            >
+              {schedule.paused ? "Resume" : "Pause"}
+            </button>
+          )}
         </div>
       )}
 
@@ -280,6 +294,12 @@ export default function ScheduleCard({
         open={showRevokeModal}
         onClose={() => setShowRevokeModal(false)}
         onSuccess={() => { setShowRevokeModal(false); onAction(); }}
+      />
+      <PauseResumeModal
+        schedule={schedule}
+        open={showPauseResumeModal}
+        onClose={() => setShowPauseResumeModal(false)}
+        onSuccess={() => { setShowPauseResumeModal(false); onAction(); }}
       />
     </div>
   );
