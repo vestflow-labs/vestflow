@@ -118,6 +118,8 @@ export default function DashboardPage() {
   const [schedules, setSchedules] = useState<ScheduleData[]>([]);
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
+  const [rpcError, setRpcError] = useState<string | null>(null);
+  const [rpcDismissed, setRpcDismissed] = useState(false);
   const [roleFilter, setRoleFilter] = useState<RoleFilter>("all");
   const [sortBy, setSortBy] = useState<SortKey>("newest");
   const [page, setPage] = useState(1);
@@ -127,6 +129,8 @@ export default function DashboardPage() {
 
   const load = async () => {
     setLoading(true);
+    setRpcError(null);
+    setRpcDismissed(false);
     try {
       const all = await getAllSchedules(publicKey ?? undefined);
       if (publicKey) {
@@ -163,6 +167,8 @@ export default function DashboardPage() {
         setSchedules(all.slice(0, 6));
         setStats(null);
       }
+    } catch {
+      setRpcError("Could not reach the Stellar RPC — check your connection and refresh.");
     } finally { setLoading(false); }
   };
 
@@ -268,6 +274,23 @@ export default function DashboardPage() {
             </Link>
           </div>
         </div>
+
+        {/* RPC error banner */}
+        {rpcError && !rpcDismissed && (
+          <div className="mb-6 flex items-start gap-3 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3" role="alert">
+            <svg className="mt-0.5 h-5 w-5 shrink-0 text-red-400" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm-1-9a1 1 0 011-1h.01a1 1 0 110 2H10a1 1 0 01-1-1zm0-4a1 1 0 011-1h.01a1 1 0 110 2H10a1 1 0 01-1-1z" clipRule="evenodd" />
+            </svg>
+            <p className="text-sm text-red-300 flex-1">{rpcError}</p>
+            <button
+              onClick={() => setRpcDismissed(true)}
+              className="ml-auto text-red-400 hover:text-red-300 transition-colors"
+              aria-label="Dismiss"
+            >
+              ×
+            </button>
+          </div>
+        )}
 
         {/* Summary stats */}
         {publicKey && stats && (
