@@ -9,7 +9,9 @@
     "contracts:metrics": "bash scripts/contract-metrics.sh",
     "bindings:generate": "bash scripts/generate-bindings.sh",
     "bindings:build": "npm --prefix lib/bindings/vestflow install && npm --prefix lib/bindings/vestflow run build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepare": "husky",
+    "lint:staged": "lint-staged"
   },
   "dependencies": {
     "@stellar/freighter-api": "^6.0.1",
@@ -20,15 +22,31 @@
     "react-dom": "19.2.4"
   },
   "devDependencies": {
+    "@eslint/js": "^9.37.0",
     "@tailwindcss/postcss": "^4",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20",
     "@types/react": "^19.2.16",
     "@types/react-dom": "^19.2.3",
+    "eslint": "^9.37.0",
+    "husky": "^9.1.0",
     "lefthook": "^2.1.9",
+    "lint-staged": "^16.0.0",
+    "prettier": "^3.6.0",
     "tailwindcss": "^4",
     "tsup": "^8.5.1",
     "typescript": "^5",
+    "typescript-eslint": "^8.52.0",
     "vitest": "^4.1.9"
+  },
+  "lint-staged": {
+    "src/**/*.ts": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "tests/**/*.ts": [
+      "eslint --fix",
+      "prettier --write"
+    ]
   }
 }
