@@ -70,10 +70,8 @@ export async function getSchedule(id: number, publicKey?: string): Promise<Sched
 }
 
 export async function getScheduleCount(): Promise<number> {
-  try {
-    const val = await simulate("schedule_count", []);
-    return Number(scValToNative(val));
-  } catch { return 0; }
+  const val = await simulate("schedule_count", []);
+  return Number(scValToNative(val));
 }
 
 export async function getSchedulesByGrantor(grantor: string): Promise<number[]> {
@@ -141,20 +139,16 @@ export async function getScheduleBatch(
   publicKey?: string
 ): Promise<(ScheduleData | null)[]> {
   if (ids.length === 0) return [];
-  try {
-    const idsVal = xdr.ScVal.scvVec(
-      ids.map((id) => nativeToScVal(id, { type: "u64" }))
-    );
-    const val = await simulate("get_schedule_batch", [idsVal], publicKey);
-    // scValToNative decodes Option<VestingSchedule> as a raw JS object or
-    // null/undefined. We must run parseSchedule on each non-null item so
-    // Soroban field names (claimed_amount, duration_seconds) are mapped to
-    // the ScheduleData interface fields (claimed, duration).
-    const rawItems = scValToNative(val) as any[];
-    return rawItems.map((raw: any) => (raw == null ? null : parseSchedule(raw)));
-  } catch {
-    return ids.map(() => null);
-  }
+  const idsVal = xdr.ScVal.scvVec(
+    ids.map((id) => nativeToScVal(id, { type: "u64" }))
+  );
+  const val = await simulate("get_schedule_batch", [idsVal], publicKey);
+  // scValToNative decodes Option<VestingSchedule> as a raw JS object or
+  // null/undefined. We must run parseSchedule on each non-null item so
+  // Soroban field names (claimed_amount, duration_seconds) are mapped to
+  // the ScheduleData interface fields (claimed, duration).
+  const rawItems = scValToNative(val) as any[];
+  return rawItems.map((raw: any) => (raw == null ? null : parseSchedule(raw)));
 }
 
 /**
@@ -168,17 +162,12 @@ export async function getClaimableBulk(
   publicKey?: string
 ): Promise<bigint[]> {
   if (ids.length === 0) return [];
-  try {
-    const idsVal = xdr.ScVal.scvVec(
-      ids.map((id) => nativeToScVal(id, { type: "u64" }))
-    );
-    const val = await simulate("claimable_bulk", [idsVal], publicKey);
-    const native = scValToNative(val) as bigint[];
-    return native.map((v) => BigInt(v));
-  } catch {
-    // Fallback: return zeros so callers always get a valid array
-    return ids.map(() => 0n);
-  }
+  const idsVal = xdr.ScVal.scvVec(
+    ids.map((id) => nativeToScVal(id, { type: "u64" }))
+  );
+  const val = await simulate("claimable_bulk", [idsVal], publicKey);
+  const native = scValToNative(val) as bigint[];
+  return native.map((v) => BigInt(v));
 }
 
 export async function getAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
