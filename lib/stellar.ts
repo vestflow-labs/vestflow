@@ -102,6 +102,62 @@ export async function getClaimable(id: number, publicKey?: string): Promise<bigi
 }
 
 /**
+ * Preview how many tokens will be claimable at an arbitrary future timestamp.
+ *
+ * Calls the `claimable_at_timestamp` contract view, which projects the
+ * current schedule state forward to `ts`. Accurate for future timestamps;
+ * for past timestamps the result may differ from what was historically
+ * claimable because it uses the current claimed_amount.
+ *
+ * Returns 0n for unknown schedule IDs.
+ */
+export async function getClaimableAtTimestamp(
+  id: number,
+  ts: number,
+  publicKey?: string
+): Promise<bigint> {
+  try {
+    const val = await simulate(
+      "claimable_at_timestamp",
+      [nativeToScVal(id, { type: "u64" }), nativeToScVal(ts, { type: "u64" })],
+      publicKey
+    );
+    return BigInt(scValToNative(val));
+  } catch {
+    return 0n;
+  }
+}
+
+/**
+ * Fetch multiple schedules in a single simulation round-trip by calling
+ * the `get_schedule_batch` contract view.
+ *
+ * Returns results in the same order as `ids`. Unknown IDs return null.
+ * Replaces the Promise.all(getSchedule) N-call pattern, reducing N RPC
+ * calls to 1.
+ */
+export async function getScheduleBatch(
+  ids: number[],
+  publicKey?: string
+): Promise<(ScheduleData | null)[]> {
+  if (ids.length === 0) return [];
+  try {
+    const idsVal = xdr.ScVal.scvVec(
+      ids.map((id) => nativeToScVal(id, { type: "u64" }))
+    );
+    const val = await simulate("get_schedule_batch", [idsVal], publicKey);
+    // scValToNative decodes Option<VestingSchedule> as a raw JS object or
+    // null/undefined. We must run parseSchedule on each non-null item so
+    // Soroban field names (claimed_amount, duration_seconds) are mapped to
+    // the ScheduleData interface fields (claimed, duration).
+    const rawItems = scValToNative(val) as any[];
+    return rawItems.map((raw: any) => (raw == null ? null : parseSchedule(raw)));
+  } catch {
+    return ids.map(() => null);
+  }
+}
+
+/**
  * Fetch claimable amounts for every schedule ID in a single simulation
  * round-trip by calling the `claimable_bulk` contract view function.
  *
@@ -128,14 +184,9 @@ export async function getClaimableBulk(
 export async function getAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
   const count = await getScheduleCount();
   if (count === 0) return [];
-
-  // Fetch all schedule structs in parallel (N calls)
   const ids = Array.from({ length: count }, (_, i) => i + 1);
-  const [schedules, _claimableAmounts] = await Promise.all([
-    Promise.all(ids.map((id) => getSchedule(id, publicKey))),
-    getClaimableBulk(ids, publicKey), // single simulation round-trip
-  ]);
-
+  // Single batch call replaces the former Promise.all(getSchedule) N-call pattern.
+  const schedules = await getScheduleBatch(ids, publicKey);
   return schedules.filter(Boolean) as ScheduleData[];
 }
 
@@ -221,6 +272,17 @@ export async function claimVested(publicKey: string, scheduleId: number): Promis
 
 export async function revokeSchedule(publicKey: string, scheduleId: number): Promise<string> {
   return buildAndSend(publicKey, "revoke", [nativeToScVal(scheduleId, { type: "u64" })]);
+}
+
+export async function transferGrantor(
+  publicKey: string,
+  scheduleId: number,
+  newGrantor: string
+): Promise<string> {
+  return buildAndSend(publicKey, "transfer_grantor", [
+    nativeToScVal(scheduleId, { type: "u64" }),
+    nativeToScVal(newGrantor, { type: "address" }),
+  ]);
 }
 
 // ---------- Types ----------

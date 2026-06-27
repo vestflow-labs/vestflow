@@ -11,7 +11,8 @@
     "start": "next start",
     "contracts:metrics": "bash scripts/contract-metrics.sh",
     "bindings:generate": "bash scripts/generate-bindings.sh",
-    "bindings:build": "npm --prefix lib/bindings/vestflow install && npm --prefix lib/bindings/vestflow run build"
+    "bindings:build": "npm --prefix lib/bindings/vestflow install && npm --prefix lib/bindings/vestflow run build",
+    "test": "vitest run"
   },
   "dependencies": {
     "@stellar/freighter-api": "^6.0.1",
@@ -30,6 +31,7 @@
     "lefthook": "^2.1.9",
     "tailwindcss": "^4",
     "tsup": "^8.5.1",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.9"
   }
 }
