@@ -130,63 +130,101 @@ export default function ScheduleCard({
         )}
       </div>
 
-      {/* ── Dual progress bar (#86) ─────────────────────────────────────────── */}
+      {/* ── Progress / Milestones ────────────────────────────────────────── */}
       <div>
-        {/* Legend row */}
-        <div className="flex justify-between items-center text-xs text-zinc-500 mb-1.5">
-          <div className="flex items-center gap-3">
-            <span className="flex items-center gap-1">
-              <span
-                className="inline-block w-2 h-2 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500"
-                aria-hidden="true"
-              />
-              Vested {progress}%
-            </span>
-            <span className="flex items-center gap-1">
-              <span
-                className="inline-block w-2 h-2 rounded-full bg-emerald-500"
-                aria-hidden="true"
-              />
-              Claimed {claimedPct}%
-            </span>
+        {schedule.kind === "Graded" && schedule.milestones && schedule.milestones.length > 0 ? (
+          /* Graded milestone checklist (#280) */
+          <div className="flex flex-col gap-1.5">
+            <p className="text-xs text-zinc-600 uppercase tracking-wider mb-0.5">Milestones</p>
+            {schedule.milestones.map((m, i) => {
+              const done = now >= m.timestamp;
+              const label = new Date(m.timestamp * 1000).toLocaleDateString(undefined, {
+                month: "short",
+                year: "numeric",
+              });
+              return (
+                <div key={i} className="flex items-center gap-2 text-xs">
+                  <span className={done ? "text-emerald-400" : "text-zinc-600"} aria-hidden="true">
+                    {done ? "✓" : "○"}
+                  </span>
+                  <span className={done ? "text-zinc-300" : "text-zinc-500"}>
+                    {m.pct}% — {label}
+                  </span>
+                </div>
+              );
+            })}
           </div>
-          <span className="text-zinc-600">
-            {stroopsToXlm(schedule.total_amount)} {tokenSymbol}
-          </span>
-        </div>
+        ) : (
+          <>
+            {/* Legend row */}
+            <div className="flex justify-between items-center text-xs text-zinc-500 mb-1.5">
+              <div className="flex items-center gap-3">
+                <span className="flex items-center gap-1">
+                  <span
+                    className="inline-block w-2 h-2 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500"
+                    aria-hidden="true"
+                  />
+                  Vested {progress}%
+                </span>
+                <span className="flex items-center gap-1">
+                  <span
+                    className="inline-block w-2 h-2 rounded-full bg-emerald-500"
+                    aria-hidden="true"
+                  />
+                  Claimed {claimedPct}%
+                </span>
+              </div>
+              <span className="text-zinc-600">
+                {stroopsToXlm(schedule.total_amount)} {tokenSymbol}
+              </span>
+            </div>
 
-        {/* Track */}
-        <div
-          className="relative h-2.5 rounded-full bg-white/5 overflow-hidden"
-          role="progressbar"
-          aria-label={`Vesting progress: ${progress}% vested, ${claimedPct}% claimed`}
-          aria-valuenow={progress}
-          aria-valuemin={0}
-          aria-valuemax={100}
-        >
-          {/* Vested layer (gradient) */}
-          <div
-            className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500 transition-all duration-700"
-            style={{ width: `${progress}%` }}
-          />
-          {/* Claimed layer (solid emerald, sits on top) */}
-          {claimedPct > 0 && (
+            {/* Track */}
             <div
-              className="absolute inset-y-0 left-0 rounded-full bg-emerald-500/80 transition-all duration-700"
-              style={{ width: `${claimedPct}%` }}
-            />
-          )}
-        </div>
+              className="relative h-2.5 rounded-full bg-white/5 overflow-hidden"
+              role="progressbar"
+              aria-label={`Vesting progress: ${progress}% vested, ${claimedPct}% claimed`}
+              aria-valuenow={progress}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            >
+              {/* Vested layer (gradient) */}
+              <div
+                className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500 transition-all duration-700"
+                style={{ width: `${progress}%` }}
+              />
+              {/* Claimed layer (solid emerald, sits on top) */}
+              {claimedPct > 0 && (
+                <div
+                  className="absolute inset-y-0 left-0 rounded-full bg-emerald-500/80 transition-all duration-700"
+                  style={{ width: `${claimedPct}%` }}
+                />
+              )}
+            </div>
 
-        {/* Cliff label */}
-        {schedule.kind === "Cliff" &&
-          schedule.cliff_duration > 0 &&
-          now < schedule.start_time + schedule.cliff_duration &&
+            {/* Cliff label */}
+            {schedule.kind === "Cliff" &&
+              schedule.cliff_duration > 0 &&
+              now < schedule.start_time + schedule.cliff_duration &&
+              !schedule.revoked && (
+                <p className="text-xs text-zinc-500 mt-1.5">
+                  Unlocks on{" "}
+                  <span className="text-zinc-300">
+                    {formatCliffDate(schedule.cliff_duration, schedule.start_time)}
+                  </span>
+                </p>
+              )}
+          </>
+        )}
+
+        {/* Lockup expiry (#279) */}
+        {schedule.lockup_duration > 0 &&
+          now < schedule.start_time + schedule.lockup_duration &&
           !schedule.revoked && (
             <p className="text-xs text-zinc-500 mt-1.5">
-              Unlocks on{" "}
+              Locked until:{" "}
               <span className="text-zinc-300">
-                {formatCliffDate(schedule.cliff_duration, schedule.start_time)}
+                {formatDate(schedule.start_time + schedule.lockup_duration)}
               </span>
             </p>
           )}
