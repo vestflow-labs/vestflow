@@ -24,6 +24,7 @@ interface FormState {
   startTime: string;
   durationDays: string;
   cliffDays: string;
+  lockupDays: string;
   kind: VestingKind;
   revocable: boolean;
 }
@@ -88,6 +89,20 @@ function validateForm(form: FormState): FormErrors {
     } else if (!isNaN(cliff) && !isNaN(dur) && cliff > dur) {
       errors.cliffDays = "Cliff cannot exceed total duration.";
     }
+  }
+
+  // Lockup: tokens stay non-transferable until this many days after start.
+  // The contract requires lockup >= cliff, so mirror that here.
+  const cliffForLockup = parseInt(form.cliffDays || "0");
+  const lockup = parseInt(form.lockupDays);
+  if (!form.lockupDays && form.lockupDays !== "0") {
+    errors.lockupDays = "Lockup duration is required.";
+  } else if (isNaN(lockup) || lockup < 0) {
+    errors.lockupDays = "Lockup must be 0 or more days.";
+  } else if (!isNaN(cliffForLockup) && lockup < cliffForLockup) {
+    errors.lockupDays = "Lockup must be greater than or equal to the cliff duration.";
+  } else if (!isNaN(dur) && lockup > dur) {
+    errors.lockupDays = "Lockup cannot exceed total duration.";
   }
 
   return errors;
@@ -210,6 +225,7 @@ export default function CreateForm() {
     startTime: "00:00",
     durationDays: "",
     cliffDays: "0",
+    lockupDays: "0",
     kind: "Linear",
     revocable: true,
   });
@@ -223,6 +239,7 @@ export default function CreateForm() {
   const [txHash, setTxHash] = useState("");
   const [errMsg, setErrMsg] = useState("");
   const [previewDate, setPreviewDate] = useState("");
+  const [balanceError, setBalanceError] = useState("");
 
   const set = (k: keyof FormState, v: string | boolean) =>
     setForm((f) => ({ ...f, [k]: v }) as FormState);
@@ -231,6 +248,15 @@ export default function CreateForm() {
     setTouched(
       (t) => ({ ...t, [k]: true }) as Partial<Record<keyof FormState, boolean>>,
     );
+
+  // Update the cliff value, keeping the (un-edited) lockup in lockstep so the
+  // default behaviour matches the old hard-coded `lockup = cliff` mirror.
+  const setCliffDays = (v: string) =>
+    setForm((f) => ({
+      ...f,
+      cliffDays: v,
+      lockupDays: lockupEdited ? f.lockupDays : v,
+    }));
 
   const errors = validateForm(form);
 
@@ -250,7 +276,27 @@ export default function CreateForm() {
   const handleShowConfirm = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setSubmitAttempted(true);
+    setBalanceError("");
     if (!isValid) return;
+
+    // Balance check (#276): only for native XLM; non-native tokens use a
+    // different token contract and we cannot read their balance here.
+    if (publicKey && form.tokenAddress.trim() === NATIVE_TOKEN) {
+      try {
+        const amtStroops = xlmToStroops(form.amount);
+        const spendable = await getWalletXlmBalance(publicKey);
+        if (amtStroops > spendable) {
+          const spendableXlm = (Number(spendable) / 10_000_000).toFixed(7).replace(/\.?0+$/, "");
+          setBalanceError(
+            `Insufficient balance. Your wallet has ${spendableXlm} XLM available (after minimum reserve).`
+          );
+          return;
+        }
+      } catch {
+        // If balance fetch fails, proceed and let the network surface the error.
+      }
+    }
+
     setStep("confirm");
   };
 
@@ -281,6 +327,7 @@ export default function CreateForm() {
         parseInt(form.cliffDays),
         form.kind,
         form.revocable,
+        parseInt(form.lockupDays),
       );
       setTxHash(hash);
       setStatus("done");
@@ -313,6 +360,7 @@ export default function CreateForm() {
     setErrMsg("");
     setSubmitAttempted(false);
     setTouched({});
+    setLockupEdited(false);
     setForm({
       beneficiary: "",
       tokenAddress: NATIVE_TOKEN,
@@ -321,6 +369,7 @@ export default function CreateForm() {
       startTime: "00:00",
       durationDays: "",
       cliffDays: "0",
+      lockupDays: "0",
       kind: "Linear",
       revocable: true,
     });
@@ -583,7 +632,7 @@ export default function CreateForm() {
       <Field
         label={`Total Amount (${tokenLabel})`}
         htmlFor="amount"
-        error={visibleErrors.amount}
+        error={visibleErrors.amount ?? (balanceError || undefined)}
         hint="The total number of tokens to lock into this schedule."
       >
         <input
@@ -593,11 +642,11 @@ export default function CreateForm() {
           min="0.0000001"
           step="any"
           value={form.amount}
-          onChange={(e) => set("amount", e.target.value)}
+          onChange={(e) => { set("amount", e.target.value); setBalanceError(""); }}
           onBlur={() => touch("amount")}
           required
-          aria-invalid={!!visibleErrors.amount}
-          className={`input ${visibleErrors.amount ? "border-red-500/60 focus:border-red-500" : ""}`}
+          aria-invalid={!!(visibleErrors.amount || balanceError)}
+          className={`input ${(visibleErrors.amount || balanceError) ? "border-red-500/60 focus:border-red-500" : ""}`}
         />
       </Field>
 
@@ -708,7 +757,7 @@ export default function CreateForm() {
             min="0"
             step="1"
             value={form.cliffDays}
-            onChange={(e) => set("cliffDays", e.target.value)}
+            onChange={(e) => setCliffDays(e.target.value)}
             onBlur={() => touch("cliffDays")}
             aria-invalid={!!visibleErrors.cliffDays}
             className={`input ${visibleErrors.cliffDays ? "border-red-500/60 focus:border-red-500" : ""}`}
@@ -760,6 +809,7 @@ export default function CreateForm() {
 
       <button
         type="submit"
+        disabled={status === "loading"}
         className="btn-primary rounded-xl py-3 font-semibold text-white disabled:opacity-60"
       >
         Review &amp; Create
