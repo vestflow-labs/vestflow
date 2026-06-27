@@ -136,7 +136,7 @@ function SummaryItem({
   );
 }
 
-// ─── Vesting kind descriptions ────────────────────────────────────────────────
+// ─── Vesting kind options ──────────────────────────────────────────────────────
 
 const KIND_OPTIONS: { value: VestingKind; label: string; description: string }[] = [
   {
@@ -153,9 +153,12 @@ const KIND_OPTIONS: { value: VestingKind; label: string; description: string }[]
     value: "LinearWithCliff",
     label: "Linear with Cliff",
     description:
-      "No tokens unlock until the cliff date (typical 1-year cliff), then linear vesting for the remainder.",
+      "Tokens are locked until the cliff, then vest linearly over the remaining period. The standard employee equity schedule (e.g. 1-year cliff, 3-year linear).",
   },
 ];
+
+// ─── Claimable preview helper ─────────────────────────────────────────────────
+
 
 function estimateClaimable(
   totalStroops: bigint,
