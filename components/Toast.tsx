@@ -1,5 +1,12 @@
 "use client";
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -13,6 +20,8 @@ export interface Toast {
   txHash?: string;
   network?: string;
   duration?: number; // ms before auto-dismiss (0 = never)
+  retryLabel?: string;
+  onRetry?: () => void;
 }
 
 interface ToastCtx {
@@ -53,7 +62,9 @@ function ToastItem({
 
   // Auto-dismiss for success / error toasts
   useEffect(() => {
-    const dur = toast.duration ?? (toast.status === "pending" ? 0 : 5000);
+    const dur =
+      toast.duration ??
+      (toast.status === "pending" || toast.status === "error" ? 0 : 5000);
     if (dur === 0) return;
     timerRef.current = setTimeout(() => dismiss(), dur);
     return () => {
@@ -113,8 +124,19 @@ function ToastItem({
             viewBox="0 0 24 24"
             aria-hidden="true"
           >
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+            <circle
+              className="opacity-25"
+              cx="12"
+              cy="12"
+              r="10"
+              stroke="currentColor"
+              strokeWidth="4"
+            />
+            <path
+              className="opacity-75"
+              fill="currentColor"
+              d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
+            />
           </svg>
         ) : (
           <span aria-hidden="true">{icons[toast.status]}</span>
@@ -123,7 +145,9 @@ function ToastItem({
 
       {/* Content */}
       <div className="flex-1 min-w-0">
-        <p className={`text-sm font-semibold leading-snug ${textColors[toast.status]}`}>
+        <p
+          className={`text-sm font-semibold leading-snug ${textColors[toast.status]}`}
+        >
           {toast.title}
         </p>
         {toast.message && (
@@ -138,6 +162,15 @@ function ToastItem({
           >
             {toast.txHash.slice(0, 12)}…{toast.txHash.slice(-8)} ↗
           </a>
+        )}
+        {toast.status === "error" && toast.onRetry && (
+          <button
+            onClick={toast.onRetry}
+            className="mt-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-violet-300 hover:bg-white/10 transition-colors"
+            type="button"
+          >
+            {toast.retryLabel ?? "Retry"}
+          </button>
         )}
       </div>
 
@@ -162,16 +195,33 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const counterRef = useRef(0);
 
   const addToast = useCallback((toast: Omit<Toast, "id">): string => {
-    const id = `toast-${++counterRef.current}`;
-    setToasts((prev) => [...prev, { ...toast, id }]);
-    return id;
+    let insertedId = "";
+    setToasts((prev) => {
+      if (toast.txHash) {
+        const existing = prev.find((t) => t.txHash === toast.txHash);
+        if (existing) {
+          insertedId = existing.id;
+          return prev.map((t) =>
+            t.id === existing.id ? { ...t, ...toast } : t,
+          );
+        }
+      }
+
+      const id = `toast-${++counterRef.current}`;
+      insertedId = id;
+      return [...prev, { ...toast, id }];
+    });
+    return insertedId;
   }, []);
 
-  const updateToast = useCallback((id: string, patch: Partial<Omit<Toast, "id">>) => {
-    setToasts((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, ...patch } : t))
-    );
-  }, []);
+  const updateToast = useCallback(
+    (id: string, patch: Partial<Omit<Toast, "id">>) => {
+      setToasts((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, ...patch } : t)),
+      );
+    },
+    [],
+  );
 
   const removeToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
