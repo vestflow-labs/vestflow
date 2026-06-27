@@ -131,12 +131,12 @@ export default function CreateForm() {
         <input type="number" placeholder="0.00" min="0.0000001" step="any" value={form.amount} onChange={e => set("amount", e.target.value)} required className="input" />
       </Field>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4">
         <Field label="Start Date">
-          <input type="date" value={form.startDate} onChange={e => set("startDate", e.target.value)} required className="input" />
+          <input type="date" value={form.startDate} onChange={e => set("startDate", e.target.value)} required className="input min-w-0" />
         </Field>
         <Field label="Start Time">
-          <input type="time" value={form.startTime} onChange={e => set("startTime", e.target.value)} required className="input" />
+          <input type="time" value={form.startTime} onChange={e => set("startTime", e.target.value)} required className="input min-w-0" />
         </Field>
       </div>
 
