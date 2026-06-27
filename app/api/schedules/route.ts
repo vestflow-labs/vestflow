@@ -48,6 +48,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       );
     }
 
+    const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
+    if (!STELLAR_ADDRESS_RE.test(address)) {
+      return NextResponse.json(
+        { error: "Invalid Stellar address format" },
+        { status: 400 }
+      );
+    }
+
     const page = pageParam ? Math.max(1, parseInt(pageParam, 10)) : 1;
     const limit = limitParam ? Math.max(1, parseInt(limitParam, 10)) : 20;
 

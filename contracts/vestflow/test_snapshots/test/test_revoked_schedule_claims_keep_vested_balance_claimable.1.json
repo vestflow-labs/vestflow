@@ -127,7 +127,6 @@
       ]
     ],
     [],
-    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
@@ -168,12 +167,13 @@
         }
       ]
     ],
+    [],
     []
   ],
   "ledger": {
     "protocol_version": 22,
     "sequence_number": 0,
-    "timestamp": 1000,
+    "timestamp": 250,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 10,
     "min_persistent_entry_ttl": 10,
@@ -330,7 +330,7 @@
                               "val": {
                                 "i128": {
                                   "hi": 0,
-                                  "lo": 1000
+                                  "lo": 250
                                 }
                               }
                             },
@@ -476,7 +476,7 @@
                               "val": {
                                 "i128": {
                                   "hi": 0,
-                                  "lo": 1000
+                                  "lo": 250
                                 }
                               }
                             }
@@ -754,7 +754,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 9000
+                          "lo": 9750
                         }
                       }
                     },
@@ -827,7 +827,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 1000
+                          "lo": 250
                         }
                       }
                     },
