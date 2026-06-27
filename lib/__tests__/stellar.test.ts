@@ -1,12 +1,5 @@
 import { describe, it, expect } from "vitest";
 import {
-<<<<<<< HEAD
-  ScheduleData,
-  stroopsToXlm,
-  vestingProgress,
-  xlmToStroops,
-} from "../stellar";
-=======
   xlmToStroops,
   stroopsToXlm,
   vestingProgress,
@@ -33,7 +26,6 @@ function makeSchedule(overrides: Partial<ScheduleData> = {}): ScheduleData {
     ...overrides,
   };
 }
->>>>>>> upstream/main
 
 describe("xlmToStroops", () => {
   it("converts minimum representable amount: 0.0000001 XLM = 1 stroop", () => {
@@ -123,30 +115,6 @@ describe("stroopsToXlm", () => {
 });
 
 describe("vestingProgress", () => {
-<<<<<<< HEAD
-  it("freezes progress while a schedule is paused", () => {
-    const schedule: ScheduleData = {
-      id: 1,
-      grantor: "GGRANTOR",
-      beneficiary: "GBENEFICIARY",
-      token: "CTOKEN",
-      total_amount: 100n,
-      claimed: 0n,
-      start_time: 100,
-      duration: 100,
-      cliff_duration: 0,
-      lockup_duration: 0,
-      kind: "Linear",
-      revocable: true,
-      revoked: false,
-      paused: true,
-      paused_duration: 10,
-      paused_at: 160,
-    };
-
-    expect(vestingProgress(schedule, 200)).toBe(50);
-    expect(vestingProgress(schedule, 300)).toBe(50);
-=======
   it("returns the time-based percentage for an active linear schedule", () => {
     const s = makeSchedule({ start_time: 0, duration: 1_000 });
     expect(vestingProgress(s, 500)).toBe(50);
@@ -192,6 +160,5 @@ describe("vestingProgress", () => {
       vested_at_revoke: 0n,
     });
     expect(vestingProgress(s, 500)).toBe(0);
->>>>>>> upstream/main
   });
 });
