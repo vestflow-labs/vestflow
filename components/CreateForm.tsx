@@ -3,18 +3,180 @@ import { useState } from "react";
 import { createSchedule, CONTRACT_ID, parseContractError, NETWORK, NATIVE_TOKEN, stroopsToXlm, xlmToStroops } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type VestingKind = "Linear" | "Cliff" | "LinearWithCliff";
+
+interface FormState {
+  beneficiary: string;
+  tokenAddress: string;
+  amount: string;
+  startDate: string;
+  startTime: string;
+  durationDays: string;
+  cliffDays: string;
+  kind: VestingKind;
+  revocable: boolean;
+}
+
+type FormErrors = Partial<Record<keyof FormState, string>>;
+
+// ─── Validation ───────────────────────────────────────────────────────────────
+
+/** Minimal Stellar address check: starts with G, length 56, alphanumeric. */
+function isValidStellarAddress(addr: string): boolean {
+  return /^G[A-Z2-7]{55}$/.test(addr.trim());
+}
+
+function validateForm(form: FormState): FormErrors {
+  const errors: FormErrors = {};
+
+  if (!form.beneficiary.trim()) {
+    errors.beneficiary = "Beneficiary address is required.";
+  } else if (!isValidStellarAddress(form.beneficiary)) {
+    errors.beneficiary = "Must be a valid Stellar address starting with G (56 characters).";
+  }
+
+  if (!form.tokenAddress.trim()) {
+    errors.tokenAddress = "Token address is required.";
+  } else if (!isValidStellarAddress(form.tokenAddress)) {
+    errors.tokenAddress = "Must be a valid SEP-41 token contract address (starts with G, 56 characters).";
+  }
+
+  const amt = parseFloat(form.amount);
+  if (!form.amount) {
+    errors.amount = "Total amount is required.";
+  } else if (isNaN(amt) || amt <= 0) {
+    errors.amount = "Amount must be a positive number.";
+  }
+
+  if (!form.startDate) {
+    errors.startDate = "Start date is required.";
+  } else {
+    const [hours, minutes] = form.startTime.split(":").map(Number);
+    const dt = new Date(form.startDate);
+    dt.setHours(hours, minutes, 0, 0);
+    if (dt.getTime() < Date.now()) {
+      errors.startDate = "Start date/time must be in the future.";
+    }
+  }
+
+  const dur = parseInt(form.durationDays);
+  if (!form.durationDays) {
+    errors.durationDays = "Total duration is required.";
+  } else if (isNaN(dur) || dur < 1) {
+    errors.durationDays = "Duration must be at least 1 day.";
+  }
+
+  if (form.kind === "Cliff" || form.kind === "LinearWithCliff") {
+    const cliff = parseInt(form.cliffDays);
+    if (!form.cliffDays && form.cliffDays !== "0") {
+      errors.cliffDays = "Cliff duration is required for this vesting type.";
+    } else if (isNaN(cliff) || cliff < 0) {
+      errors.cliffDays = "Cliff must be 0 or more days.";
+    } else if (!isNaN(cliff) && !isNaN(dur) && cliff > dur) {
+      errors.cliffDays = "Cliff cannot exceed total duration.";
+    }
+  }
+
+  return errors;
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function Field({
+  label,
+  htmlFor,
+  error,
+  hint,
+  children,
+}: {
+  label: string;
+  htmlFor?: string;
+  error?: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={htmlFor} className="text-sm text-zinc-400">
+        {label}
+      </label>
+      {children}
+      {hint && !error && <p className="text-xs text-zinc-500">{hint}</p>}
+      {error && (
+        <p className="text-xs text-red-400" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function SummaryItem({
+  label,
+  value,
+  full,
+}: {
+  label: string;
+  value: string;
+  full?: boolean;
+}) {
+  return (
+    <div className={`flex flex-col gap-1 ${full ? "col-span-2" : ""}`}>
+      <span className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">
+        {label}
+      </span>
+      <span
+        className={`text-sm ${full ? "font-mono break-all" : "font-medium"} text-zinc-200`}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+// ─── Vesting kind descriptions ────────────────────────────────────────────────
+
+const KIND_OPTIONS: { value: VestingKind; label: string; description: string }[] = [
+  {
+    value: "Linear",
+    label: "Linear",
+    description: "Tokens unlock gradually and continuously from start to end.",
+  },
+  {
+    value: "Cliff",
+    label: "Cliff",
+    description: "No tokens are claimable until the cliff date, then the full amount unlocks at once.",
+  },
+  {
+    value: "LinearWithCliff",
+    label: "Linear with Cliff",
+    description:
+      "No tokens unlock until the cliff date (typical 1-year cliff), then linear vesting for the remainder.",
+  },
+];
+
 function estimateClaimable(
   totalStroops: bigint,
   startTs: number,
   durationSecs: number,
   cliffSecs: number,
-  kind: "Linear" | "Cliff",
+  kind: VestingKind,
   previewTs: number
 ): bigint {
   if (previewTs <= startTs || durationSecs <= 0) return 0n;
   const elapsed = previewTs - startTs;
   if (kind === "Cliff") {
     return elapsed >= cliffSecs ? totalStroops : 0n;
+  }
+  if (kind === "LinearWithCliff") {
+    if (elapsed < cliffSecs) return 0n;
+    if (elapsed >= durationSecs) return totalStroops;
+    const linearDuration = durationSecs - cliffSecs;
+    if (linearDuration <= 0) return 0n;
+    const linearElapsed = elapsed - cliffSecs;
+    return (totalStroops * BigInt(linearElapsed)) / BigInt(linearDuration);
   }
   // Linear
   if (elapsed >= durationSecs) return totalStroops;

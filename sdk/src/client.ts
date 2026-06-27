@@ -23,6 +23,7 @@ import type {
   CreateGradedScheduleParams,
   VestingKind,
 } from "./types";
+import { xlmToStroops } from "./utils";
 
 // ---------------------------------------------------------------------------
 // Defaults
@@ -67,7 +68,7 @@ const FALLBACK_ACCOUNT = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCW
  * const hash = await client.createSchedule({
  *   grantor: "G...",
  *   beneficiary: "G...",
- *   totalAmountXlm: 1000,
+ *   totalAmountXlm: "1000",
  *   startTime: Math.floor(Date.now() / 1000),
  *   durationDays: 365,
  *   cliffDays: 90,
@@ -181,6 +182,9 @@ export class VestflowClient {
           : "Linear",
       revocable: Boolean(raw.revocable),
       revoked: Boolean(raw.revoked),
+      paused: Boolean(raw.paused),
+      paused_duration: Number(raw.paused_duration ?? 0),
+      paused_at: Number(raw.paused_at ?? 0),
     };
   }
 
@@ -369,7 +373,7 @@ export class VestflowClient {
     params: CreateScheduleParams,
     signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
   ): Promise<string> {
-    const totalStroops = BigInt(Math.round(params.totalAmountXlm * 10_000_000));
+    const totalStroops = xlmToStroops(params.totalAmountXlm);
     const durationSecs = params.durationDays * 86400;
     const cliffSecs = params.cliffDays * 86400;
     const kindVal = xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(params.kind)]);
@@ -478,29 +482,45 @@ export class VestflowClient {
   }
 
   /**
-   * Transfer grantor rights (revocation, pause) to a new address.
+   * Pause an active vesting schedule (grantor only).
+   * While paused, no additional tokens vest. The beneficiary can still claim
+   * already-vested tokens.
    *
-   * Requires the current grantor's signature. Emits a `grnt_chng` event.
-   *
-   * @param publicKey - Current grantor's Stellar public key
-   * @param scheduleId - ID of the schedule to transfer
-   * @param newGrantor - New grantor address
+   * @param publicKey - Grantor's Stellar public key
+   * @param scheduleId - ID of the schedule to pause
    * @param signer - Function that signs the transaction XDR
    * @returns Transaction hash
    */
-  async transferGrantor(
+  async pauseSchedule(
     publicKey: string,
     scheduleId: number,
-    newGrantor: string,
     signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
   ): Promise<string> {
     return this.buildAndSend(
       publicKey,
-      "transfer_grantor",
-      [
-        nativeToScVal(scheduleId, { type: "u64" }),
-        nativeToScVal(newGrantor, { type: "address" }),
-      ],
+      "pause_schedule",
+      [nativeToScVal(scheduleId, { type: "u64" })],
+      signer
+    );
+  }
+
+  /**
+   * Resume a paused vesting schedule (grantor only).
+   *
+   * @param publicKey - Grantor's Stellar public key
+   * @param scheduleId - ID of the schedule to resume
+   * @param signer - Function that signs the transaction XDR
+   * @returns Transaction hash
+   */
+  async resumeSchedule(
+    publicKey: string,
+    scheduleId: number,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    return this.buildAndSend(
+      publicKey,
+      "resume_schedule",
+      [nativeToScVal(scheduleId, { type: "u64" })],
       signer
     );
   }

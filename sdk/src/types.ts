@@ -39,6 +39,12 @@ export interface ScheduleData {
   revocable: boolean;
   /** Whether this schedule has been revoked. */
   revoked: boolean;
+  /** Whether this schedule is currently paused. */
+  paused: boolean;
+  /** Cumulative time (in seconds) the schedule has been paused. */
+  paused_duration: number;
+  /** Unix timestamp when the schedule was last paused (0 if not paused). */
+  paused_at: number;
 }
 
 /**
@@ -75,8 +81,8 @@ export interface CreateScheduleParams {
   grantor: string;
   /** Stellar public key of the beneficiary. */
   beneficiary: string;
-  /** Total amount to vest in XLM (converted to stroops internally). */
-  totalAmountXlm: number;
+  /** Total amount to vest in XLM as a decimal string (converted to stroops internally). */
+  totalAmountXlm: string;
   /** Unix timestamp when vesting begins. */
   startTime: number;
   /** Vesting duration in days. */
