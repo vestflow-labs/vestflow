@@ -331,6 +331,7 @@ export class VestflowClient {
     const totalStroops = BigInt(Math.round(params.totalAmountXlm * 10_000_000));
     const durationSecs = params.durationDays * 86400;
     const cliffSecs = params.cliffDays * 86400;
+    const lockupSecs = (params.lockupDays ?? params.cliffDays) * 86400;
     const kindVal = xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(params.kind)]);
 
     const args: xdr.ScVal[] = [
@@ -341,6 +342,7 @@ export class VestflowClient {
       nativeToScVal(params.startTime, { type: "u64" }),
       nativeToScVal(durationSecs, { type: "u64" }),
       nativeToScVal(cliffSecs, { type: "u64" }),
+      nativeToScVal(lockupSecs, { type: "u64" }),
       kindVal,
       nativeToScVal(params.revocable, { type: "bool" }),
     ];

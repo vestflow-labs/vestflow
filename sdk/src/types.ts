@@ -83,6 +83,8 @@ export interface CreateScheduleParams {
   durationDays: number;
   /** Cliff duration in days (0 for no cliff). */
   cliffDays: number;
+  /** Lockup duration in days (defaults to cliffDays if not specified). */
+  lockupDays?: number;
   /** Vesting curve type. */
   kind: VestingKind;
   /** Whether the grantor can revoke unvested tokens. */
