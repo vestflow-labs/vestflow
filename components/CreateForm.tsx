@@ -9,6 +9,7 @@ import {
   NATIVE_TOKEN,
   stroopsToXlm,
   xlmToStroops,
+  getWalletXlmBalance,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 
@@ -38,6 +39,11 @@ function isValidStellarAddress(addr: string): boolean {
   return /^G[A-Z2-7]{55}$/.test(addr.trim());
 }
 
+/** Minimal Stellar contract or account address check: starts with C or G, length 56, alphanumeric. */
+function isValidTokenAddress(addr: string): boolean {
+  return /^[CG][A-Z2-7]{55}$/.test(addr.trim());
+}
+
 function validateForm(form: FormState): FormErrors {
   const errors: FormErrors = {};
 
@@ -50,9 +56,9 @@ function validateForm(form: FormState): FormErrors {
 
   if (!form.tokenAddress.trim()) {
     errors.tokenAddress = "Token address is required.";
-  } else if (!isValidStellarAddress(form.tokenAddress)) {
+  } else if (!isValidTokenAddress(form.tokenAddress)) {
     errors.tokenAddress =
-      "Must be a valid SEP-41 token contract address (starts with G, 56 characters).";
+      "Must be a valid SEP-41 token contract address (starts with C or G, 56 characters).";
   }
 
   const amt = parseFloat(form.amount);
@@ -233,6 +239,7 @@ export default function CreateForm() {
     Partial<Record<keyof FormState, boolean>>
   >({});
   const [submitAttempted, setSubmitAttempted] = useState(false);
+  const [lockupEdited, setLockupEdited] = useState(false);
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">(
     "idle",
   );
@@ -273,7 +280,7 @@ export default function CreateForm() {
   const tokenLabel =
     form.tokenAddress.trim() === NATIVE_TOKEN ? "XLM" : "Tokens";
 
-  const handleShowConfirm = (e: FormEvent<HTMLFormElement>) => {
+  const handleShowConfirm = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setSubmitAttempted(true);
     setBalanceError("");
@@ -764,6 +771,30 @@ export default function CreateForm() {
           />
         </Field>
       )}
+
+      {/* ── Lockup Duration ─────────────────────────────────────────────────── */}
+      <Field
+        label="Lockup Duration (days)"
+        htmlFor="lockupDays"
+        error={visibleErrors.lockupDays}
+        hint="Tokens vest on schedule but stay non-transferable until the lockup ends. Must be ≥ the cliff; defaults to the cliff value."
+      >
+        <input
+          id="lockupDays"
+          type="number"
+          placeholder="0"
+          min="0"
+          step="1"
+          value={form.lockupDays}
+          onChange={(e) => {
+            setLockupEdited(true);
+            set("lockupDays", e.target.value);
+          }}
+          onBlur={() => touch("lockupDays")}
+          aria-invalid={!!visibleErrors.lockupDays}
+          className={`input ${visibleErrors.lockupDays ? "border-red-500/60 focus:border-red-500" : ""}`}
+        />
+      </Field>
 
       <div className="flex items-start gap-3 p-3 rounded-xl border border-white/8 bg-white/2">
         <input

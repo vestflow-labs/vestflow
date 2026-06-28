@@ -16,6 +16,8 @@ vi.mock("@/lib/stellar", () => ({
   CONTRACT_ID: "CCZ6AE75C27DMB3SOIHK7WZSBUG3NQPVLHSVEBQ2FSAEVGRJ5TXAZWCX",
   NETWORK: "testnet",
   NATIVE_TOKEN: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+  getWalletXlmBalance: vi.fn().mockResolvedValue(10_000_000_000n),
+  xlmToStroops: (x: string) => BigInt(parseFloat(x) * 10_000_000),
 }));
 
 vi.mock("@/lib/WalletContext", () => ({
@@ -57,10 +59,10 @@ describe("CreateForm", () => {
       render(<CreateForm />);
 
       await user.type(
-        screen.getByPlaceholderText("G..."),
-        "GBSOV3F63VBMLDKD3JV5HQC5KPVXJQEQHP5TPUMZWNMCZZQ6SKF2OL3"
+        screen.getByPlaceholderText("GABC…"),
+        "GBSOV3F63VBMLDKD3JV5HQC5KPVXJQEQHP5TPUMZWNMCZZQ6SKF2OL3A"
       );
-      await user.type(screen.getByPlaceholderText("0.00"), "100");
+      await user.type(screen.getByPlaceholderText("1000.00"), "100");
 
       fireEvent.change(screen.getByPlaceholderText("365"), { target: { value: "0" } });
 
@@ -81,10 +83,10 @@ describe("CreateForm", () => {
       render(<CreateForm />);
 
       await user.type(
-        screen.getByPlaceholderText("G..."),
-        "GBSOV3F63VBMLDKD3JV5HQC5KPVXJQEQHP5TPUMZWNMCZZQ6SKF2OL3"
+        screen.getByPlaceholderText("GABC…"),
+        "GBSOV3F63VBMLDKD3JV5HQC5KPVXJQEQHP5TPUMZWNMCZZQ6SKF2OL3A"
       );
-      await user.type(screen.getByPlaceholderText("0.00"), "100");
+      await user.type(screen.getByPlaceholderText("1000.00"), "100");
 
       const dateInputs = document.querySelectorAll('input[type="date"]');
       const tomorrow = new Date();
@@ -93,9 +95,9 @@ describe("CreateForm", () => {
         target: { value: tomorrow.toISOString().split("T")[0] },
       });
 
-      fireEvent.change(screen.getByPlaceholderText("365"), { target: { value: "30" } });
+      fireEvent.change(screen.getByPlaceholderText("365"), { target: { value: "100" } });
 
-      await user.click(screen.getByLabelText(/cliff/i));
+      await user.click(screen.getByRole("radio", { name: "Cliff" }));
       fireEvent.change(screen.getByPlaceholderText("180"), { target: { value: "90" } });
 
       await user.click(screen.getByRole("button", { name: /review & create/i }));
@@ -114,9 +116,9 @@ describe("CreateForm", () => {
       const user = userEvent.setup();
       render(<CreateForm />);
 
-      const beneficiary = "GBSOV3F63VBMLDKD3JV5HQC5KPVXJQEQHP5TPUMZWNMCZZQ6SKF2OL3";
-      await user.type(screen.getByPlaceholderText("G..."), beneficiary);
-      await user.type(screen.getByPlaceholderText("0.00"), "500");
+      const beneficiary = "GBSOV3F63VBMLDKD3JV5HQC5KPVXJQEQHP5TPUMZWNMCZZQ6SKF2OL3A";
+      await user.type(screen.getByPlaceholderText("GABC…"), beneficiary);
+      await user.type(screen.getByPlaceholderText("1000.00"), "500");
 
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);

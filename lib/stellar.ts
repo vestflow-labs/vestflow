@@ -63,7 +63,7 @@ const XLM_MIN_RESERVE_STROOPS = 10_000_000n; // 1 XLM
 export async function getWalletXlmBalance(publicKey: string): Promise<bigint> {
   try {
     const account = await server.getAccount(publicKey);
-    const nativeBalance = (account.balances as any[]).find(
+    const nativeBalance = ((account as any).balances as any[]).find(
       (b: any) => b.asset_type === "native"
     );
     if (!nativeBalance) return 0n;
@@ -216,6 +216,32 @@ export async function getClaimableBulk(
     return ids.map(() => 0n);
   }
 }
+
+/**
+ * Fetch total vested amounts (earned, including already-claimed) for multiple
+ * schedule IDs in a single simulation round-trip using the vested_amount_bulk
+ * contract view.
+ *
+ * Returns amounts in the same order as `ids`. Unknown IDs return 0n.
+ */
+export async function getVestedAmountBulk(
+  ids: number[],
+  publicKey?: string
+): Promise<bigint[]> {
+  if (ids.length === 0) return [];
+  try {
+    const idsVal = xdr.ScVal.scvVec(
+      ids.map((id) => nativeToScVal(id, { type: "u64" }))
+    );
+    const val = await simulate("vested_amount_bulk", [idsVal], publicKey);
+    const native = scValToNative(val) as bigint[];
+    return native.map((v) => BigInt(v));
+  } catch {
+    // Fallback: return zeros so callers always get a valid array
+    return ids.map(() => 0n);
+  }
+}
+
 
 export async function getAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
   const count = await getScheduleCount();

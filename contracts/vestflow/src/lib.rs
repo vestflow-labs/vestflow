@@ -1005,16 +1005,18 @@ impl VestFlowContract {
                 .get(&DataKey::PerformanceMilestones(schedule_id))
                 .unwrap_or(vec![&env]);
 
-            let mut max_unlock_percentage: u32 = 0;
+            let mut total_unlock_percentage: u32 = 0;
             for milestone in milestones.iter() {
-                if milestone.attested && milestone.unlock_percentage > max_unlock_percentage {
-                    max_unlock_percentage = milestone.unlock_percentage;
+                if milestone.attested {
+                    total_unlock_percentage =
+                        total_unlock_percentage.saturating_add(milestone.unlock_percentage);
                 }
             }
+            let total_unlock_percentage = total_unlock_percentage.min(100);
 
             let max_claimable = schedule
                 .total_amount
-                .checked_mul(max_unlock_percentage as i128)
+                .checked_mul(total_unlock_percentage as i128)
                 .and_then(|n| n.checked_div(100))
                 .unwrap_or(0)
                 - schedule.claimed_amount;
