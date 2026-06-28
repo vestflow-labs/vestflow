@@ -1,9 +1,10 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   ScheduleData,
   stroopsToXlm,
   claimVested,
+  getClaimable,
   parseContractError,
   NETWORK,
 } from "@/lib/stellar";
@@ -34,9 +35,17 @@ export default function ClaimModal({
   const [loading, setLoading] = useState(false);
   const [txHash, setTxHash] = useState<string | null>(null);
   const [err, setErr] = useState("");
+  const [onChainAmt, setOnChainAmt] = useState<bigint | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setOnChainAmt(null);
+    getClaimable(schedule.id, publicKey ?? undefined).then(setOnChainAmt).catch(() => {});
+  }, [open, schedule.id, publicKey]);
 
   const xlmPrice = useXlmPrice();
   const estimatedFee = "0.0015";
+  const displayAmt = onChainAmt ?? claimableAmt;
 
   const handleClaim = async () => {
     if (!publicKey) return;
@@ -56,7 +65,7 @@ export default function ClaimModal({
       updateToast(toastId, {
         status: "success",
         title: "Tokens claimed!",
-        message: `${stroopsToXlm(claimableAmt)} ${tokenSymbol} transferred to your wallet.`,
+        message: `${stroopsToXlm(displayAmt)} ${tokenSymbol} transferred to your wallet.`,
         txHash: hash,
         network: NETWORK,
       });
@@ -78,7 +87,7 @@ export default function ClaimModal({
 
   if (!open) return null;
 
-  const remaining = schedule.total_amount - schedule.claimed - claimableAmt;
+  const remaining = schedule.total_amount - schedule.claimed - displayAmt;
 
   return (
     <div
@@ -123,14 +132,18 @@ export default function ClaimModal({
           <div className="flex justify-between items-center py-1">
             <span className="text-sm text-zinc-400">Claimable Amount</span>
             <span className="text-xl font-bold text-emerald-400">
-              {stroopsToXlm(claimableAmt)} {tokenSymbol}
+              {onChainAmt === null ? (
+                <span className="text-zinc-500 text-base">Loading…</span>
+              ) : (
+                <>{stroopsToXlm(displayAmt)} {tokenSymbol}</>
+              )}
             </span>
           </div>
-          {xlmPrice !== null && (
+          {xlmPrice !== null && onChainAmt !== null && (
             <div className="flex justify-between items-center py-1">
               <span className="text-sm text-zinc-400">USD Value</span>
               <span className="text-sm text-zinc-300">
-                {formatUsd(claimableAmt, xlmPrice)}
+                {formatUsd(displayAmt, xlmPrice)}
               </span>
             </div>
           )}
@@ -197,7 +210,7 @@ export default function ClaimModal({
             >
               {loading
                 ? "Confirming…"
-                : `Claim ${stroopsToXlm(claimableAmt)} ${tokenSymbol}`}
+                : `Claim ${stroopsToXlm(displayAmt)} ${tokenSymbol}`}
             </button>
           )}
         </div>

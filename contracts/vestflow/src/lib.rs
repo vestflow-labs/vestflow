@@ -760,6 +760,8 @@ impl VestFlowContract {
         schedule.grantor.require_auth();
         assert!(!schedule.paused, "Schedule already paused");
         assert!(!schedule.revoked, "Cannot pause revoked schedule");
+        let vested = schedule.vested_at(env.ledger().timestamp());
+        assert!(vested < schedule.total_amount, "Cannot pause a fully vested schedule");
 
         schedule.paused = true;
         schedule.paused_at = env.ledger().timestamp();
@@ -2556,6 +2558,57 @@ mod test {
             let claimable = schedule.claimable_at(now);
             prop_assert!(claimable >= 0);
             prop_assert!(claimable <= total_amount);
+        }
+
+        // --- Issue #263: pause/resume vested_at monotonicity ---
+
+        #[test]
+        fn test_fuzz_monotonicity_with_pause_resume(
+            total_amount in 0..1_000_000_000_i128,
+            start_time in 0..1_000_000_u64,
+            duration in 1..1_000_000_u64,
+            paused_duration in 0..2_000_000_u64,
+            paused_at in 0..2_000_000_u64,
+            paused in any::<bool>(),
+            now1 in 0..3_000_000_u64,
+            now2 in 0..3_000_000_u64,
+        ) {
+            let env = Env::default();
+            let schedule = VestingSchedule {
+                id: 1,
+                grantor: Address::generate(&env),
+                beneficiary: Address::generate(&env),
+                token: Address::generate(&env),
+                total_amount,
+                claimed_amount: 0,
+                start_time,
+                duration_seconds: duration,
+                cliff_seconds: 0,
+                lockup_duration: 0,
+                kind: VestingKind::Linear,
+                revocable: false,
+                revoked: false,
+                vested_at_revoke: 0,
+                paused,
+                paused_duration,
+                paused_at: if paused { paused_at } else { 0 },
+                requires_milestones: false,
+                milestones: vec![&env],
+            };
+
+            let v1 = schedule.vested_at(now1);
+            let v2 = schedule.vested_at(now2);
+
+            // vested_at is always non-negative
+            prop_assert!(v1 >= 0, "vested_at must be >= 0 (now1={})", now1);
+            prop_assert!(v2 >= 0, "vested_at must be >= 0 (now2={})", now2);
+
+            // vested_at is monotonically non-decreasing over time
+            if now1 <= now2 {
+                prop_assert!(v1 <= v2, "vested_at must be non-decreasing: v1={} v2={} now1={} now2={}", v1, v2, now1, now2);
+            } else {
+                prop_assert!(v1 >= v2, "vested_at must be non-decreasing: v1={} v2={} now1={} now2={}", v1, v2, now1, now2);
+            }
         }
     }
     #[test]
