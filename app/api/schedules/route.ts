@@ -1,4 +1,10 @@
-import { getAllSchedules, getClaimableBulk, NETWORK } from "@/lib/stellar";
+import {
+  getClaimableBulk,
+  getScheduleBatch,
+  getSchedulesByBeneficiary,
+  getSchedulesByGrantor,
+  NETWORK,
+} from "@/lib/stellar";
 import { NextRequest, NextResponse } from "next/server";
 
 function vestedAmount(schedule: {
@@ -59,17 +65,18 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const page = pageParam ? Math.max(1, parseInt(pageParam, 10)) : 1;
     const limit = limitParam ? Math.max(1, parseInt(limitParam, 10)) : 20;
 
-    const allSchedules = await getAllSchedules();
-    const filtered = allSchedules.filter(
-      (s) => s.grantor === address || s.beneficiary === address
+    const grantorIds = await getSchedulesByGrantor(address);
+    const beneficiaryIds = await getSchedulesByBeneficiary(address);
+    const ids = Array.from(new Set([...grantorIds, ...beneficiaryIds])).sort(
+      (a, b) => a - b
     );
 
-    const total = filtered.length;
+    const total = ids.length;
     const totalPages = Math.ceil(total / limit);
     const start = (page - 1) * limit;
-    const paginatedSchedules = filtered.slice(start, start + limit);
+    const paginatedIds = ids.slice(start, start + limit);
 
-    if (paginatedSchedules.length === 0) {
+    if (paginatedIds.length === 0) {
       return NextResponse.json(
         {
           schedules: [],
@@ -86,30 +93,33 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       );
     }
 
-    const ids = paginatedSchedules.map((s) => s.id);
-    const claimableAmounts = await getClaimableBulk(ids);
+    const paginatedSchedules = await getScheduleBatch(paginatedIds);
+    const claimableAmounts = await getClaimableBulk(paginatedIds);
     const now = Math.floor(Date.now() / 1000);
 
-    const schedules = paginatedSchedules.map((s, i) => {
-      const vested = vestedAmount(s, now);
-      const claimable = claimableAmounts[i] ?? 0n;
-      return {
-        id: s.id,
-        grantor: s.grantor,
-        beneficiary: s.beneficiary,
-        token: s.token,
-        total_amount: s.total_amount.toString(),
-        claimed: s.claimed.toString(),
-        start_time: s.start_time,
-        duration: s.duration,
-        cliff_duration: s.cliff_duration,
-        kind: s.kind,
-        revocable: s.revocable,
-        revoked: s.revoked,
-        vestedAmount: vested.toString(),
-        claimableAmount: claimable.toString(),
-      };
-    });
+    const schedules = paginatedSchedules
+      .map((s, i) => {
+        if (!s) return null;
+        const vested = vestedAmount(s, now);
+        const claimable = claimableAmounts[i] ?? 0n;
+        return {
+          id: s.id,
+          grantor: s.grantor,
+          beneficiary: s.beneficiary,
+          token: s.token,
+          total_amount: s.total_amount.toString(),
+          claimed: s.claimed.toString(),
+          start_time: s.start_time,
+          duration: s.duration,
+          cliff_duration: s.cliff_duration,
+          kind: s.kind,
+          revocable: s.revocable,
+          revoked: s.revoked,
+          vestedAmount: vested.toString(),
+          claimableAmount: claimable.toString(),
+        };
+      })
+      .filter(Boolean);
 
     return NextResponse.json(
       {
