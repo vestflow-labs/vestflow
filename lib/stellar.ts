@@ -43,6 +43,42 @@ export async function connectWallet(): Promise<string> {
   return result.address;
 }
 
+/**
+ * Stellar minimum reserve in stroops.
+ * A new account with 0 subentries needs 2 × 0.5 XLM = 1 XLM (10_000_000 stroops).
+ * This constant is a safe conservative floor; accounts with more subentries have
+ * a higher reserve, but most Freighter wallets hold the same minimal trustline set.
+ */
+const XLM_MIN_RESERVE_STROOPS = 10_000_000n; // 1 XLM
+
+/**
+ * Fetch the spendable XLM balance for a Stellar public key.
+ *
+ * Returns the native balance minus the Stellar minimum reserve so callers
+ * can compare it against a requested amount without risking a reserve error.
+ * Returns 0n if the account has no native balance or does not exist.
+ *
+ * @param publicKey - Stellar G-address to query.
+ */
+export async function getWalletXlmBalance(publicKey: string): Promise<bigint> {
+  try {
+    const account = await server.getAccount(publicKey);
+    const nativeBalance = (account.balances as any[]).find(
+      (b: any) => b.asset_type === "native"
+    );
+    if (!nativeBalance) return 0n;
+    // Stellar balances are returned as decimal strings (e.g. "1234.5678901")
+    // with 7 decimal places of precision. Convert to stroops.
+    const stroops = xlmToStroops(nativeBalance.balance);
+    const spendable = stroops > XLM_MIN_RESERVE_STROOPS
+      ? stroops - XLM_MIN_RESERVE_STROOPS
+      : 0n;
+    return spendable;
+  } catch {
+    return 0n;
+  }
+}
+
 // ---------- Read ----------
 
 async function simulate(method: string, args: xdr.ScVal[], publicKey?: string): Promise<xdr.ScVal> {
@@ -242,12 +278,13 @@ export async function createSchedule(
   durationDays: number,
   cliffDays: number,
   kind: "Linear" | "Cliff" | "LinearWithCliff",
-  revocable: boolean
+  revocable: boolean,
+  lockupDays: number = cliffDays
 ): Promise<string> {
   const totalStroops = xlmToStroops(totalAmountXlm);
   const durationSecs = durationDays * 86400;
   const cliffSecs = cliffDays * 86400;
-  const lockupSecs = cliffSecs;
+  const lockupSecs = lockupDays * 86400;
 
   const kindVal = xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(kind)]);
 
@@ -356,6 +393,17 @@ export function truncate(addr: string, prefixLen = 6, suffixLen = 4): string {
 }
 
 export function vestingProgress(s: ScheduleData, now: number): number {
+  // Revoked schedules freeze at the progress captured when revocation
+  // happened. The contract stores this as `vested_at_revoke`; using the
+  // time-based formula below would keep animating past the revocation point,
+  // which is misleading next to the "Revoked" badge.
+  if (s.revoked) {
+    if (s.total_amount <= 0n) return 0;
+    return Math.min(
+      100,
+      Math.round((Number(s.vested_at_revoke) / Number(s.total_amount)) * 100)
+    );
+  }
   if (s.kind === "Graded" && s.milestones && s.milestones.length > 0) {
     return Math.min(
       100,
