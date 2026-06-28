@@ -6,6 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "backend:dev": "ts-node-dev --project tsconfig.server.json --respawn --transpile-only src/app.ts",
+    "backend:build": "tsc -p tsconfig.server.json",
+    "backend:start": "node dist/app.js",
     "contracts:metrics": "bash scripts/contract-metrics.sh",
     "bindings:generate": "bash scripts/generate-bindings.sh",
     "bindings:build": "npm --prefix lib/bindings/vestflow install && npm --prefix lib/bindings/vestflow run build",
@@ -15,6 +18,9 @@
     "@stellar/freighter-api": "^6.0.1",
     "@stellar/stellar-sdk": "^15.1.0",
     "better-sqlite3": "^12.11.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
     "next": "16.2.6",
     "react": "19.2.4",
     "react-dom": "19.2.4"
@@ -25,14 +31,38 @@
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
     "@types/better-sqlite3": "^7.6.13",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
     "@types/node": "^20",
     "@types/react": "^19.2.16",
     "@types/react-dom": "^19.2.3",
+    "eslint": "^9.7.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
     "jsdom": "^29.1.1",
     "lefthook": "^2.1.9",
+    "prettier": "^3.3.3",
     "tailwindcss": "^4",
+    "ts-node-dev": "^2.0.0",
     "tsup": "^8.5.1",
     "typescript": "^5",
     "vitest": "^4.1.9"
-  }
+  },
+  "description": "[![CI](https://github.com/vestflow-labs/vestflow/actions/workflows/ci.yml/badge.svg)](https://github.com/vestflow-labs/vestflow/actions/workflows/ci.yml)\r [![codecov](https://codecov.io/gh/vestflow-labs/vestflow/branch/main/graph/badge.svg)](https://codecov.io/gh/vestflow-labs/vestflow)",
+  "main": "index.js",
+  "directories": {
+    "lib": "lib"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HybridDan/vestflow.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/HybridDan/vestflow/issues"
+  },
+  "homepage": "https://github.com/HybridDan/vestflow#readme"
 }
