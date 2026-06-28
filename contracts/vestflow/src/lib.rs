@@ -86,6 +86,12 @@ pub enum DataKey {
 /// Mandatory delay between an on-chain upgrade announcement and execution.
 pub const UPGRADE_TIMELOCK_SECONDS: u64 = 48 * 60 * 60;
 
+/// Maximum number of milestones allowed in a graded vesting schedule.
+/// Bounds the stored schedule size and the per-claim iteration cost so a
+/// `create_graded_schedule` call cannot exceed the transaction instruction
+/// limit with an unbounded milestone vector.
+pub const MAX_MILESTONES: u32 = 100;
+
 /// A contract WASM upgrade that has been announced on-chain but not yet executed.
 #[contracttype]
 #[derive(Clone, PartialEq)]
@@ -621,6 +627,7 @@ impl VestFlowContract {
     /// Panics with `"Amount must be positive"` if `total_amount` ≤ 0.
     /// Panics with `"Start time cannot be in the past"` if `start_time` < current ledger time.
     /// Panics with `"Milestones required"` if the milestones list is empty.
+    /// Panics with `"Too many milestones"` if the list exceeds `MAX_MILESTONES`.
     /// Panics with `"Milestones must sum to 10000 bps"` if the bps total ≠ 10 000.
     pub fn create_graded_schedule(
         env: Env,
@@ -645,6 +652,7 @@ impl VestFlowContract {
             "Start time cannot be in the past"
         );
         assert!(!milestones.is_empty(), "Milestones required");
+        assert!(milestones.len() <= MAX_MILESTONES, "Too many milestones");
 
         let total_bps: u64 = milestones.iter().map(|m| m.bps as u64).sum();
         assert!(total_bps == 10_000, "Milestones must sum to 10000 bps");
@@ -2218,6 +2226,62 @@ mod test {
         );
     }
 
+    #[test]
+    #[should_panic(expected = "Too many milestones")]
+    fn test_graded_vesting_rejects_too_many_milestones() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        // MAX_MILESTONES + 1 entries — should panic before the bps-sum check.
+        let mut milestones: soroban_sdk::Vec<GradedMilestone> = soroban_sdk::vec![&env];
+        for i in 0..(MAX_MILESTONES + 1) {
+            milestones.push_back(GradedMilestone {
+                offset_secs: (i as u64 + 1) * 600,
+                bps: 1,
+            });
+        }
+        client.create_graded_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &10_000,
+            &0,
+            &0,
+            &false,
+            &milestones,
+        );
+    }
+
+    #[test]
+    fn test_graded_vesting_accepts_max_milestones() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        // Exactly MAX_MILESTONES entries summing to 10 000 bps — should succeed.
+        let mut milestones: soroban_sdk::Vec<GradedMilestone> = soroban_sdk::vec![&env];
+        for i in 0..MAX_MILESTONES {
+            milestones.push_back(GradedMilestone {
+                offset_secs: (i as u64 + 1) * 600,
+                bps: 100, // 100 bps × 100 milestones = 10 000 bps
+            });
+        }
+        let id = client.create_graded_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &10_000,
+            &0,
+            &0,
+            &false,
+            &milestones,
+        );
+        assert_eq!(client.get_schedule(&id).milestones.len(), MAX_MILESTONES);
+    }
+
     // --- Issue #7: transfer_beneficiary tests ---
 
     #[test]
@@ -2853,5 +2917,165 @@ mod test {
             },
         }]);
         client.transfer_grantor(&id, &attacker);
+    }
+
+    // --- Issue #264: performance milestone flows ---
+
+    /// Helper: set up a contract with an oracle and a basic linear schedule.
+    /// Returns (client, schedule_id, grantor, beneficiary, token_addr, oracle).
+    fn setup_with_oracle(
+        env: &Env,
+    ) -> (
+        VestFlowContractClient<'_>,
+        u64,
+        Address,
+        Address,
+        Address,
+        Address,
+    ) {
+        let (client, grantor, beneficiary, token_addr, token_admin) = setup(env);
+
+        // The upgrade authority and performance oracle must be the same address
+        // in our helper because initialize_upgrade_authority requires its own auth.
+        client.initialize_upgrade_authority(&token_admin);
+
+        let oracle = Address::generate(env);
+        client.initialize_performance_oracle(&oracle);
+
+        set_time(env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+
+        (client, id, grantor, beneficiary, token_addr, oracle)
+    }
+
+    /// `enable_performance_milestones` happy path: the schedule should have
+    /// `requires_milestones = true` after the call, and `get_milestones` should
+    /// return a Vec of un-attested milestones matching the input percentages.
+    #[test]
+    fn test_enable_performance_milestones_happy_path() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, id, _, _, _, _) = setup_with_oracle(&env);
+
+        let percentages = soroban_sdk::vec![&env, 25_u32, 50_u32, 25_u32];
+        client.enable_performance_milestones(&id, &percentages);
+
+        // Schedule must be marked as requiring milestones.
+        let schedule = client.get_schedule(&id);
+        assert!(schedule.requires_milestones);
+
+        // Stored milestones must mirror the input percentages and be un-attested.
+        let milestones = client
+            .get_milestones(&id)
+            .expect("milestones must be present");
+        assert_eq!(milestones.len(), 3);
+        assert_eq!(milestones.get(0).unwrap().unlock_percentage, 25);
+        assert!(!milestones.get(0).unwrap().attested);
+        assert_eq!(milestones.get(1).unwrap().unlock_percentage, 50);
+        assert!(!milestones.get(1).unwrap().attested);
+        assert_eq!(milestones.get(2).unwrap().unlock_percentage, 25);
+        assert!(!milestones.get(2).unwrap().attested);
+    }
+
+    /// `attest_milestone` should flip `attested = true` and record the timestamp
+    /// for the targeted index, leaving other milestones unchanged.
+    #[test]
+    fn test_attest_milestone_updates_stored_record() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, id, _, _, _, oracle) = setup_with_oracle(&env);
+
+        let percentages = soroban_sdk::vec![&env, 50_u32, 50_u32];
+        client.enable_performance_milestones(&id, &percentages);
+
+        // Advance time so the attestation timestamp is non-zero.
+        set_time(&env, 500);
+        client.attest_milestone(&id, &0);
+
+        let milestones = client.get_milestones(&id).unwrap();
+        // Index 0: attested, timestamp set.
+        assert!(milestones.get(0).unwrap().attested);
+        assert_eq!(milestones.get(0).unwrap().attested_at, 500);
+        // Index 1: still un-attested, timestamp still 0.
+        assert!(!milestones.get(1).unwrap().attested);
+        assert_eq!(milestones.get(1).unwrap().attested_at, 0);
+
+        // Suppress the "unused variable" warning in the oracle binding.
+        let _ = oracle;
+    }
+
+    /// Claim must be capped by the highest attested `unlock_percentage`.
+    ///
+    /// Setup: 1000 tokens, three milestones at 25/50/25 percent.
+    /// After attesting only the first milestone (25%), claiming at full vest
+    /// should yield at most 25% of total = 250 tokens.
+    #[test]
+    fn test_claim_capped_by_max_unlock_percentage() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, id, _, beneficiary, token_addr, _) = setup_with_oracle(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        let percentages = soroban_sdk::vec![&env, 25_u32, 50_u32, 25_u32];
+        client.enable_performance_milestones(&id, &percentages);
+
+        // Attest only the first milestone (25%).
+        set_time(&env, 0);
+        client.attest_milestone(&id, &0);
+
+        // Move to full vest (all 1000 tokens would otherwise be claimable).
+        set_time(&env, 1000);
+
+        // Claim should be capped at 25% = 250.
+        client.claim(&id);
+        assert_eq!(token.balance(&beneficiary), 250);
+
+        // A second claim must fail (nothing left within the milestone cap).
+        let result = client.try_claim(&id);
+        assert!(result.is_err());
+    }
+
+    /// Claim after partial attestation: some milestones attested, others not.
+    ///
+    /// Setup: 1000 tokens, two milestones at 50/50.
+    /// Attest milestone 0 (50%) then milestone 1 (50%).
+    /// After attesting both, the full 1000 tokens should be claimable
+    /// (i.e. the gate does not permanently block once all are attested).
+    #[test]
+    fn test_claim_after_partial_then_full_attestation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, id, _, beneficiary, token_addr, _) = setup_with_oracle(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        let percentages = soroban_sdk::vec![&env, 50_u32, 50_u32];
+        client.enable_performance_milestones(&id, &percentages);
+
+        // Only first milestone attested at start.
+        set_time(&env, 0);
+        client.attest_milestone(&id, &0);
+
+        // At full vest, only 50% (500) should be claimable.
+        set_time(&env, 1000);
+        client.claim(&id);
+        assert_eq!(token.balance(&beneficiary), 500);
+
+        // Attest the second milestone.
+        client.attest_milestone(&id, &1);
+
+        // Now the remaining 50% should unlock.
+        client.claim(&id);
+        assert_eq!(token.balance(&beneficiary), 1000);
     }
 }
