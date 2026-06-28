@@ -337,6 +337,18 @@ export async function revokeSchedule(publicKey: string, scheduleId: number): Pro
   return buildAndSend(publicKey, "revoke", [nativeToScVal(scheduleId, { type: "u64" })]);
 }
 
+export async function pauseSchedule(publicKey: string, scheduleId: number): Promise<string> {
+  return buildAndSend(publicKey, "pause_schedule", [
+    nativeToScVal(scheduleId, { type: "u64" }),
+  ]);
+}
+
+export async function resumeSchedule(publicKey: string, scheduleId: number): Promise<string> {
+  return buildAndSend(publicKey, "resume_schedule", [
+    nativeToScVal(scheduleId, { type: "u64" }),
+  ]);
+}
+
 export async function transferGrantor(
   publicKey: string,
   scheduleId: number,
@@ -364,12 +376,10 @@ export interface ScheduleData {
   kind: "Linear" | "Cliff" | "LinearWithCliff" | "Graded";
   revocable: boolean;
   revoked: boolean;
-  /**
-   * Tokens that were vested at the moment of revocation (stroops).
-   * Zero for schedules that have never been revoked. For a revoked schedule
-   * this is the frozen vested amount — see `vestingProgress`.
-   */
-  vested_at_revoke: bigint;
+paused: Boolean(raw.paused),
+    paused_duration: Number(raw.paused_duration ?? 0),
+    paused_at: Number(raw.paused_at ?? 0),
+    vested_at_revoke: BigInt(raw.vested_at_revoke ?? 0),
   milestones?: { pct: number; timestamp: number }[];
 }
 
@@ -395,7 +405,15 @@ function parseSchedule(raw: any): ScheduleData {
         : "Linear",
     revocable: Boolean(raw.revocable),
     revoked: Boolean(raw.revoked),
-    vested_at_revoke: BigInt(raw.vested_at_revoke ?? 0),
+paused: boolean;
+  paused_duration: number;
+  paused_at: number;
+  /**
+   * Tokens that were vested at the moment of revocation (stroops).
+   * Zero for schedules that have never been revoked. For a revoked schedule
+   * this is the frozen vested amount — see `vestingProgress`.
+   */
+  vested_at_revoke: bigint;
     milestones: Array.isArray(raw.milestones)
       ? (raw.milestones as any[]).map((m) => ({
           pct: Number(m.pct ?? m.percent ?? 0),
@@ -437,7 +455,10 @@ export function vestingProgress(s: ScheduleData, now: number): number {
     );
   }
   if (now < s.start_time) return 0;
-  const elapsed = now - s.start_time;
+  let elapsed = Math.max(0, now - s.start_time - s.paused_duration);
+  if (s.paused && s.paused_at > 0) {
+    elapsed = Math.max(0, elapsed - Math.max(0, now - s.paused_at));
+  }
   return Math.min(100, Math.round((elapsed / s.duration) * 100));
 }
 
@@ -473,6 +494,9 @@ export function parseContractError(e: Error): string {
   if (msg.includes("Not the beneficiary")) return "Only the beneficiary can claim tokens.";
   if (msg.includes("Insufficient balance")) return "Insufficient balance to complete this action.";
   if (msg.includes("Schedule has ended")) return "This vesting schedule has already ended.";
+  if (msg.includes("Schedule already paused")) return "This schedule is already paused.";
+  if (msg.includes("Schedule not paused")) return "This schedule is not paused.";
+  if (msg.includes("Cannot pause revoked schedule")) return "A revoked schedule cannot be paused.";
   if (msg.includes("Start time in the past")) return "The start time must be in the future.";
   return msg;
 }
