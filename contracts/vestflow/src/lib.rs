@@ -309,6 +309,29 @@ impl VestingSchedule {
             0
         }
     }
+
+    /// Tokens that are vested but still held in the lockup window.
+    ///
+    /// Returns a positive value when `now` is before `lockup_end` and some
+    /// tokens have already vested. Returns 0 once the lockup has elapsed
+    /// (those tokens will appear via `claimable_at` instead) or when nothing
+    /// has vested yet. Callers can use this to distinguish "locked but vesting"
+    /// from "nothing vested yet".
+    pub fn locked_at(&self, now: u64) -> i128 {
+        if self.lockup_duration == 0 {
+            return 0;
+        }
+        let lockup_end = self.start_time.saturating_add(self.lockup_duration);
+        if now >= lockup_end {
+            return 0;
+        }
+        let vested = self.vested_at(now);
+        if vested > self.claimed_amount {
+            vested - self.claimed_amount
+        } else {
+            0
+        }
+    }
 }
 
 #[contract]
@@ -477,6 +500,27 @@ impl VestFlowContract {
             .update_current_contract_wasm(pending.wasm_hash);
     }
 
+    /// Transfer upgrade authority to a new address.
+    ///
+    /// Both the current and new authority must sign. Emits an `"upgr_xfr"` event.
+    pub fn transfer_upgrade_authority(
+        env: Env,
+        current_authority: Address,
+        new_authority: Address,
+    ) {
+        let configured = Self::read_upgrade_authority(&env);
+        assert!(current_authority == configured, "Unauthorized upgrade authority");
+        current_authority.require_auth();
+        new_authority.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeAuthority, &new_authority);
+        env.events().publish(
+            (symbol_short!("upgr_xfr"), current_authority.clone()),
+            (current_authority, new_authority, env.ledger().timestamp()),
+        );
+    }
+
     /// Create a new vesting schedule and lock the tokens into the contract.
     ///
     /// The grantor must approve the contract to transfer `total_amount` of
@@ -639,7 +683,7 @@ impl VestFlowContract {
         lockup_duration: u64,
         revocable: bool,
         milestones: Vec<GradedMilestone>,
-    ) -> u64 {
+    ) -> Result<u64, VestFlowError> {
         grantor.require_auth();
 
         assert!(
@@ -736,7 +780,7 @@ impl VestFlowContract {
             ),
         );
 
-        id
+        Ok(id)
     }
 
     /// Pause an active vesting schedule (grantor only).
@@ -867,6 +911,9 @@ impl VestFlowContract {
 
         schedule.grantor.require_auth();
         assert!(!schedule.requires_milestones, "Milestones already enabled");
+
+        let total: u32 = milestones.iter().sum();
+        assert!(total == 100, "Unlock percentages must sum to 100");
 
         schedule.requires_milestones = true;
 
@@ -1155,6 +1202,10 @@ impl VestFlowContract {
         if schedule.revoked {
             return Err(VestFlowError::ScheduleRevoked);
         }
+        assert!(
+            new_beneficiary != schedule.grantor,
+            "New beneficiary must differ from grantor"
+        );
 
         let old_beneficiary = schedule.beneficiary.clone();
         schedule.beneficiary = new_beneficiary.clone();
@@ -1329,6 +1380,27 @@ impl VestFlowContract {
             .get::<DataKey, VestingSchedule>(&DataKey::Schedule(schedule_id))
         {
             Some(schedule) => schedule.claimable_at(ts),
+            None => 0,
+        }
+    }
+
+    /// Preview how many tokens are vested but still inside the lockup window at
+    /// timestamp `ts`.
+    ///
+    /// Returns 0 once the lockup has elapsed (those tokens appear via
+    /// `claimable_at_timestamp` instead), when no lockup is configured, or
+    /// when `schedule_id` is unknown.
+    ///
+    /// Frontends can call this alongside `claimable_at_timestamp` to
+    /// distinguish "your tokens are vesting but locked until DATE" from
+    /// "nothing has vested yet".
+    pub fn locked_at_timestamp(env: Env, schedule_id: u64, ts: u64) -> i128 {
+        match env
+            .storage()
+            .instance()
+            .get::<DataKey, VestingSchedule>(&DataKey::Schedule(schedule_id))
+        {
+            Some(schedule) => schedule.locked_at(ts),
             None => 0,
         }
     }
@@ -2666,6 +2738,46 @@ mod test {
         assert_eq!(client.claimable(&id), 250);
         client.claim(&id);
         assert_eq!(token.balance(&beneficiary), 250);
+    }
+
+    /// `locked_at_timestamp` returns the vested-but-locked amount during the
+    /// lockup window and 0 after it expires (#254).
+    #[test]
+    fn test_locked_at_timestamp_during_and_after_lockup() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        // Linear schedule: 1000 tokens, no cliff, lockup_duration = 600s, duration = 1000s.
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &600,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        // At t=0: nothing vested yet — locked_at = 0, claimable = 0.
+        assert_eq!(client.locked_at_timestamp(&id, &0), 0);
+        assert_eq!(client.claimable_at_timestamp(&id, &0), 0);
+
+        // At t=500: 500 tokens vested, still inside lockup (ends at 600).
+        // claimable_at_timestamp returns 0; locked_at_timestamp returns 500.
+        assert_eq!(client.claimable_at_timestamp(&id, &500), 0);
+        assert_eq!(client.locked_at_timestamp(&id, &500), 500);
+
+        // At t=600: lockup expired — locked_at = 0, claimable = 600.
+        assert_eq!(client.locked_at_timestamp(&id, &600), 0);
+        assert_eq!(client.claimable_at_timestamp(&id, &600), 600);
+
+        // Unknown schedule ID returns 0.
+        assert_eq!(client.locked_at_timestamp(&9999, &500), 0);
     }
 
     #[test]
