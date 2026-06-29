@@ -524,4 +524,30 @@ export class VestflowClient {
       signer
     );
   }
+
+  /**
+   * Transfer beneficiary of a vesting schedule (current beneficiary only).
+   *
+   * @param currentBeneficiary - Current beneficiary's Stellar public key (signs the transaction)
+   * @param scheduleId - ID of the schedule to transfer
+   * @param newBeneficiary - New beneficiary's Stellar public key
+   * @param signer - Function that signs the transaction XDR
+   * @returns Transaction hash
+   */
+  async transferBeneficiary(
+    currentBeneficiary: string,
+    scheduleId: number,
+    newBeneficiary: string,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    return this.buildAndSend(
+      currentBeneficiary,
+      "transfer_beneficiary",
+      [
+        nativeToScVal(scheduleId, { type: "u64" }),
+        nativeToScVal(newBeneficiary, { type: "address" }),
+      ],
+      signer
+    );
+  }
 }
