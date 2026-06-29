@@ -89,6 +89,12 @@ export interface CreateScheduleParams {
   durationDays: number;
   /** Cliff duration in days (0 for no cliff). */
   cliffDays: number;
+  /**
+   * Lockup duration in days — tokens are earned but non-transferable until
+   * this date. Must be >= cliffDays.
+   * @default cliffDays
+   */
+  lockupDays?: number;
   /** Vesting curve type. */
   kind: VestingKind;
   /** Whether the grantor can revoke unvested tokens. */
