@@ -309,6 +309,29 @@ impl VestingSchedule {
             0
         }
     }
+
+    /// Tokens that are vested but still held in the lockup window.
+    ///
+    /// Returns a positive value when `now` is before `lockup_end` and some
+    /// tokens have already vested. Returns 0 once the lockup has elapsed
+    /// (those tokens will appear via `claimable_at` instead) or when nothing
+    /// has vested yet. Callers can use this to distinguish "locked but vesting"
+    /// from "nothing vested yet".
+    pub fn locked_at(&self, now: u64) -> i128 {
+        if self.lockup_duration == 0 {
+            return 0;
+        }
+        let lockup_end = self.start_time.saturating_add(self.lockup_duration);
+        if now >= lockup_end {
+            return 0;
+        }
+        let vested = self.vested_at(now);
+        if vested > self.claimed_amount {
+            vested - self.claimed_amount
+        } else {
+            0
+        }
+    }
 }
 
 #[contract]
@@ -1329,6 +1352,27 @@ impl VestFlowContract {
             .get::<DataKey, VestingSchedule>(&DataKey::Schedule(schedule_id))
         {
             Some(schedule) => schedule.claimable_at(ts),
+            None => 0,
+        }
+    }
+
+    /// Preview how many tokens are vested but still inside the lockup window at
+    /// timestamp `ts`.
+    ///
+    /// Returns 0 once the lockup has elapsed (those tokens appear via
+    /// `claimable_at_timestamp` instead), when no lockup is configured, or
+    /// when `schedule_id` is unknown.
+    ///
+    /// Frontends can call this alongside `claimable_at_timestamp` to
+    /// distinguish "your tokens are vesting but locked until DATE" from
+    /// "nothing has vested yet".
+    pub fn locked_at_timestamp(env: Env, schedule_id: u64, ts: u64) -> i128 {
+        match env
+            .storage()
+            .instance()
+            .get::<DataKey, VestingSchedule>(&DataKey::Schedule(schedule_id))
+        {
+            Some(schedule) => schedule.locked_at(ts),
             None => 0,
         }
     }
@@ -2666,6 +2710,46 @@ mod test {
         assert_eq!(client.claimable(&id), 250);
         client.claim(&id);
         assert_eq!(token.balance(&beneficiary), 250);
+    }
+
+    /// `locked_at_timestamp` returns the vested-but-locked amount during the
+    /// lockup window and 0 after it expires (#254).
+    #[test]
+    fn test_locked_at_timestamp_during_and_after_lockup() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        // Linear schedule: 1000 tokens, no cliff, lockup_duration = 600s, duration = 1000s.
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &600,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        // At t=0: nothing vested yet — locked_at = 0, claimable = 0.
+        assert_eq!(client.locked_at_timestamp(&id, &0), 0);
+        assert_eq!(client.claimable_at_timestamp(&id, &0), 0);
+
+        // At t=500: 500 tokens vested, still inside lockup (ends at 600).
+        // claimable_at_timestamp returns 0; locked_at_timestamp returns 500.
+        assert_eq!(client.claimable_at_timestamp(&id, &500), 0);
+        assert_eq!(client.locked_at_timestamp(&id, &500), 500);
+
+        // At t=600: lockup expired — locked_at = 0, claimable = 600.
+        assert_eq!(client.locked_at_timestamp(&id, &600), 0);
+        assert_eq!(client.claimable_at_timestamp(&id, &600), 600);
+
+        // Unknown schedule ID returns 0.
+        assert_eq!(client.locked_at_timestamp(&9999, &500), 0);
     }
 
     #[test]
