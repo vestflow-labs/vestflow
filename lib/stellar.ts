@@ -130,9 +130,37 @@ export async function getSchedulesByBeneficiary(beneficiary: string): Promise<nu
   } catch { return []; }
 }
 
+export async function getClaimableAt(id: number, now: number, publicKey?: string): Promise<bigint> {
+  try {
+    const val = await simulate(
+      "claimable_amount",
+      [
+        nativeToScVal(id, { type: "u64" }),
+        nativeToScVal(now, { type: "u64" }),
+      ],
+      publicKey
+    );
+    return BigInt(scValToNative(val));
+  } catch { return 0n; }
+}
+
 export async function getClaimable(id: number, publicKey?: string): Promise<bigint> {
   try {
     const val = await simulate("claimable", [nativeToScVal(id, { type: "u64" })], publicKey);
+    return BigInt(scValToNative(val));
+  } catch { return 0n; }
+}
+
+export async function getVestedAmountAt(id: number, now: number, publicKey?: string): Promise<bigint> {
+  try {
+    const val = await simulate(
+      "vested_amount",
+      [
+        nativeToScVal(id, { type: "u64" }),
+        nativeToScVal(now, { type: "u64" }),
+      ],
+      publicKey
+    );
     return BigInt(scValToNative(val));
   } catch { return 0n; }
 }
