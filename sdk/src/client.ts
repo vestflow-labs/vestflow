@@ -252,6 +252,18 @@ export class VestflowClient {
    */
   async getClaimable(id: number, publicKey?: string): Promise<bigint> {
     try {
+      const val = await this.simulate(
+        "claimable",
+        [nativeToScVal(id, { type: "u64" })],
+        publicKey
+      );
+      return BigInt(scValToNative(val));
+    } catch {
+      return 0n;
+    }
+  }
+
+  /**
    * Return how many tokens are claimable for a schedule at a specific time.
    */
   async getClaimableAt(id: number, now: number, publicKey?: string): Promise<bigint> {
@@ -262,18 +274,6 @@ export class VestflowClient {
           nativeToScVal(id, { type: "u64" }),
           nativeToScVal(now, { type: "u64" }),
         ],
-        publicKey
-      );
-      return BigInt(scValToNative(val));
-    } catch {
-      return 0n;
-    }
-  }
-
-  /**
-      const val = await this.simulate(
-        "claimable",
-        [nativeToScVal(id, { type: "u64" })],
         publicKey
       );
       return BigInt(scValToNative(val));
