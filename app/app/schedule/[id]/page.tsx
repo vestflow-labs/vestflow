@@ -10,8 +10,10 @@ import AddressLabel from "@/components/AddressLabel";
 import {
   getSchedule,
   getClaimableAtTimestamp,
+  getMilestones,
   transferGrantor,
   ScheduleData,
+  PerformanceMilestoneData,
   stroopsToXlm,
   vestingProgress,
   formatDate,
@@ -35,6 +37,8 @@ export default function ScheduleDetailPage() {
   const [showClaimModal, setShowClaimModal] = useState(false);
   const [err, setErr] = useState("");
   const [lastTxHash, setLastTxHash] = useState<string | null>(null);
+  const [milestones, setMilestones] = useState<PerformanceMilestoneData[] | null>(null);
+  const [milestonesLoading, setMilestonesLoading] = useState(false);
   const xlmPrice = useXlmPrice();
 
   // Future preview state (#258)
@@ -53,6 +57,14 @@ export default function ScheduleDetailPage() {
     const s = await getSchedule(Number(id), publicKey ?? undefined);
     setSchedule(s);
     setLoading(false);
+    if (s?.requires_milestones) {
+      setMilestonesLoading(true);
+      const ms = await getMilestones(s.id, publicKey ?? undefined);
+      setMilestones(ms);
+      setMilestonesLoading(false);
+    } else {
+      setMilestones(null);
+    }
   };
 
   useEffect(() => { load(); }, [id]);
@@ -294,6 +306,62 @@ export default function ScheduleDetailPage() {
               </a>
             </div>
           </div>
+
+          {/* Performance milestones (oracle-attested) */}
+          {schedule.requires_milestones && (
+            <div className="border-t border-white/5 pt-4">
+              <p className="text-zinc-500 text-xs uppercase tracking-wider mb-3">Performance Milestones</p>
+              {milestonesLoading ? (
+                <p className="text-xs text-zinc-500">Loading milestones…</p>
+              ) : milestones && milestones.length > 0 ? (
+                <div className="flex flex-col gap-2">
+                  {milestones.map((m, i) => (
+                    <div
+                      key={i}
+                      className={`flex items-center justify-between rounded-lg px-3 py-2 text-sm ${
+                        m.attested
+                          ? "bg-emerald-500/10 border border-emerald-500/20"
+                          : "bg-zinc-800/40 border border-zinc-700/50"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <span
+                          className={`flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold ${
+                            m.attested
+                              ? "bg-emerald-500/20 text-emerald-400"
+                              : "bg-zinc-700 text-zinc-500"
+                          }`}
+                        >
+                          {m.attested ? "✓" : i + 1}
+                        </span>
+                        <div>
+                          <p className={m.attested ? "text-zinc-200" : "text-zinc-400"}>
+                            {m.unlock_percentage}% unlock
+                          </p>
+                          {m.attested && m.attested_at > 0 && (
+                            <p className="text-[11px] text-zinc-500 mt-0.5">
+                              Attested {formatDate(m.attested_at)}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                      <span
+                        className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                          m.attested
+                            ? "bg-emerald-500/10 text-emerald-400"
+                            : "bg-amber-500/10 text-amber-400"
+                        }`}
+                      >
+                        {m.attested ? "Attested" : "Pending"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-zinc-500">No milestones configured.</p>
+              )}
+            </div>
+          )}
 
           {/* Future claimable preview (#258) */}
           {!schedule.revoked && (

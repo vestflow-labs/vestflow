@@ -218,6 +218,7 @@ export async function getClaimableBulk(
 }
 
 /**
+<<<<<<< Updated upstream
  * Fetch total vested amounts (earned, including already-claimed) for multiple
  * schedule IDs in a single simulation round-trip using the vested_amount_bulk
  * contract view.
@@ -243,6 +244,30 @@ export async function getVestedAmountBulk(
 }
 
 
+=======
+ * Fetch performance milestones for a schedule by calling the `get_milestones`
+ * contract view. Returns `null` when no milestones are configured (i.e. when
+ * `requires_milestones` is false or the schedule has no milestones stored).
+ */
+export async function getMilestones(
+  id: number,
+  publicKey?: string
+): Promise<PerformanceMilestoneData[] | null> {
+  try {
+    const val = await simulate("get_milestones", [nativeToScVal(id, { type: "u64" })], publicKey);
+    const native = scValToNative(val);
+    if (native == null) return null;
+    return (native as any[]).map((m: any) => ({
+      unlock_percentage: Number(m.unlock_percentage),
+      attested: Boolean(m.attested),
+      attested_at: Number(m.attested_at ?? 0),
+    }));
+  } catch {
+    return null;
+  }
+}
+
+>>>>>>> Stashed changes
 export async function getAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
   const count = await getScheduleCount();
   if (count === 0) return [];
@@ -365,9 +390,21 @@ export interface ScheduleData {
   revocable: boolean;
   revoked: boolean;
   paused: boolean;
+<<<<<<< Updated upstream
   requires_milestones: boolean;
   vested_at_revoke: bigint;
+=======
+  paused_duration: number;
+  paused_at: number;
+  requires_milestones: boolean;
+>>>>>>> Stashed changes
   milestones?: { pct: number; timestamp: number }[];
+}
+
+export interface PerformanceMilestoneData {
+  unlock_percentage: number;
+  attested: boolean;
+  attested_at: number;
 }
 
 function parseSchedule(raw: any): ScheduleData {
@@ -393,8 +430,14 @@ function parseSchedule(raw: any): ScheduleData {
     revocable: Boolean(raw.revocable),
     revoked: Boolean(raw.revoked),
     paused: Boolean(raw.paused),
+<<<<<<< Updated upstream
     requires_milestones: Boolean(raw.requires_milestones),
     vested_at_revoke: BigInt(raw.vested_at_revoke ?? raw.vested_at_revocation ?? 0),
+=======
+    paused_duration: Number(raw.paused_duration ?? 0),
+    paused_at: Number(raw.paused_at ?? 0),
+    requires_milestones: Boolean(raw.requires_milestones),
+>>>>>>> Stashed changes
     milestones: Array.isArray(raw.milestones)
       ? (raw.milestones as any[]).map((m) => ({
           pct: Number(m.pct ?? m.percent ?? 0),
