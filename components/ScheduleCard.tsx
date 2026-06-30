@@ -33,24 +33,19 @@ export default function ScheduleCard({
 
   const now = Math.floor(Date.now() / 1000);
   const progress = vestingProgress(schedule, now);
+  const lockupEndsAt = schedule.start_time + schedule.lockup_duration;
+  const isInLockup = schedule.lockup_duration > 0 && now < lockupEndsAt;
 
   // Claimed percentage relative to total (for the dual progress bar)
   const claimedPct =
     schedule.total_amount > 0n
-      ? Math.min(
-          100,
-          Math.round(
-            (Number(schedule.claimed) / Number(schedule.total_amount)) * 100
-          )
-        )
+      ? Math.min(100, Number((schedule.claimed * 100n) / schedule.total_amount))
       : 0;
 
   const isBeneficiary = publicKey === schedule.beneficiary;
   const isGrantor = publicKey === schedule.grantor;
-  const vested = BigInt(
-    Math.floor((Number(schedule.total_amount) * progress) / 100)
-  );
-  const claimableAmt = vested > schedule.claimed ? vested - schedule.claimed : 0n;
+  const vested = (schedule.total_amount * BigInt(progress)) / 100n;
+  const claimableAmt = !isInLockup && vested > schedule.claimed ? vested - schedule.claimed : 0n;
 
   // SEP-41 token symbol support
   const isNative = schedule.token === NATIVE_TOKEN;
