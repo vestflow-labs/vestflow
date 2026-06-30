@@ -63,7 +63,7 @@ const XLM_MIN_RESERVE_STROOPS = 10_000_000n; // 1 XLM
 export async function getWalletXlmBalance(publicKey: string): Promise<bigint> {
   try {
     const account = await server.getAccount(publicKey);
-    const nativeBalance = (account.balances as any[]).find(
+    const nativeBalance = ((account as any).balances as any[]).find(
       (b: any) => b.asset_type === "native"
     );
     if (!nativeBalance) return 0n;
@@ -217,6 +217,32 @@ export async function getClaimableBulk(
   }
 }
 
+/**
+ * Fetch total vested amounts (earned, including already-claimed) for multiple
+ * schedule IDs in a single simulation round-trip using the vested_amount_bulk
+ * contract view.
+ *
+ * Returns amounts in the same order as `ids`. Unknown IDs return 0n.
+ */
+export async function getVestedAmountBulk(
+  ids: number[],
+  publicKey?: string
+): Promise<bigint[]> {
+  if (ids.length === 0) return [];
+  try {
+    const idsVal = xdr.ScVal.scvVec(
+      ids.map((id) => nativeToScVal(id, { type: "u64" }))
+    );
+    const val = await simulate("vested_amount_bulk", [idsVal], publicKey);
+    const native = scValToNative(val) as bigint[];
+    return native.map((v) => BigInt(v));
+  } catch {
+    // Fallback: return zeros so callers always get a valid array
+    return ids.map(() => 0n);
+  }
+}
+
+
 export async function getAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
   const count = await getScheduleCount();
   if (count === 0) return [];
@@ -338,11 +364,8 @@ export interface ScheduleData {
   kind: "Linear" | "Cliff" | "LinearWithCliff" | "Graded";
   revocable: boolean;
   revoked: boolean;
-  /**
-   * Tokens that were vested at the moment of revocation (stroops).
-   * Zero for schedules that have never been revoked. For a revoked schedule
-   * this is the frozen vested amount — see `vestingProgress`.
-   */
+  paused: boolean;
+  requires_milestones: boolean;
   vested_at_revoke: bigint;
   milestones?: { pct: number; timestamp: number }[];
 }
@@ -369,7 +392,9 @@ function parseSchedule(raw: any): ScheduleData {
         : "Linear",
     revocable: Boolean(raw.revocable),
     revoked: Boolean(raw.revoked),
-    vested_at_revoke: BigInt(raw.vested_at_revoke ?? 0),
+    paused: Boolean(raw.paused),
+    requires_milestones: Boolean(raw.requires_milestones),
+    vested_at_revoke: BigInt(raw.vested_at_revoke ?? raw.vested_at_revocation ?? 0),
     milestones: Array.isArray(raw.milestones)
       ? (raw.milestones as any[]).map((m) => ({
           pct: Number(m.pct ?? m.percent ?? 0),
@@ -382,7 +407,10 @@ function parseSchedule(raw: any): ScheduleData {
 // ---------- Helpers ----------
 
 export function stroopsToXlm(s: bigint): string {
-  return (Number(s) / 10_000_000).toLocaleString(undefined, { maximumFractionDigits: 4 });
+  const whole = s / 10_000_000n;
+  const frac = s % 10_000_000n;
+  const fractional = frac.toString().padStart(7, "0").replace(/0+$/, "") || "0";
+  return `${whole}.${fractional}`;
 }
 
 export function truncate(addr: string, prefixLen = 6, suffixLen = 4): string {
@@ -434,15 +462,18 @@ export function formatCliffDate(cliffDuration: number, startTime: number): strin
 export function parseContractError(e: Error): string {
   const msg = e.message;
   // Map Soroban VestFlowError variants (Error(Contract, #X))
-  if (msg.includes("Contract error: 1") || msg.includes("Contract, #1") || msg.includes("Not authorized")) return "Not authorized to perform this action.";
+  if (msg.includes("Contract error: 1") || msg.includes("Contract, #1")) return "Schedule not found.";
   if (msg.includes("Contract error: 2") || msg.includes("Contract, #2") || msg.includes("Schedule is not revocable")) return "This schedule cannot be revoked.";
   if (msg.includes("Contract error: 3") || msg.includes("Contract, #3") || msg.includes("Already revoked")) return "This schedule has already been revoked.";
   if (msg.includes("Contract error: 4") || msg.includes("Contract, #4") || msg.includes("Nothing to claim yet")) return "No tokens are available to claim yet.";
-  if (msg.includes("Contract error: 5") || msg.includes("Contract, #5") || msg.includes("Schedule not found")) return "Schedule not found.";
-  if (msg.includes("Contract error: 6") || msg.includes("Contract, #6") || msg.includes("Duration too short")) return "The vesting duration is too short.";
+  if (msg.includes("Contract error: 5") || msg.includes("Contract, #5") || msg.includes("AmountZero")) return "Amount must be greater than zero.";
+  if (msg.includes("Contract error: 6") || msg.includes("Contract, #6") || msg.includes("DurationZero")) return "Duration must be greater than zero.";
   if (msg.includes("Contract error: 7") || msg.includes("Contract, #7") || msg.includes("Cliff exceeds duration")) return "The cliff duration cannot exceed the total duration.";
   if (msg.includes("Contract error: 8") || msg.includes("Contract, #8") || msg.includes("Schedule has been revoked")) return "This schedule was revoked.";
 
+  if (msg.includes("Schedule not found")) return "Schedule not found.";
+  if (msg.includes("Not authorized")) return "Not authorized to perform this action.";
+  if (msg.includes("Duration too short")) return "Duration must be greater than zero.";
   if (msg.includes("Not the grantor")) return "Only the grantor can perform this action.";
   if (msg.includes("Not the beneficiary")) return "Only the beneficiary can claim tokens.";
   if (msg.includes("Insufficient balance")) return "Insufficient balance to complete this action.";

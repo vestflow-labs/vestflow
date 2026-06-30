@@ -1,5 +1,8 @@
 import { getClaimable, getSchedule, NETWORK, vestingProgress } from "@/lib/stellar";
+import { createIpBasedRateLimiter } from "@/lib/rateLimit";
 import { NextRequest, NextResponse } from "next/server";
+
+const rateLimiter = createIpBasedRateLimiter(60000, 30);
 
 interface EventHistoryItem {
   type: "created" | "claimed" | "revoked";
@@ -60,6 +63,11 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ): Promise<NextResponse> {
+  const rateLimitResponse = await rateLimiter(request);
+  if (rateLimitResponse) {
+    return rateLimitResponse;
+  }
+
   try {
     const { id } = await params;
     const scheduleId = parseInt(id, 10);
