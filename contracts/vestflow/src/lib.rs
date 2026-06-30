@@ -446,11 +446,11 @@ impl MultiTokenVestingSchedule {
 
     /// Tokens vested but not yet claimed for a specific token index.
     pub fn claimable_at(&self, now: u64, token_idx: u32) -> i128 {
-        if token_idx as usize >= self.tokens.len() {
+        if token_idx >= self.tokens.len() {
             return 0;
         }
 
-        let token = &self.tokens.get(token_idx as usize).unwrap();
+        let token = &self.tokens.get(token_idx).unwrap();
         let vested_pct = self.vested_percentage_at(now);
         let vested = token
             .total_amount
@@ -1048,7 +1048,7 @@ impl VestFlowContract {
         );
 
         env.events().publish(
-            (symbol_short!("multi_created"), id),
+            (symbol_short!("mt_created"), id),
             (
                 grantor,
                 beneficiary,
@@ -1122,7 +1122,7 @@ impl VestFlowContract {
             .set(&DataKey::MultiTokenSchedule(schedule_id), &schedule);
 
         env.events().publish(
-            (symbol_short!("multi_claim"), schedule_id),
+            (symbol_short!("mt_claim"), schedule_id),
             (schedule.beneficiary.clone(), schedule.tokens.len()),
         );
 
@@ -1137,7 +1137,7 @@ impl VestFlowContract {
     }
 
     /// Get all multi-token schedule IDs for a grantor.
-    pub fn get_grantor_multi_token_schedules(env: Env, grantor: Address) -> Vec<u64> {
+    pub fn grantor_multi_schedules(env: Env, grantor: Address) -> Vec<u64> {
         env.storage()
             .instance()
             .get(&DataKey::GrantorMultiTokenSchedules(grantor))
