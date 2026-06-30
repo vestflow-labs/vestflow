@@ -1,3 +1,10 @@
+import {
+  getClaimableAt,
+  getSchedule,
+  getVestedAmountAt,
+  NETWORK,
+  vestingProgress,
+} from "@/lib/stellar";
 import { getClaimable, getSchedule, NETWORK, vestingProgress } from "@/lib/stellar";
 import { createIpBasedRateLimiter } from "@/lib/rateLimit";
 import { NextRequest, NextResponse } from "next/server";
@@ -33,32 +40,6 @@ function calculateNextUnlock(schedule: any, now: number): number | null {
   return endTime;
 }
 
-function calculateVestedAmount(schedule: any, now: number): bigint {
-  if (schedule.revoked) return schedule.claimed;
-  if (now < schedule.start_time) return 0n;
-
-  const elapsed = now - schedule.start_time;
-
-  switch (schedule.kind) {
-    case "Cliff": {
-      if (elapsed >= schedule.cliff_duration) return schedule.total_amount;
-      return 0n;
-    }
-    case "LinearWithCliff": {
-      if (elapsed < schedule.cliff_duration) return 0n;
-      if (elapsed >= schedule.duration) return schedule.total_amount;
-      const linearDuration = schedule.duration - schedule.cliff_duration;
-      const linearElapsed = elapsed - schedule.cliff_duration;
-      return (schedule.total_amount * BigInt(linearElapsed)) / BigInt(linearDuration);
-    }
-    case "Linear":
-    default: {
-      if (elapsed >= schedule.duration) return schedule.total_amount;
-      return (schedule.total_amount * BigInt(elapsed)) / BigInt(schedule.duration);
-    }
-  }
-}
-
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -89,8 +70,8 @@ export async function GET(
     }
 
     const now = Math.floor(Date.now() / 1000);
-    const claimable = await getClaimable(scheduleId);
-    const vested = calculateVestedAmount(schedule, now);
+    const claimable = await getClaimableAt(scheduleId, now);
+    const vested = await getVestedAmountAt(scheduleId, now);
     const progress = vestingProgress(schedule, now);
     const nextUnlock = calculateNextUnlock(schedule, now);
 

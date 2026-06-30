@@ -446,11 +446,11 @@ impl MultiTokenVestingSchedule {
 
     /// Tokens vested but not yet claimed for a specific token index.
     pub fn claimable_at(&self, now: u64, token_idx: u32) -> i128 {
-        if token_idx as usize >= self.tokens.len() {
+        if token_idx >= self.tokens.len() {
             return 0;
         }
 
-        let token = &self.tokens.get(token_idx as usize).unwrap();
+        let token = &self.tokens.get(token_idx).unwrap();
         let vested_pct = self.vested_percentage_at(now);
         let vested = token
             .total_amount
@@ -1048,7 +1048,7 @@ impl VestFlowContract {
         );
 
         env.events().publish(
-            (symbol_short!("multi_created"), id),
+            (symbol_short!("mt_create"), id),
             (
                 grantor,
                 beneficiary,
@@ -1122,7 +1122,7 @@ impl VestFlowContract {
             .set(&DataKey::MultiTokenSchedule(schedule_id), &schedule);
 
         env.events().publish(
-            (symbol_short!("multi_claim"), schedule_id),
+            (symbol_short!("mt_claim"), schedule_id),
             (schedule.beneficiary.clone(), schedule.tokens.len()),
         );
 
@@ -1137,7 +1137,7 @@ impl VestFlowContract {
     }
 
     /// Get all multi-token schedule IDs for a grantor.
-    pub fn get_grantor_multi_token_schedules(env: Env, grantor: Address) -> Vec<u64> {
+    pub fn get_grantor_multi_schedules(env: Env, grantor: Address) -> Vec<u64> {
         env.storage()
             .instance()
             .get(&DataKey::GrantorMultiTokenSchedules(grantor))
@@ -1145,7 +1145,7 @@ impl VestFlowContract {
     }
 
     /// Get all multi-token schedule IDs for a beneficiary.
-    pub fn get_beneficiary_multi_token_schedules(env: Env, beneficiary: Address) -> Vec<u64> {
+    pub fn get_beneficiary_multi_schedules(env: Env, beneficiary: Address) -> Vec<u64> {
         env.storage()
             .instance()
             .get(&DataKey::BeneficiaryMultiTokenSchedules(beneficiary))
@@ -1738,18 +1738,26 @@ impl VestFlowContract {
             .unwrap_or(vec![&env])
     }
 
-    /// Preview how many tokens are claimable right now for a given schedule.
+    /// Preview how many tokens are claimable at a specific timestamp.
     ///
     /// Returns 0 if `schedule_id` is unknown (does not panic).
-    pub fn claimable(env: Env, schedule_id: u64) -> i128 {
+    pub fn claimable_amount(env: Env, schedule_id: u64, now: u64) -> i128 {
         match env
             .storage()
             .instance()
             .get::<DataKey, VestingSchedule>(&DataKey::Schedule(schedule_id))
         {
-            Some(schedule) => schedule.claimable_at(env.ledger().timestamp()),
+            Some(schedule) => schedule.claimable_at(now),
             None => 0,
         }
+    }
+
+    /// Preview how many tokens are claimable right now for a given schedule.
+    ///
+    /// Returns 0 if `schedule_id` is unknown (does not panic).
+    pub fn claimable(env: Env, schedule_id: u64) -> i128 {
+        let now = env.ledger().timestamp();
+        Self::claimable_amount(env, schedule_id, now)
     }
 
     /// Preview how many tokens will be claimable at an arbitrary timestamp `ts`.
@@ -1819,21 +1827,27 @@ impl VestFlowContract {
         results
     }
 
-    /// View: return the vested amount for a schedule ID using linear
-    /// interpolation after the cliff.
+    /// View: return the vested amount for a schedule ID at a specific time.
     ///
     /// The vested amount is the total tokens that have unlocked according to
     /// the schedule's vesting curve, including already-claimed tokens.
     /// Returns 0 for unknown schedule IDs.
-    pub fn vested_amount(env: Env, schedule_id: u64) -> i128 {
+    pub fn vested_amount(env: Env, schedule_id: u64, now: u64) -> i128 {
         match env
             .storage()
             .instance()
             .get::<DataKey, VestingSchedule>(&DataKey::Schedule(schedule_id))
         {
-            Some(schedule) => schedule.vested_at(env.ledger().timestamp()),
+            Some(schedule) => schedule.vested_at(now),
             None => 0,
         }
+    }
+
+    /// View: return the vested amount for a schedule ID using the current
+    /// ledger timestamp.
+    pub fn vested_amount_current(env: Env, schedule_id: u64) -> i128 {
+        let now = env.ledger().timestamp();
+        Self::vested_amount(env, schedule_id, now)
     }
 
     /// Batch view: return vested amounts for multiple schedule IDs in a
@@ -2489,6 +2503,32 @@ mod test {
             milestones: vec![&env],
         };
         assert_eq!(schedule.claimable_at(u64::MAX), 0);
+    }
+
+    #[test]
+    fn test_timestamped_view_helpers_match_schedule_math() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1_000,
+            &0,
+            &1_000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        let now = 250_u64;
+        assert_eq!(client.vested_amount(&id, &now), 250);
+        assert_eq!(client.claimable_amount(&id, &now), 250);
+        assert_eq!(client.vested_amount_current(&id), 0);
     }
 
     /// Zero-duration is rejected by `create_schedule`, but `vested_at` on a
