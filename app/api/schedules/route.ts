@@ -5,7 +5,10 @@ import {
   getSchedulesByGrantor,
   NETWORK,
 } from "@/lib/stellar";
+import { createIpBasedRateLimiter } from "@/lib/rateLimit";
 import { NextRequest, NextResponse } from "next/server";
+
+const rateLimiter = createIpBasedRateLimiter(60000, 30);
 
 function vestedAmount(schedule: {
   total_amount: bigint;
@@ -42,6 +45,11 @@ function vestedAmount(schedule: {
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
+  const rateLimitResponse = await rateLimiter(request);
+  if (rateLimitResponse) {
+    return rateLimitResponse;
+  }
+
   try {
     const address = request.nextUrl.searchParams.get("address");
     const pageParam = request.nextUrl.searchParams.get("page");
