@@ -446,11 +446,11 @@ impl MultiTokenVestingSchedule {
 
     /// Tokens vested but not yet claimed for a specific token index.
     pub fn claimable_at(&self, now: u64, token_idx: u32) -> i128 {
-        if token_idx as usize >= self.tokens.len() {
+        if token_idx >= self.tokens.len() {
             return 0;
         }
 
-        let token = &self.tokens.get(token_idx as usize).unwrap();
+        let token = &self.tokens.get(token_idx).unwrap();
         let vested_pct = self.vested_percentage_at(now);
         let vested = token
             .total_amount
