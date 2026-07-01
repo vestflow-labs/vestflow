@@ -10,7 +10,7 @@
   /* Base colors */
   --background: #f4f4f5;
   --foreground: #09090b;
-  
+
   /* Neutral palette */
   --neutral-50: #fafafa;
   --neutral-100: #f5f5f5;
@@ -22,7 +22,7 @@
   --neutral-700: #3f3f46;
   --neutral-800: #27272a;
   --neutral-900: #18181b;
-  
+
   /* Component colors */
   --card-bg: rgba(0, 0, 0, 0.03);
   --card-border: rgba(0, 0, 0, 0.08);
@@ -31,19 +31,19 @@
   --muted: #71717a;
   --muted-light: #71717a;
   --muted-lighter: #a1a1a6;
-  
+
   /* Accent colors */
   --accent-primary: #7c3aed;
   --accent-secondary: #06b6d4;
   --accent-success: #10b981;
   --accent-warning: #f59e0b;
   --accent-error: #ef4444;
-  
+
   /* Borders */
   --border-subtle: rgba(0, 0, 0, 0.08);
   --border-default: rgba(0, 0, 0, 0.12);
   --border-strong: rgba(0, 0, 0, 0.2);
-  
+
   /* Overlays */
   --overlay-light: rgba(255, 255, 255, 0.05);
   --overlay-medium: rgba(255, 255, 255, 0.1);
@@ -55,7 +55,7 @@
   /* Base colors */
   --background: #08090f;
   --foreground: #f0f0f0;
-  
+
   /* Neutral palette */
   --neutral-50: #18181b;
   --neutral-100: #27272a;
@@ -67,7 +67,7 @@
   --neutral-700: #e5e5e5;
   --neutral-800: #f5f5f5;
   --neutral-900: #fafafa;
-  
+
   /* Component colors */
   --card-bg: rgba(255, 255, 255, 0.03);
   --card-border: rgba(255, 255, 255, 0.08);
@@ -76,19 +76,19 @@
   --muted: #52525b;
   --muted-light: #71717a;
   --muted-lighter: #a1a1a6;
-  
+
   /* Accent colors */
   --accent-primary: #a78bfa;
   --accent-secondary: #06b6d4;
   --accent-success: #10b981;
   --accent-warning: #fbbf24;
   --accent-error: #f87171;
-  
+
   /* Borders */
   --border-subtle: rgba(255, 255, 255, 0.05);
   --border-default: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.12);
-  
+
   /* Overlays */
   --overlay-light: rgba(255, 255, 255, 0.05);
   --overlay-medium: rgba(255, 255, 255, 0.1);
@@ -131,6 +131,7 @@ body {
 
 .input {
   width: 100%;
+  min-width: 0;
   background: var(--input-bg);
   border: 1px solid var(--input-border);
   border-radius: 0.5rem;
@@ -143,6 +144,21 @@ body {
 
 .input:focus { border-color: var(--accent-primary); }
 .input::placeholder { color: var(--muted); }
+
+/* Date and time input overflow fixes */
+input[type="date"],
+input[type="time"] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 375px) {
+  input[type="date"],
+  input[type="time"] {
+    font-size: 0.8125rem;
+    padding: 0.5rem 0.75rem;
+  }
+}
 
 /* ── Animations ─────────────────────────────────────────────────────── */
 

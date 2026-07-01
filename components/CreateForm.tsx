@@ -660,34 +660,12 @@ export default function CreateForm() {
         />
       </Field>
 
-      <fieldset className="grid grid-cols-1 sm:grid-cols-2 gap-4 border-0 p-0 m-0">
-        <legend className="sr-only">Schedule start date and time</legend>
-        <Field
-          label="Start Date"
-          htmlFor="startDate"
-          error={visibleErrors.startDate}
-        >
-          <input
-            id="startDate"
-            type="date"
-            value={form.startDate}
-            onChange={(e) => set("startDate", e.target.value)}
-            onBlur={() => touch("startDate")}
-            required
-            aria-invalid={!!visibleErrors.startDate}
-            className={`input ${visibleErrors.startDate ? "border-red-500/60 focus:border-red-500" : ""}`}
-          />
+      <div className="grid grid-cols-1 gap-4">
+        <Field label="Start Date">
+          <input type="date" value={form.startDate} onChange={e => set("startDate", e.target.value)} required className="input min-w-0" />
         </Field>
-        <Field label="Start Time" htmlFor="startTime">
-          <input
-            id="startTime"
-            type="time"
-            value={form.startTime}
-            onChange={(e) => set("startTime", e.target.value)}
-            onBlur={() => touch("startTime")}
-            required
-            className="input"
-          />
+        <Field label="Start Time">
+          <input type="time" value={form.startTime} onChange={e => set("startTime", e.target.value)} required className="input min-w-0" />
         </Field>
       </fieldset>
 
