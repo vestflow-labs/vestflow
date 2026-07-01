@@ -3443,8 +3443,11 @@ mod test {
 
         client.destroy_schedule(&id);
 
-        // Schedule removed
-        assert!(client.get_schedule(&id).is_err());
+        // Schedule lookup should now panic because it no longer exists.
+        let result = std::panic::catch_unwind(|| {
+            client.get_schedule(&id);
+        });
+        assert!(result.is_err());
 
         // Index removed
         let grantor_ids = client.get_schedules_by_grantor(&grantor);
