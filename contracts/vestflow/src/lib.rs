@@ -641,7 +641,10 @@ impl VestFlowContract {
         new_authority: Address,
     ) {
         let configured = Self::read_upgrade_authority(&env);
-        assert!(current_authority == configured, "Unauthorized upgrade authority");
+        assert!(
+            current_authority == configured,
+            "Unauthorized upgrade authority"
+        );
         current_authority.require_auth();
         new_authority.require_auth();
         env.storage()
@@ -1031,7 +1034,9 @@ impl VestFlowContract {
         let mut beneficiary_ids: Vec<u64> = env
             .storage()
             .instance()
-            .get(&DataKey::BeneficiaryMultiTokenSchedules(beneficiary.clone()))
+            .get(&DataKey::BeneficiaryMultiTokenSchedules(
+                beneficiary.clone(),
+            ))
             .unwrap_or(vec![&env]);
         beneficiary_ids.push_back(id);
         env.storage().instance().set(
@@ -1040,7 +1045,7 @@ impl VestFlowContract {
         );
 
         env.events().publish(
-            (symbol_short!("multi_created"), id),
+            (symbol_short!("mulcreat"), id),
             (
                 grantor,
                 beneficiary,
@@ -1099,8 +1104,11 @@ impl VestFlowContract {
             if claimable > 0 {
                 tranche.claimed_amount += claimable;
                 schedule.tokens.set(i as u32, tranche);
-                token::Client::new(&env, &schedule.tokens.get(i as u32).unwrap().token)
-                    .transfer(&contract_address, &schedule.beneficiary, &claimable);
+                token::Client::new(&env, &schedule.tokens.get(i as u32).unwrap().token).transfer(
+                    &contract_address,
+                    &schedule.beneficiary,
+                    &claimable,
+                );
                 total_claimed = true;
             }
         }
@@ -1114,7 +1122,7 @@ impl VestFlowContract {
             .set(&DataKey::MultiTokenSchedule(schedule_id), &schedule);
 
         env.events().publish(
-            (symbol_short!("multi_claim"), schedule_id),
+            (symbol_short!("mulclaim"), schedule_id),
             (schedule.beneficiary.clone(), schedule.tokens.len()),
         );
 
@@ -1122,7 +1130,10 @@ impl VestFlowContract {
     }
 
     /// Get a multi-token schedule by ID.
-    pub fn get_multi_token_schedule(env: Env, schedule_id: u64) -> Option<MultiTokenVestingSchedule> {
+    pub fn get_multi_token_schedule(
+        env: Env,
+        schedule_id: u64,
+    ) -> Option<MultiTokenVestingSchedule> {
         env.storage()
             .instance()
             .get(&DataKey::MultiTokenSchedule(schedule_id))
@@ -3549,4 +3560,3 @@ mod test {
         client.destroy_schedule(&id);
     }
 }
-
