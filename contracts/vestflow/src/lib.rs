@@ -412,7 +412,7 @@ impl MultiTokenVestingSchedule {
                 if elapsed >= self.duration_seconds {
                     10_000
                 } else {
-                    (10_000u64 * elapsed as u64) / self.duration_seconds as u64
+                    (10_000u64 * elapsed) / self.duration_seconds
                 }
             }
             VestingKind::LinearWithCliff => {
@@ -424,7 +424,7 @@ impl MultiTokenVestingSchedule {
                 }
                 let linear_duration = self.duration_seconds - self.cliff_seconds;
                 let linear_elapsed = elapsed - self.cliff_seconds;
-                (10_000u64 * linear_elapsed as u64) / linear_duration as u64
+                (10_000u64 * linear_elapsed) / linear_duration
             }
             VestingKind::Graded => {
                 let mut vested_bps: u64 = 0;
@@ -1092,7 +1092,7 @@ impl VestFlowContract {
         let contract_address = env.current_contract_address();
 
         for i in 0..schedule.tokens.len() {
-            let mut tranche = schedule.tokens.get(i as u32).unwrap().clone();
+            let mut tranche = schedule.tokens.get(i).unwrap().clone();
             let vested = tranche
                 .total_amount
                 .checked_mul(vested_pct as i128)
@@ -1103,8 +1103,8 @@ impl VestFlowContract {
             let claimable = vested - tranche.claimed_amount;
             if claimable > 0 {
                 tranche.claimed_amount += claimable;
-                schedule.tokens.set(i as u32, tranche);
-                token::Client::new(&env, &schedule.tokens.get(i as u32).unwrap().token).transfer(
+                schedule.tokens.set(i, tranche);
+                token::Client::new(&env, &schedule.tokens.get(i).unwrap().token).transfer(
                     &contract_address,
                     &schedule.beneficiary,
                     &claimable,
@@ -1169,7 +1169,7 @@ impl VestFlowContract {
         let now = env.ledger().timestamp();
         let mut claimable = vec![&env];
         for i in 0..schedule.tokens.len() {
-            claimable.push_back(schedule.claimable_at(now, i as u32));
+            claimable.push_back(schedule.claimable_at(now, i));
         }
         claimable
     }
@@ -1842,15 +1842,20 @@ impl VestFlowContract {
     ///
     /// Panics if `claimed_amount < total_amount` or if the schedule is revocable.
     /// Removes schedule entry and index entries and emits a `destroyed` event.
-    pub fn destroy_schedule(env: Env, schedule_id: u64) {
+    pub fn destroy_schedule(env: Env, caller: Address, schedule_id: u64) {
         let schedule: VestingSchedule = env
             .storage()
             .instance()
             .get(&DataKey::Schedule(schedule_id))
             .expect("Schedule not found");
 
-        // Require the grantor to authorize the destroy operation.
-        schedule.grantor.require_auth();
+        // Require the caller to authorize the destroy operation.
+        caller.require_auth();
+
+        // Must be either beneficiary or grantor.
+        if caller != schedule.beneficiary && caller != schedule.grantor {
+            panic!("Unauthorized caller");
+        }
 
         assert!(
             schedule.claimed_amount == schedule.total_amount,
@@ -1864,7 +1869,7 @@ impl VestFlowContract {
             .remove(&DataKey::Schedule(schedule_id));
 
         // Remove from grantor index.
-        let mut grantor_ids: Vec<u64> = env
+        let grantor_ids: Vec<u64> = env
             .storage()
             .instance()
             .get(&DataKey::GrantorSchedules(schedule.grantor.clone()))
@@ -1881,7 +1886,7 @@ impl VestFlowContract {
         );
 
         // Remove from beneficiary index.
-        let mut beneficiary_ids: Vec<u64> = env
+        let beneficiary_ids: Vec<u64> = env
             .storage()
             .instance()
             .get(&DataKey::BeneficiarySchedules(schedule.beneficiary.clone()))
@@ -1911,7 +1916,7 @@ mod test {
     use soroban_sdk::{
         testutils::{Address as _, Ledger, LedgerInfo},
         token::{Client as TokenClient, StellarAssetClient},
-        Env,
+        Env, IntoVal,
     };
 
     fn setup(
@@ -3441,13 +3446,11 @@ mod test {
         client.claim(&id);
         assert_eq!(token.balance(&beneficiary), 1000);
 
-        client.destroy_schedule(&id);
+        client.destroy_schedule(&grantor, &id);
 
-        // Schedule lookup should now panic because it no longer exists.
-        let result = std::panic::catch_unwind(|| {
-            client.get_schedule(&id);
-        });
-        assert!(result.is_err());
+        // Schedule lookup should now return an error because it no longer exists.
+        let result = client.try_get_schedule(&id);
+        assert!(result.is_err() || result.unwrap().is_err());
 
         // Index removed
         let grantor_ids = client.get_schedules_by_grantor(&grantor);
@@ -3481,7 +3484,7 @@ mod test {
         set_time(&env, 500);
         client.claim(&id); // claim 500 only
 
-        client.destroy_schedule(&id);
+        client.destroy_schedule(&grantor, &id);
     }
 
     #[test]
@@ -3508,7 +3511,7 @@ mod test {
         set_time(&env, 1000);
         client.claim(&id);
 
-        client.destroy_schedule(&id);
+        client.destroy_schedule(&grantor, &id);
     }
 
     #[test]
@@ -3542,15 +3545,11 @@ mod test {
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
                 contract: &client.address,
                 fn_name: "destroy_schedule",
-                args: soroban_sdk::vec![
-                    &env,
-                    soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&id, &env),
-                ]
-                .into(),
+                args: soroban_sdk::vec![&env, attacker.into_val(&env), id.into_val(&env),].into(),
                 sub_invokes: &[],
             },
         }]);
 
-        client.destroy_schedule(&id);
+        client.destroy_schedule(&attacker, &id);
     }
 }
