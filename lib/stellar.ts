@@ -407,10 +407,11 @@ function parseSchedule(raw: any): ScheduleData {
 // ---------- Helpers ----------
 
 export function stroopsToXlm(s: bigint): string {
-  const whole = s / 10_000_000n;
-  const frac = s % 10_000_000n;
-  const fractional = frac.toString().padStart(7, "0").replace(/0+$/, "") || "0";
-  return `${whole}.${fractional}`;
+  const n = Number(s) / 10_000_000;
+  return n.toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 4,
+  });
 }
 
 export function truncate(addr: string, prefixLen = 6, suffixLen = 4): string {
