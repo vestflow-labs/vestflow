@@ -12,6 +12,7 @@ import {
 import {
   getAllSchedules,
   getClaimableBulk,
+  getVestedAmountBulk,
   ScheduleData,
   vestingProgress,
 } from "@/lib/stellar";
@@ -31,6 +32,7 @@ interface DashboardStats {
   totalGranted: bigint;
   totalReceiving: bigint;
   claimableNow: bigint;
+  totalVested: bigint;
   activeSchedules: number;
 }
 
@@ -76,7 +78,7 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
   const toXlm = (v: bigint) => Number(v) / 10_000_000;
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
       <AnimatedStatCard
         label="Total Granted"
         value={toXlm(stats.totalGranted)}
@@ -88,6 +90,13 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
         label="Total Receiving"
         value={toXlm(stats.totalReceiving)}
         unit="XLM as beneficiary"
+        decimals={4}
+        enabled={fired}
+      />
+      <AnimatedStatCard
+        label="Total Vested"
+        value={toXlm(stats.totalVested)}
+        unit="XLM earned"
         decimals={4}
         enabled={fired}
       />
@@ -133,13 +142,20 @@ export default function DashboardPage() {
         // Compute aggregate stats
         const userIds = userSchedules.map(s => s.id);
         const claimableAmounts = await getClaimableBulk(userIds, publicKey);
+        const vestedAmounts = await getVestedAmountBulk(userIds, publicKey);
+        
         const claimableMap = new Map<number, bigint>();
-        userIds.forEach((id, i) => claimableMap.set(id, claimableAmounts[i] ?? 0n));
+        const vestedMap = new Map<number, bigint>();
+        userIds.forEach((id, i) => {
+          claimableMap.set(id, claimableAmounts[i] ?? 0n);
+          vestedMap.set(id, vestedAmounts[i] ?? 0n);
+        });
 
         const now = Math.floor(Date.now() / 1000);
         let totalGranted = 0n;
         let totalReceiving = 0n;
         let claimableNow = 0n;
+        let totalVested = 0n;
         let activeSchedules = 0;
 
         for (const s of userSchedules) {
@@ -149,13 +165,14 @@ export default function DashboardPage() {
           if (s.beneficiary === publicKey) {
             totalReceiving += s.total_amount;
             claimableNow += claimableMap.get(s.id) ?? 0n;
+            totalVested += vestedMap.get(s.id) ?? 0n;
           }
           if (!s.revoked && vestingProgress(s, now) < 100) {
             activeSchedules++;
           }
         }
 
-        setStats({ totalGranted, totalReceiving, claimableNow, activeSchedules });
+        setStats({ totalGranted, totalReceiving, claimableNow, totalVested, activeSchedules });
       } else {
         setSchedules(all.slice(0, 6));
         setStats(null);
