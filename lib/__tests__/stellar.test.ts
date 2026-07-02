@@ -22,6 +22,8 @@ function makeSchedule(overrides: Partial<ScheduleData> = {}): ScheduleData {
     kind: "Linear",
     revocable: true,
     revoked: false,
+    paused: false,
+    requires_milestones: false,
     vested_at_revoke: 0n,
     ...overrides,
   };
