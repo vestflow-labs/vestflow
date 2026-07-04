@@ -24,7 +24,13 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
+        # lightningcss (via Tailwind v4) ships platform-specific optional
+        # binaries. package-lock.json was last regenerated on Windows and
+        # only pins the win32 variant, so `npm ci` (strict lockfile install)
+        # never fetches lightningcss-linux-x64-gnu on this runner. `npm
+        # install` re-resolves optionalDependencies for the current
+        # platform instead. See npm/cli#4828.
 
       - name: Build
         run: npm run build
