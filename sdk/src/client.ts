@@ -264,6 +264,44 @@ export class VestflowClient {
   }
 
   /**
+   * Return how many tokens are claimable for a schedule at a specific time.
+   */
+  async getClaimableAt(id: number, now: number, publicKey?: string): Promise<bigint> {
+    try {
+      const val = await this.simulate(
+        "claimable_amount",
+        [
+          nativeToScVal(id, { type: "u64" }),
+          nativeToScVal(now, { type: "u64" }),
+        ],
+        publicKey
+      );
+      return BigInt(scValToNative(val));
+    } catch {
+      return 0n;
+    }
+  }
+
+  /**
+   * Return how many tokens are vested for a schedule at a specific time.
+   */
+  async getVestedAmountAt(id: number, now: number, publicKey?: string): Promise<bigint> {
+    try {
+      const val = await this.simulate(
+        "vested_amount",
+        [
+          nativeToScVal(id, { type: "u64" }),
+          nativeToScVal(now, { type: "u64" }),
+        ],
+        publicKey
+      );
+      return BigInt(scValToNative(val));
+    } catch {
+      return 0n;
+    }
+  }
+
+  /**
    * Fetch claimable amounts for multiple schedule IDs in a single
    * simulation round-trip using the claimable_bulk contract view.
    *
