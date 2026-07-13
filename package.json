@@ -34,7 +34,7 @@
     "lefthook": "^2.1.9",
     "tailwindcss": "^4",
     "tsup": "^8.5.1",
-    "typescript": "^5",
+    "typescript": "^7",
     "vitest": "^4.1.9"
   }
 }
