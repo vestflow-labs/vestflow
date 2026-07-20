@@ -15,7 +15,7 @@
     "@stellar/freighter-api": "^6.0.1",
     "@stellar/stellar-sdk": "^15.1.0",
     "better-sqlite3": "^12.11.1",
-    "express-rate-limit": "^7.1.5",
+    "express-rate-limit": "^8.6.0",
     "next": "16.2.6",
     "react": "19.2.4",
     "react-dom": "19.2.4"
