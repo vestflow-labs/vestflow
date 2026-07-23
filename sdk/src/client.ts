@@ -181,6 +181,10 @@ export class VestflowClient {
           : "Linear",
       revocable: Boolean(raw.revocable),
       revoked: Boolean(raw.revoked),
+      paused: Boolean(raw.paused),
+      lockup_duration: Number(raw.lockup_duration ?? raw.lockup_seconds ?? 0),
+      requires_milestones: Boolean(raw.requires_milestones),
+      vested_at_revoke: BigInt(raw.vested_at_revoke ?? 0),
     };
   }
 
