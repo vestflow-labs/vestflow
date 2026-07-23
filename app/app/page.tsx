@@ -13,6 +13,7 @@ import {
   getAllSchedules,
   getClaimableBulk,
   getVestedAmountBulk,
+  isRpcError,
   ScheduleData,
   vestingProgress,
   NATIVE_TOKEN,
@@ -126,6 +127,7 @@ export default function DashboardPage() {
   const [schedules, setSchedules] = useState<ScheduleData[]>([]);
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
+  const [rpcError, setRpcError] = useState(false);
   const [roleFilter, setRoleFilter] = useState<RoleFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [tokenFilter, setTokenFilter] = useState<string>("all");
@@ -137,6 +139,7 @@ export default function DashboardPage() {
 
   const load = async () => {
     setLoading(true);
+    setRpcError(false);
     try {
       const all = await getAllSchedules(publicKey ?? undefined);
       if (publicKey) {
@@ -180,6 +183,10 @@ export default function DashboardPage() {
       } else {
         setSchedules(all.slice(0, 6));
         setStats(null);
+      }
+    } catch (e) {
+      if (isRpcError(e)) {
+        setRpcError(true);
       }
     } finally { setLoading(false); }
   };
@@ -295,6 +302,27 @@ export default function DashboardPage() {
     <>
       <Navbar />
       <main className="max-w-5xl mx-auto px-4 sm:px-6 pt-24 sm:pt-28 pb-20">
+        {/* RPC / connectivity error banner (#278) */}
+        {rpcError && (
+          <div
+            role="alert"
+            className="flex items-start justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 mb-6 text-sm"
+          >
+            <div className="flex items-start gap-2">
+              <span aria-hidden="true" className="mt-0.5 shrink-0 text-amber-400">⚠</span>
+              <p className="text-amber-200">
+                Could not reach the Stellar RPC — check your connection and refresh.
+              </p>
+            </div>
+            <button
+              onClick={() => setRpcError(false)}
+              aria-label="Dismiss error"
+              className="shrink-0 text-zinc-500 hover:text-white transition-colors leading-none mt-0.5"
+            >
+              ×
+            </button>
+          </div>
+        )}
         {/* Header row */}
         <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
           <div>

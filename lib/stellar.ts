@@ -487,6 +487,27 @@ export function formatCliffDate(cliffDuration: number, startTime: number): strin
   return formatDate(startTime + cliffDuration);
 }
 
+/**
+ * Returns true when an error looks like a network / transport failure rather
+ * than a contract-level rejection.
+ *
+ * Soroban contract errors come back as structured simulation errors whose
+ * messages contain text like "Contract error", "HostError", or one of the
+ * known contract panic strings. Pure connectivity failures (DNS, TCP,
+ * offline) surface as `TypeError: fetch failed`, `TypeError: Failed to
+ * fetch`, `NetworkError`, or similar browser/Node fetch errors.
+ */
+export function isRpcError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const msg = e.message.toLowerCase();
+  // fetch / node-fetch / undici network errors always come as TypeError
+  if (e instanceof TypeError) return true;
+  if (msg.includes("networkerror") || msg.includes("network error")) return true;
+  if (msg.includes("failed to fetch") || msg.includes("fetch failed")) return true;
+  if (msg.includes("econnrefused") || msg.includes("enotfound")) return true;
+  return false;
+}
+
 export function parseContractError(e: Error): string {
   const msg = e.message;
   // Map Soroban VestFlowError variants (Error(Contract, #X))
