@@ -129,7 +129,12 @@ export default function PublicSchedulePage() {
 
   const now = Math.floor(Date.now() / 1000);
   const endTime = schedule.start_time + schedule.duration;
-  const cliffTime = schedule.cliff_duration > 0 ? schedule.start_time + schedule.cliff_duration : null;
+  // Only Cliff / LinearWithCliff schedules have a meaningful cliff date. A
+  // Linear schedule with a stray non-zero cliff_duration should not surface one.
+  const cliffTime =
+    schedule.kind !== "Linear" && schedule.cliff_duration > 0
+      ? schedule.start_time + schedule.cliff_duration
+      : null;
   const isRevoked = schedule.revoked;
   const isFulVested = now >= endTime && !isRevoked;
   const isVesting = now >= schedule.start_time && now < endTime && !isRevoked;

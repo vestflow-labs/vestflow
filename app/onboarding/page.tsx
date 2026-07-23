@@ -84,7 +84,7 @@ function StepInstallFreighter({
         description="Freighter is a browser extension wallet for the Stellar network. You'll need it to sign transactions on VestFlow."
       />
       <ErrorMessage message={err} />
-      
+      <a
         href="https://www.freighter.app"
         target="_blank"
         rel="noopener noreferrer"

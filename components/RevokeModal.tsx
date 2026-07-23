@@ -71,6 +71,8 @@ export default function RevokeModal({
         status: "error",
         title: "Revoke failed",
         message: msg,
+        retryLabel: "Try again",
+        onRetry: handleRevoke,
       });
     } finally {
       setLoading(false);
@@ -104,8 +106,12 @@ export default function RevokeModal({
         </div>
 
         <div className="flex flex-col gap-1 bg-zinc-900/50 rounded-xl p-4 border border-zinc-800">
-          <p className="text-xs text-zinc-500 uppercase tracking-wider">Schedule #{schedule.id}</p>
-          <p className="text-sm text-zinc-300 font-mono">{schedule.kind} vesting</p>
+          <p className="text-xs text-zinc-500 uppercase tracking-wider">
+            Schedule #{schedule.id}
+          </p>
+          <p className="text-sm text-zinc-300 font-mono">
+            {schedule.kind} vesting
+          </p>
         </div>
 
         {err && (
@@ -116,13 +122,17 @@ export default function RevokeModal({
 
         <div className="flex flex-col gap-3">
           <div className="flex justify-between items-center py-1">
-            <span className="text-sm text-zinc-400">Tokens Returned to You</span>
+            <span className="text-sm text-zinc-400">
+              Tokens Returned to You
+            </span>
             <div className="text-right">
               <span className="text-xl font-bold text-emerald-400">
                 {stroopsToXlm(toReturn)} {tokenSymbol}
               </span>
               {xlmPrice !== null && (
-                <p className="text-xs text-zinc-500">{formatUsd(toReturn, xlmPrice)}</p>
+                <p className="text-xs text-zinc-500">
+                  {formatUsd(toReturn, xlmPrice)}
+                </p>
               )}
             </div>
           </div>
@@ -154,7 +164,9 @@ export default function RevokeModal({
 
         {txHash && (
           <div className="text-sm bg-green-500/10 border border-green-500/20 rounded-lg px-3 py-2 flex flex-col gap-1">
-            <span className="text-green-400 font-medium">Transaction confirmed</span>
+            <span className="text-green-400 font-medium">
+              Transaction confirmed
+            </span>
             <a
               href={`https://stellar.expert/explorer/${NETWORK}/tx/${txHash}`}
               target="_blank"

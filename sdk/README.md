@@ -48,7 +48,7 @@ const hash = await client.createSchedule(
   {
     grantor: "G...",
     beneficiary: "G...",
-    totalAmountXlm: 1000,
+    totalAmountXlm: "1000",
     startTime: Math.floor(Date.now() / 1000),
     durationDays: 365,
     cliffDays: 90,
@@ -118,6 +118,7 @@ const hash = await client.createSchedule({ ... }, nodeSigner);
 
 | Function | Description |
 |---|---|
+| `xlmToStroops(amountXlm)` | Convert XLM string to stroops (integer-safe) |
 | `stroopsToXlm(stroops)` | Convert stroops to XLM string |
 | `truncate(address)` | Shorten a Stellar address for display |
 | `vestingProgress(schedule, now)` | Vesting progress percentage (0-100) |

@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createEndpointSpecificRateLimiter } from "@/lib/rateLimit";
+
+const rateLimiter = createEndpointSpecificRateLimiter(60000, 10, "verify");
 
 function getDb() {
   try {
@@ -12,6 +15,11 @@ function getDb() {
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
+  const rateLimitResponse = await rateLimiter(request);
+  if (rateLimitResponse) {
+    return rateLimitResponse;
+  }
+
   try {
     const searchParams = request.nextUrl.searchParams;
     const token = searchParams.get("token");

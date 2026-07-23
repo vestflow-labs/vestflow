@@ -21,27 +21,60 @@ function MoonIcon() {
   );
 }
 
+function MonitorIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+      <line x1="8" y1="21" x2="16" y2="21" />
+      <line x1="12" y1="17" x2="12" y2="21" />
+    </svg>
+  );
+}
+
 export default function Navbar() {
-  // Start with true (dark) to match the default applied by the inline
-  // theme-init script in layout.tsx — avoids a visual toggle on mount.
-  const [isDark, setIsDark] = useState(true);
+  const [theme, setTheme] = useState<"light" | "dark" | "system" >("system");
+  const [dropdownOpen, setDropdownOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
-    setIsDark(document.documentElement.classList.contains("dark"));
+    const stored = localStorage.getItem("vestflow-theme") as "light" | "dark" | "system" | null;
+    if (stored) {
+      setTheme(stored);
+    }
   }, []);
 
-  const toggleTheme = () => {
-    const next = !isDark;
-    setIsDark(next);
-    if (next) {
-      document.documentElement.classList.add("dark");
-      localStorage.setItem("vestflow-theme", "dark");
-    } else {
-      document.documentElement.classList.remove("dark");
-      localStorage.setItem("vestflow-theme", "light");
+  useEffect(() => {
+    const applyTheme = () => {
+      if (theme === "dark") {
+        document.documentElement.classList.add("dark");
+      } else if (theme === "light") {
+        document.documentElement.classList.remove("dark");
+      } else {
+        const matchesDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        if (matchesDark) {
+          document.documentElement.classList.add("dark");
+        } else {
+          document.documentElement.classList.remove("dark");
+        }
+      }
+    };
+
+    applyTheme();
+
+    if (theme === "system") {
+      const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+      const handleChange = () => applyTheme();
+      mediaQuery.addEventListener("change", handleChange);
+      return () => mediaQuery.removeEventListener("change", handleChange);
     }
-  };
+  }, [theme]);
+
+  useEffect(() => {
+    if (!dropdownOpen) return;
+    const handleClose = () => setDropdownOpen(false);
+    window.addEventListener("click", handleClose);
+    return () => window.removeEventListener("click", handleClose);
+  }, [dropdownOpen]);
 
   return (
     <nav className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-4 sm:px-6 py-4 border-b border-white/5 bg-[#08090f]/80 dark:bg-[#08090f]/80 backdrop-blur-md">
@@ -67,13 +100,75 @@ export default function Navbar() {
         <span className={`hidden sm:inline text-xs px-2 py-0.5 rounded-full font-medium ${NETWORK === "mainnet" ? "bg-green-500/10 text-green-400 border border-green-500/20" : "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"}`}>
           {NETWORK === "mainnet" ? "Mainnet" : "Testnet"}
         </span>
-        <button
-          onClick={toggleTheme}
-          aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
-          className="text-zinc-400 hover:text-white transition-colors p-1.5 rounded-lg hover:bg-white/5"
-        >
-          {isDark ? <SunIcon /> : <MoonIcon />}
-        </button>
+        <div className="relative">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setDropdownOpen((v) => !v);
+            }}
+            aria-label="Select theme"
+            aria-haspopup="true"
+            aria-expanded={dropdownOpen}
+            className="text-zinc-400 hover:text-white transition-colors p-1.5 rounded-lg hover:bg-white/5 flex items-center justify-center"
+          >
+            {theme === "light" && <SunIcon />}
+            {theme === "dark" && <MoonIcon />}
+            {theme === "system" && <MonitorIcon />}
+          </button>
+
+          {dropdownOpen && (
+            <div 
+              className="absolute right-0 mt-2 w-32 rounded-xl border border-white/10 bg-[#0c0d14]/90 backdrop-blur-md p-1 shadow-2xl z-50 flex flex-col gap-0.5"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={() => {
+                  setTheme("light");
+                  localStorage.setItem("vestflow-theme", "light");
+                  setDropdownOpen(false);
+                }}
+                className={`flex items-center gap-2 w-full px-2.5 py-1.5 text-xs rounded-lg transition-colors text-left ${
+                  theme === "light"
+                    ? "bg-white/10 text-white font-medium"
+                    : "text-zinc-400 hover:text-white hover:bg-white/5"
+                }`}
+              >
+                <SunIcon />
+                <span>Light</span>
+              </button>
+              <button
+                onClick={() => {
+                  setTheme("dark");
+                  localStorage.setItem("vestflow-theme", "dark");
+                  setDropdownOpen(false);
+                }}
+                className={`flex items-center gap-2 w-full px-2.5 py-1.5 text-xs rounded-lg transition-colors text-left ${
+                  theme === "dark"
+                    ? "bg-white/10 text-white font-medium"
+                    : "text-zinc-400 hover:text-white hover:bg-white/5"
+                }`}
+              >
+                <MoonIcon />
+                <span>Dark</span>
+              </button>
+              <button
+                onClick={() => {
+                  setTheme("system");
+                  localStorage.setItem("vestflow-theme", "system");
+                  setDropdownOpen(false);
+                }}
+                className={`flex items-center gap-2 w-full px-2.5 py-1.5 text-xs rounded-lg transition-colors text-left ${
+                  theme === "system"
+                    ? "bg-white/10 text-white font-medium"
+                    : "text-zinc-400 hover:text-white hover:bg-white/5"
+                }`}
+              >
+                <MonitorIcon />
+                <span>System</span>
+              </button>
+            </div>
+          )}
+        </div>
 
         {/* Hamburger button (mobile) */}
         <button

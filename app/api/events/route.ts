@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createIpBasedRateLimiter } from "@/lib/rateLimit";
+
+const rateLimiter = createIpBasedRateLimiter(60000, 30);
 
 /**
  * GET /api/events — proxy to the running indexer query server.
@@ -43,6 +46,11 @@ const ALLOWED_PARAMS = new Set([
 ]);
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
+  const rateLimitResponse = await rateLimiter(req);
+  if (rateLimitResponse) {
+    return rateLimitResponse;
+  }
+
   try {
     const network = req.nextUrl.searchParams.get("network");
     if (network != null && network !== "mainnet" && network !== "testnet") {

@@ -12,27 +12,28 @@ import {
 import {
   getAllSchedules,
   getClaimableBulk,
+  getVestedAmountBulk,
   ScheduleData,
-  stroopsToXlm,
   vestingProgress,
-  formatDate,
+  NATIVE_TOKEN,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import { useCountUp } from "@/hooks/useCountUp";
 import { useAddressBook } from "@/hooks/useAddressBook";
 import Link from "next/link";
-import { useXlmPrice, formatUsd } from "@/lib/price";
+
 import { buildCombinedExportCSV, downloadCSV } from "@/lib/csvExport";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
+type StatusFilter = "all" | "active" | "completed" | "revoked";
 type SortKey = "newest" | "ending-soon" | "largest-amount" | "status";
 const PAGE_SIZE = 10;
-const ALL_ASSETS = "all";
 
 interface DashboardStats {
   totalGranted: bigint;
   totalReceiving: bigint;
   claimableNow: bigint;
+  totalVested: bigint;
   activeSchedules: number;
 }
 
@@ -78,7 +79,7 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
   const toXlm = (v: bigint) => Number(v) / 10_000_000;
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
       <AnimatedStatCard
         label="Total Granted"
         value={toXlm(stats.totalGranted)}
@@ -90,6 +91,13 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
         label="Total Receiving"
         value={toXlm(stats.totalReceiving)}
         unit="XLM as beneficiary"
+        decimals={4}
+        enabled={fired}
+      />
+      <AnimatedStatCard
+        label="Total Vested"
+        value={toXlm(stats.totalVested)}
+        unit="XLM earned"
         decimals={4}
         enabled={fired}
       />
@@ -119,11 +127,13 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [roleFilter, setRoleFilter] = useState<RoleFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [tokenFilter, setTokenFilter] = useState<string>("all");
+  const [startDateFilter, setStartDateFilter] = useState<string>("");
+  const [endDateFilter, setEndDateFilter] = useState<string>("");
   const [sortBy, setSortBy] = useState<SortKey>("newest");
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState("");
-  const [assetFilter, setAssetFilter] = useState(ALL_ASSETS);
-  const xlmPrice = useXlmPrice();
 
   const load = async () => {
     setLoading(true);
@@ -136,13 +146,20 @@ export default function DashboardPage() {
         // Compute aggregate stats
         const userIds = userSchedules.map(s => s.id);
         const claimableAmounts = await getClaimableBulk(userIds, publicKey);
+        const vestedAmounts = await getVestedAmountBulk(userIds, publicKey);
+        
         const claimableMap = new Map<number, bigint>();
-        userIds.forEach((id, i) => claimableMap.set(id, claimableAmounts[i] ?? 0n));
+        const vestedMap = new Map<number, bigint>();
+        userIds.forEach((id, i) => {
+          claimableMap.set(id, claimableAmounts[i] ?? 0n);
+          vestedMap.set(id, vestedAmounts[i] ?? 0n);
+        });
 
         const now = Math.floor(Date.now() / 1000);
         let totalGranted = 0n;
         let totalReceiving = 0n;
         let claimableNow = 0n;
+        let totalVested = 0n;
         let activeSchedules = 0;
 
         for (const s of userSchedules) {
@@ -152,13 +169,14 @@ export default function DashboardPage() {
           if (s.beneficiary === publicKey) {
             totalReceiving += s.total_amount;
             claimableNow += claimableMap.get(s.id) ?? 0n;
+            totalVested += vestedMap.get(s.id) ?? 0n;
           }
           if (!s.revoked && vestingProgress(s, now) < 100) {
             activeSchedules++;
           }
         }
 
-        setStats({ totalGranted, totalReceiving, claimableNow, activeSchedules });
+        setStats({ totalGranted, totalReceiving, claimableNow, totalVested, activeSchedules });
       } else {
         setSchedules(all.slice(0, 6));
         setStats(null);
@@ -168,13 +186,6 @@ export default function DashboardPage() {
 
   useEffect(() => { load(); }, [publicKey]);
 
-  // Get unique assets from schedules
-  const availableAssets = useMemo(() => {
-    const assets = new Set<string>();
-    schedules.forEach(s => assets.add(s.token));
-    return Array.from(assets).sort();
-  }, [schedules]);
-
   // Apply role filter on top of the wallet-filtered list
   const roleFiltered = useMemo(() => {
     if (!publicKey || roleFilter === "all") return schedules;
@@ -182,15 +193,48 @@ export default function DashboardPage() {
     return schedules.filter(s => s.beneficiary === publicKey);
   }, [schedules, roleFilter, publicKey]);
 
-  // Apply asset filter
-  const filteredSchedules = useMemo(() => {
-    if (assetFilter === ALL_ASSETS) return roleFiltered;
-    return roleFiltered.filter(s => s.token === assetFilter);
-  }, [roleFiltered, assetFilter]);
+  // Get unique token addresses from schedules
+  const uniqueTokens = useMemo(() => {
+    const tokens = new Set(schedules.map(s => s.token));
+    return Array.from(tokens);
+  }, [schedules]);
 
-  // Apply sort on top of the role-filtered list
+  // Apply additional filters
+  const multiFiltered = useMemo(() => {
+    const now = Math.floor(Date.now() / 1000);
+    let filtered = [...roleFiltered];
+
+    // Status filter
+    if (statusFilter !== "all") {
+      filtered = filtered.filter(s => {
+        if (statusFilter === "revoked") return s.revoked;
+        if (statusFilter === "completed") return !s.revoked && vestingProgress(s, now) >= 100;
+        if (statusFilter === "active") return !s.revoked && vestingProgress(s, now) < 100;
+        return true;
+      });
+    }
+
+    // Token filter
+    if (tokenFilter !== "all") {
+      filtered = filtered.filter(s => s.token === tokenFilter);
+    }
+
+    // Date range filters
+    if (startDateFilter) {
+      const startTimestamp = new Date(startDateFilter).getTime() / 1000;
+      filtered = filtered.filter(s => s.start_time >= startTimestamp);
+    }
+    if (endDateFilter) {
+      const endTimestamp = new Date(endDateFilter).getTime() / 1000;
+      filtered = filtered.filter(s => (s.start_time + s.duration) <= endTimestamp);
+    }
+
+    return filtered;
+  }, [roleFiltered, statusFilter, tokenFilter, startDateFilter, endDateFilter]);
+
+  // Apply sort on top of the multi-filtered list
   const sortedSchedules = useMemo(() => {
-    const list = [...filteredSchedules];
+    const list = [...multiFiltered];
     const now = Math.floor(Date.now() / 1000);
     switch (sortBy) {
       case "newest":
@@ -209,7 +253,7 @@ export default function DashboardPage() {
       }
     }
     return list;
-  }, [filteredSchedules, sortBy]);
+  }, [multiFiltered, sortBy]);
 
   // Apply address search on top of sorted list
   const q = query.trim().toLowerCase();
@@ -225,17 +269,27 @@ export default function DashboardPage() {
   }, [sortedSchedules, q, getLabel]);
 
   // Reset to page 1 whenever the filtered set changes
-  useEffect(() => { setPage(1); }, [searchFiltered.length, roleFilter, sortBy, assetFilter]);
+  useEffect(() => { setPage(1); }, [searchFiltered.length, roleFilter, statusFilter, tokenFilter, startDateFilter, endDateFilter, sortBy]);
 
   const totalPages = Math.max(1, Math.ceil(searchFiltered.length / PAGE_SIZE));
   const pageStart = (page - 1) * PAGE_SIZE;
   const paginated = searchFiltered.slice(pageStart, pageStart + PAGE_SIZE);
 
   const handleExportCSV = () => {
-    const csv = buildCombinedExportCSV(filteredSchedules);
+    const csv = buildCombinedExportCSV(multiFiltered);
     const timestamp = new Date().toISOString().split('T')[0];
     downloadCSV(csv, `vestflow-schedules-${timestamp}.csv`);
   };
+
+  const clearAllFilters = () => {
+    setStatusFilter("all");
+    setTokenFilter("all");
+    setStartDateFilter("");
+    setEndDateFilter("");
+    setQuery("");
+  };
+
+  const hasActiveFilters = statusFilter !== "all" || tokenFilter !== "all" || startDateFilter || endDateFilter || query;
 
   return (
     <>
@@ -269,40 +323,8 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Summary stats */}
-        {publicKey && stats && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-            <div className="card p-4">
-              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Total Granted</p>
-              <p className="text-xl font-bold text-white">{stroopsToXlm(stats.totalGranted)} XLM</p>
-              {xlmPrice !== null && (
-                <p className="text-xs text-zinc-500 mt-0.5">{formatUsd(stats.totalGranted, xlmPrice)}</p>
-              )}
-              <p className="text-xs text-zinc-500 mt-1">as grantor</p>
-            </div>
-            <div className="card p-4">
-              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Total Receiving</p>
-              <p className="text-xl font-bold text-white">{stroopsToXlm(stats.totalReceiving)} XLM</p>
-              {xlmPrice !== null && (
-                <p className="text-xs text-zinc-500 mt-0.5">{formatUsd(stats.totalReceiving, xlmPrice)}</p>
-              )}
-              <p className="text-xs text-zinc-500 mt-1">as beneficiary</p>
-            </div>
-            <div className="card p-4">
-              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Claimable Now</p>
-              <p className="text-xl font-bold text-emerald-400">{stroopsToXlm(stats.claimableNow)} XLM</p>
-              {xlmPrice !== null && (
-                <p className="text-xs text-zinc-500 mt-0.5">{formatUsd(stats.claimableNow, xlmPrice)}</p>
-              )}
-              <p className="text-xs text-zinc-500 mt-1">available</p>
-            </div>
-            <div className="card p-4">
-              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Active Schedules</p>
-              <p className="text-xl font-bold text-white">{stats.activeSchedules}</p>
-              <p className="text-xs text-zinc-500 mt-1">currently vesting</p>
-            </div>
-          </div>
-        )}
+        {/* Summary stats — animated count-up (#270) */}
+        {publicKey && stats && <AnimatedStats stats={stats} />}
 
         {/* Role filter tabs (only when wallet connected and there are schedules) */}
         {publicKey && schedules.length > 0 && (
@@ -323,23 +345,92 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Asset filter */}
-        {schedules.length > 0 && availableAssets.length > 0 && (
-          <div className="flex items-center gap-2 mb-5 flex-wrap">
-            <label htmlFor="asset-select" className="text-xs text-zinc-500">Asset</label>
-            <select
-              id="asset-select"
-              value={assetFilter}
-              onChange={e => setAssetFilter(e.target.value)}
-              className="text-xs bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5 text-zinc-300 outline-none focus:border-violet-500/50 transition-colors"
-            >
-              <option value={ALL_ASSETS}>All assets</option>
-              {availableAssets.map(asset => (
-                <option key={asset} value={asset}>
-                  {asset.slice(0, 8)}...
-                </option>
-              ))}
-            </select>
+        {/* Filter controls */}
+        {publicKey && schedules.length > 0 && (
+          <div className="card p-4 mb-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-medium text-zinc-300">Filters</h3>
+              {hasActiveFilters && (
+                <button
+                  onClick={clearAllFilters}
+                  className="text-xs text-zinc-500 hover:text-white transition-colors"
+                >
+                  Clear all filters
+                </button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+              {/* Status filter */}
+              <div>
+                <label htmlFor="status-filter" className="block text-xs text-zinc-500 mb-1.5">
+                  Status
+                </label>
+                <select
+                  id="status-filter"
+                  value={statusFilter}
+                  onChange={e => setStatusFilter(e.target.value as StatusFilter)}
+                  className="w-full text-xs bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-zinc-300 outline-none focus:border-violet-500/50 transition-colors"
+                >
+                  <option value="all">All statuses</option>
+                  <option value="active">Active</option>
+                  <option value="completed">Completed</option>
+                  <option value="revoked">Revoked</option>
+                </select>
+              </div>
+
+              {/* Token filter */}
+              <div>
+                <label htmlFor="token-filter" className="block text-xs text-zinc-500 mb-1.5">
+                  Token
+                </label>
+                <select
+                  id="token-filter"
+                  value={tokenFilter}
+                  onChange={e => setTokenFilter(e.target.value)}
+                  className="w-full text-xs bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-zinc-300 outline-none focus:border-violet-500/50 transition-colors"
+                >
+                  <option value="all">All tokens</option>
+                  {uniqueTokens.map(token => {
+                    const isNative = token === NATIVE_TOKEN;
+                    const label = isNative ? "XLM (Native)" : `${token.slice(0, 8)}...${token.slice(-4)}`;
+                    return (
+                      <option key={token} value={token}>
+                        {label}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+
+              {/* Start date filter */}
+              <div>
+                <label htmlFor="start-date-filter" className="block text-xs text-zinc-500 mb-1.5">
+                  Start date from
+                </label>
+                <input
+                  type="date"
+                  id="start-date-filter"
+                  value={startDateFilter}
+                  onChange={e => setStartDateFilter(e.target.value)}
+                  className="w-full text-xs bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-zinc-300 outline-none focus:border-violet-500/50 transition-colors"
+                />
+              </div>
+
+              {/* End date filter */}
+              <div>
+                <label htmlFor="end-date-filter" className="block text-xs text-zinc-500 mb-1.5">
+                  End date until
+                </label>
+                <input
+                  type="date"
+                  id="end-date-filter"
+                  value={endDateFilter}
+                  onChange={e => setEndDateFilter(e.target.value)}
+                  className="w-full text-xs bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-zinc-300 outline-none focus:border-violet-500/50 transition-colors"
+                />
+              </div>
+            </div>
           </div>
         )}
 
