@@ -331,13 +331,17 @@ impl VestingSchedule {
                         vested_bps += milestone.bps as u64;
                     }
                 }
-                // vested = total_amount * vested_bps / 10_000
-                // Use checked arithmetic; saturate to total_amount on overflow.
-                self.total_amount
-                    .checked_mul(vested_bps as i128)
-                    .and_then(|n| n.checked_div(10_000))
-                    .unwrap_or(self.total_amount)
-                    .min(self.total_amount)
+                if vested_bps >= 10_000 {
+                    self.total_amount
+                } else {
+                    // vested = total_amount * vested_bps / 10_000
+                    // Use checked arithmetic; saturate to total_amount on overflow.
+                    self.total_amount
+                        .checked_mul(vested_bps as i128)
+                        .and_then(|n| n.checked_div(10_000))
+                        .unwrap_or(self.total_amount)
+                        .min(self.total_amount)
+                }
             }
         }
     }
@@ -446,12 +450,16 @@ impl MultiTokenVestingSchedule {
 
         let token = &self.tokens.get(token_idx).unwrap();
         let vested_pct = self.vested_percentage_at(now);
-        let vested = token
-            .total_amount
-            .checked_mul(vested_pct as i128)
-            .and_then(|n| n.checked_div(10_000))
-            .unwrap_or(token.total_amount)
-            .min(token.total_amount);
+        let vested = if vested_pct >= 10_000 {
+            token.total_amount
+        } else {
+            token
+                .total_amount
+                .checked_mul(vested_pct as i128)
+                .and_then(|n| n.checked_div(10_000))
+                .unwrap_or(token.total_amount)
+                .min(token.total_amount)
+        };
 
         let lockup_end = self.start_time.saturating_add(self.lockup_duration);
         if now < lockup_end {
@@ -1093,12 +1101,16 @@ impl VestFlowContract {
 
         for i in 0..schedule.tokens.len() {
             let mut tranche = schedule.tokens.get(i).unwrap().clone();
-            let vested = tranche
-                .total_amount
-                .checked_mul(vested_pct as i128)
-                .and_then(|n| n.checked_div(10_000))
-                .unwrap_or(tranche.total_amount)
-                .min(tranche.total_amount);
+            let vested = if vested_pct >= 10_000 {
+                tranche.total_amount
+            } else {
+                tranche
+                    .total_amount
+                    .checked_mul(vested_pct as i128)
+                    .and_then(|n| n.checked_div(10_000))
+                    .unwrap_or(tranche.total_amount)
+                    .min(tranche.total_amount)
+            };
 
             let claimable = vested - tranche.claimed_amount;
             if claimable > 0 {
