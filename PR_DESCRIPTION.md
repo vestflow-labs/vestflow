@@ -1,89 +1,27 @@
-# Implement lockup period, SAC support, and structured events
+# Git hooks for local linting and test enforcement
 
-This PR implements three key enhancements to the VestFlow vesting contract.
+## Summary
 
-## Changes
+This PR adds local Git hook automation to catch formatting and lint issues before they reach CI, and to block pushes when the test suite fails.
 
-### Issue #72: Token Lockup Period
-Implements a lockup period that is separate from the vesting cliff. This distinguishes between:
-- **Cliff**: Tokens not yet earned
-- **Lockup**: Tokens earned but non-transferable
+## What changed
 
-**Key Features**:
-- Added `lockup_duration` field to vesting schedules
-- Tokens vest according to schedule but cannot be claimed until lockup expires
-- Lockup duration must be >= cliff duration
-- Backward compatible with existing vesting logic
+- Added Husky-based pre-commit hooks that run lint-staged on staged TypeScript files.
+- Configured lint-staged to run ESLint auto-fix and Prettier on staged files, then re-stage any fixes.
+- Added a pre-push hook that runs the Vitest suite with `--passWithNoTests` before a push is allowed.
+- Added ESLint and Prettier configuration so the hooks work consistently across contributors.
 
-**Example Use Case**:
-Employee receives tokens with a 1-year cliff and 2-year lockup. After year 1, tokens start vesting but cannot be transferred. After year 2, all vested tokens become claimable.
+## Files added/updated
 
-### Issue #74: SAC Token Support
-Documents and verifies support for Stellar Asset Contract (SAC) wrapped assets.
-
-**Supported Tokens**:
-- Native XLM (wrapped as SAC)
-- Classic Stellar assets (wrapped as SAC)  
-- Custom Soroban tokens
-
-The contract uses the standard token interface and works with any SAC-compliant token contract.
-
-### Issue #70: Structured Events
-Enhanced all event emissions with structured data for indexers and monitoring systems.
-
-**Improvements**:
-- All events now include complete state transition data
-- Timestamps added to all events for temporal ordering
-- Schedule IDs in event topics for efficient indexing
-- Comprehensive event documentation in contract
-
-**Events Updated**:
-- `created`: Full schedule parameters
-- `claimed`: Beneficiary, token, amounts, timestamp
-- `revoked`: Grantor, token, amounts, timestamp
-- `paused`, `resumed`, `bnf_chng`: Enhanced with timestamps
-- All admin events: Timestamps added
-
-## Testing
-
-- ✅ All existing tests updated and passing
-- ✅ New tests for lockup functionality
-- ✅ Event structure verified
-- ✅ SAC support documented
-
-## Breaking Changes
-
-**Contract Interface**:
-- `create_schedule()`: Added `lockup_duration` parameter
-- `create_graded_schedule()`: Added `lockup_duration` parameter
-- `VestingSchedule` struct: Added `lockup_duration` and `milestones` fields
-
-**Migration Path**:
-- Use `lockup_duration = 0` for schedules without lockup
-- Use `lockup_duration = cliff_duration` to maintain existing behavior
-- Frontend clients need to update contract call signatures
-
-## Documentation
-
-- Added comprehensive event documentation
-- Added SAC support documentation
-- Created `IMPLEMENTATION_NOTES.md` with detailed explanation
+- [.husky/pre-commit](.husky/pre-commit)
+- [.husky/pre-push](.husky/pre-push)
+- [package.json](package.json)
+- [package-lock.json](package-lock.json)
+- [eslint.config.mjs](eslint.config.mjs)
+- [.prettierrc.json](.prettierrc.json)
+- [HIGHLIGHT.md](HIGHLIGHT.md)
 
 ## Verification
 
-- No security vulnerabilities introduced
-- Maintains overflow-safe arithmetic
-- Preserves authorization checks
-- Re-entrancy guards unchanged
-- Event structure backwards compatible (additive only)
-
-## Files Changed
-
-- `contracts/vestflow/src/lib.rs`: Core implementation (203 additions)
-- `IMPLEMENTATION_NOTES.md`: Detailed documentation (new file)
-
-## Related Issues
-
-Closes #72
-Closes #74  
-Closes #70
+- `npm install` completed successfully and installed the hook tooling.
+- `npm test -- --passWithNoTests` passed with 19 tests passing.
