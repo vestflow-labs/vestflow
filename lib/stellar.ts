@@ -376,6 +376,17 @@ export async function transferGrantor(
   ]);
 }
 
+export async function transferBeneficiary(
+  publicKey: string,
+  scheduleId: number,
+  newBeneficiary: string
+): Promise<string> {
+  return buildAndSend(publicKey, "transfer_beneficiary", [
+    nativeToScVal(scheduleId, { type: "u64" }),
+    nativeToScVal(newBeneficiary, { type: "address" }),
+  ]);
+}
+
 // ---------- Types ----------
 
 export interface ScheduleData {
