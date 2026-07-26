@@ -30,7 +30,7 @@
 //! | `"Cliff cannot exceed duration"`| `create_schedule` with `cliff_duration` > `duration`             |
 //! | `"Lockup cannot be less than cliff"` | `create_schedule` with `lockup_duration` < `cliff_duration`   |
 //! | `"Beneficiary must differ from grantor"` | `create_schedule` with `beneficiary == grantor`                 |
-//! | `"Start time cannot be in the past"` | `create_schedule` or `create_graded_schedule` with `start_time` < current ledger time |
+//! | `"Start time cannot be in the past"` | `create_schedule`, `create_graded_schedule`, or `create_multi_token_schedule` with a nonzero `start_time` < current ledger time. Pass `start_time = 0` to start immediately at the current ledger time. |
 //! | `"Invalid token"` | `create_schedule` with a `token` address that is not a recognised Stellar Asset Contract |
 //! | `"Upgrade authority already initialized"` | `initialize_upgrade_authority` called more than once |
 //! | `"Upgrade authority not initialized"` | Upgrade announcement/execution attempted before authority setup |
@@ -697,8 +697,12 @@ impl VestFlowContract {
     /// Panics with `"Cliff cannot exceed duration"` if `cliff_duration` > `duration`.
     /// Panics with `"Lockup cannot be less than cliff"` if `lockup_duration` < `cliff_duration`.
     /// Panics with `"Beneficiary must differ from grantor"` if `beneficiary == grantor`.
-    /// Panics with `"Start time cannot be in the past"` if `start_time` < current ledger time.
+    /// Panics with `"Start time cannot be in the past"` if a nonzero `start_time` < current ledger time.
     /// Returns `InvalidToken` if `token` is not a recognised Stellar Asset Contract.
+    ///
+    /// `start_time = 0` is shorthand for "start immediately": it is replaced
+    /// with the current ledger time before validation and storage, so callers
+    /// don't need to compute a timestamp off-chain.
     pub fn create_schedule(
         env: Env,
         grantor: Address,
@@ -713,6 +717,12 @@ impl VestFlowContract {
         revocable: bool,
     ) -> Result<u64, VestFlowError> {
         grantor.require_auth();
+
+        let start_time = if start_time == 0 {
+            env.ledger().timestamp()
+        } else {
+            start_time
+        };
 
         assert!(
             beneficiary != grantor,
@@ -840,9 +850,12 @@ impl VestFlowContract {
     /// # Errors
     ///
     /// Panics with `"Amount must be positive"` if `total_amount` ≤ 0.
-    /// Panics with `"Start time cannot be in the past"` if `start_time` < current ledger time.
+    /// Panics with `"Start time cannot be in the past"` if a nonzero `start_time` < current ledger time.
     /// Panics with `"Milestones required"` if the milestones list is empty.
     /// Panics with `"Milestones must sum to 10000 bps"` if the bps total ≠ 10 000.
+    ///
+    /// `start_time = 0` is shorthand for "start immediately": it is replaced
+    /// with the current ledger time before validation and storage.
     pub fn create_graded_schedule(
         env: Env,
         grantor: Address,
@@ -855,6 +868,12 @@ impl VestFlowContract {
         milestones: Vec<GradedMilestone>,
     ) -> Result<u64, VestFlowError> {
         grantor.require_auth();
+
+        let start_time = if start_time == 0 {
+            env.ledger().timestamp()
+        } else {
+            start_time
+        };
 
         assert!(
             beneficiary != grantor,
@@ -978,6 +997,9 @@ impl VestFlowContract {
     /// # Errors
     ///
     /// Panics with various validation errors (see single-token `create_schedule`)
+    ///
+    /// `start_time = 0` is shorthand for "start immediately": it is replaced
+    /// with the current ledger time before validation and storage.
     pub fn create_multi_token_schedule(
         env: Env,
         grantor: Address,
@@ -992,6 +1014,12 @@ impl VestFlowContract {
         milestones: Vec<GradedMilestone>,
     ) -> Result<u64, VestFlowError> {
         grantor.require_auth();
+
+        let start_time = if start_time == 0 {
+            env.ledger().timestamp()
+        } else {
+            start_time
+        };
 
         assert!(
             beneficiary != grantor,
@@ -2263,6 +2291,64 @@ mod test {
             &VestingKind::Linear,
             &false,
         );
+    }
+
+    #[test]
+    fn test_create_schedule_zero_start_time_means_now() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 5000);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        assert_eq!(client.get_schedule(&id).start_time, 5000);
+        // Nothing vested yet at the moment of creation...
+        assert_eq!(client.claimable(&id), 0);
+        // ...but vesting proceeds immediately from the current ledger time.
+        set_time(&env, 5500);
+        assert_eq!(client.claimable(&id), 500);
+    }
+
+    #[test]
+    fn test_create_graded_schedule_zero_start_time_means_now() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 5000);
+        let milestones = vec![
+            &env,
+            GradedMilestone {
+                offset_secs: 100,
+                bps: 10_000,
+            },
+        ];
+        let id = client.create_graded_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &0,
+            &false,
+            &milestones,
+        );
+
+        assert_eq!(client.get_schedule(&id).start_time, 5000);
+        set_time(&env, 5100);
+        assert_eq!(client.claimable(&id), 1000);
     }
 
     #[test]
