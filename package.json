@@ -43,7 +43,7 @@
     "autocannon": "^8.0.0",
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
-    "jsdom": "^29.1.1",
+    "jsdom": "^30.0.0",
     "lefthook": "^2.1.9",
     "tailwindcss": "^4",
     "tsup": "^8.5.1",
