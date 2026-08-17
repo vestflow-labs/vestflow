@@ -20,7 +20,7 @@
     "better-sqlite3": "^12.11.1",
     "express-rate-limit": "^7.1.5",
     "ioredis": "^5.11.1",
-    "next": "16.2.6",
+    "next": "16.3.1",
     "canvas-confetti": "^1.9.3",
     "qrcode.react": "^4.2.0",
     "react": "19.2.8",
