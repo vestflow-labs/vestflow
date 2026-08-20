@@ -820,6 +820,39 @@ export class VestflowClient {
     );
   }
 
+  /**
+   * Atomically merge multiple active vesting schedules belonging to the same
+   * grantor-beneficiary pair into a single unified schedule, destroying the
+   * sources.
+   *
+   * Requires authorization from both the grantor and the beneficiary of the
+   * schedules being merged, regardless of who `caller` is — pass a `signer`
+   * capable of producing both signatures (e.g. a multi-signature flow), or
+   * call this once per required signer with the same transaction if your
+   * wallet integration supports co-signing.
+   *
+   * @param caller - Address invoking the merge (must be the grantor or the beneficiary)
+   * @param ids - Schedule IDs to merge (2-20 schedules, all sharing the same
+   *   grantor, beneficiary, token, and vesting kind)
+   * @param signer - Function that signs the transaction XDR
+   * @returns Transaction hash
+   */
+  async mergeSchedules(
+    caller: string,
+    ids: number[],
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    const idsVal = xdr.ScVal.scvVec(
+      ids.map((id) => nativeToScVal(id, { type: "u64" }))
+    );
+    return this.buildAndSend(
+      caller,
+      "merge_schedules",
+      [nativeToScVal(caller, { type: "address" }), idsVal],
+      signer
+    );
+  }
+
   subscribeToSchedule(
     id: number,
     callback: (schedule: ScheduleData, claimable: bigint) => void | Promise<void>,

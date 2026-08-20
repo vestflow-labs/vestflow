@@ -62,6 +62,11 @@ pub enum VestFlowError {
     ScheduleRevoked = 8,
     LockupLessThanCliff = 9,
     InvalidToken = 10,
+    MergeTypeMismatch = 11,
+    MergeTooFewSchedules = 12,
+    MergeTooManySchedules = 13,
+    MergeTokenMismatch = 14,
+    MergeOwnerMismatch = 15,
 }
 
 #[contracttype]
@@ -2293,6 +2298,272 @@ impl VestFlowContract {
             (schedule.grantor, schedule.beneficiary, schedule.token),
         );
     }
+
+    /// Atomically combine multiple active vesting schedules belonging to the
+    /// same grantor-beneficiary pair into a single unified schedule.
+    ///
+    /// Every currently-claimable amount is paid out from each source before
+    /// merging (paused sources are never skipped — `claimable_at` already
+    /// accounts for frozen elapsed time while paused). The merged schedule's
+    /// `total_amount` is the exact sum of each source's remaining
+    /// (unclaimed) balance, so the token invariant
+    /// `claimed_total + merged.total_amount == sum(source.total_amount)`
+    /// holds exactly with no rounding dust.
+    ///
+    /// `start_time`, `duration_seconds`, `cliff_seconds`, and
+    /// `lockup_duration` are each the token-weighted average of the sources,
+    /// weighted by remaining balance. Because every source individually
+    /// satisfies `cliff <= duration` and `lockup >= cliff`, and a weighted
+    /// average of pointwise-ordered values preserves that order under floor
+    /// division by a common denominator, the merged schedule automatically
+    /// satisfies the same invariants without extra clamping.
+    ///
+    /// # Errors
+    ///
+    /// - `MergeTooFewSchedules` — fewer than 2 IDs given.
+    /// - `MergeTooManySchedules` — more than 20 IDs given (Soroban instruction limit).
+    /// - `NotFound` — one of `ids` does not exist.
+    /// - `MergeOwnerMismatch` — the schedules don't share the same grantor and beneficiary.
+    /// - `MergeTokenMismatch` — the schedules don't share the same token.
+    /// - `MergeTypeMismatch` — the schedules don't share the same `VestingKind`, or the
+    ///   shared kind is `Graded` (milestone tranches cannot be merged deterministically).
+    /// - `AlreadyRevoked` — one of the source schedules has already been revoked.
+    ///
+    /// If every source turns out to already be fully claimed (so nothing
+    /// remains to merge), this still succeeds and returns a degenerate,
+    /// already-fully-claimed schedule rather than erroring — the claim
+    /// payouts above already happened and must not be rolled back.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"Unauthorized caller"` if `caller` is neither the shared grantor
+    /// nor the shared beneficiary.
+    pub fn merge_schedules(env: Env, caller: Address, ids: Vec<u64>) -> Result<u64, VestFlowError> {
+        caller.require_auth();
+
+        if ids.len() < 2 {
+            return Err(VestFlowError::MergeTooFewSchedules);
+        }
+        if ids.len() > 20 {
+            return Err(VestFlowError::MergeTooManySchedules);
+        }
+
+        let mut schedules: Vec<VestingSchedule> = vec![&env];
+        for id in ids.iter() {
+            let schedule: VestingSchedule = env
+                .storage()
+                .instance()
+                .get(&DataKey::Schedule(id))
+                .ok_or(VestFlowError::NotFound)?;
+            schedules.push_back(schedule);
+        }
+
+        let first = schedules.get(0).expect("length >= 2 checked above");
+        let grantor = first.grantor.clone();
+        let beneficiary = first.beneficiary.clone();
+        let token = first.token.clone();
+        let kind = first.kind.clone();
+
+        for schedule in schedules.iter() {
+            if schedule.grantor != grantor || schedule.beneficiary != beneficiary {
+                return Err(VestFlowError::MergeOwnerMismatch);
+            }
+            if schedule.token != token {
+                return Err(VestFlowError::MergeTokenMismatch);
+            }
+            if schedule.kind != kind {
+                return Err(VestFlowError::MergeTypeMismatch);
+            }
+            if schedule.revoked {
+                return Err(VestFlowError::AlreadyRevoked);
+            }
+        }
+        // Milestone tranches cannot be merged deterministically.
+        if kind == VestingKind::Graded {
+            return Err(VestFlowError::MergeTypeMismatch);
+        }
+
+        assert!(
+            caller == grantor || caller == beneficiary,
+            "Unauthorized caller"
+        );
+        grantor.require_auth();
+        beneficiary.require_auth();
+
+        let now = env.ledger().timestamp();
+        let contract_address = env.current_contract_address();
+        let token_client = token::Client::new(&env, &token);
+
+        // Claim every source's currently-claimable tokens before merging so no
+        // vested-but-unclaimed balance is lost.
+        for i in 0..schedules.len() {
+            let mut schedule = schedules.get(i).expect("i < len");
+            let claimable = schedule.claimable_at(now);
+            if claimable > 0 {
+                schedule.claimed_amount += claimable;
+                token_client.transfer(&contract_address, &beneficiary, &claimable);
+            }
+            schedules.set(i, schedule);
+        }
+
+        // Every source may already have been fully vested and just fully
+        // auto-claimed above, leaving nothing to merge. The claim transfers
+        // already happened, and Soroban only commits them if this call
+        // succeeds — returning an error here would silently roll back the
+        // payout the beneficiary is owed. `compute_merged_timeline` falls
+        // back to harmless defaults instead of dividing by zero in that case
+        // rather than us discarding the claims.
+        let (total_remaining, start_time_merged, duration_merged, cliff_merged, lockup_merged) =
+            compute_merged_timeline(&schedules, now);
+
+        // A merged schedule keeps the grantor's revocation power only if every
+        // source did — otherwise merging would silently strengthen (or weaken)
+        // the beneficiary's guarantee relative to what each source promised.
+        let revocable = schedules.iter().all(|s| s.revocable);
+
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ScheduleCount)
+            .unwrap_or(0);
+        let merged_id = count + 1;
+
+        let merged = VestingSchedule {
+            id: merged_id,
+            grantor: grantor.clone(),
+            beneficiary: beneficiary.clone(),
+            token: token.clone(),
+            total_amount: total_remaining,
+            claimed_amount: 0,
+            start_time: start_time_merged,
+            duration_seconds: duration_merged,
+            cliff_seconds: cliff_merged,
+            lockup_duration: lockup_merged,
+            kind: kind.clone(),
+            revocable,
+            revoked: false,
+            vested_at_revoke: 0,
+            paused: false,
+            paused_duration: 0,
+            paused_at: 0,
+            requires_milestones: false,
+            milestones: vec![&env],
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Schedule(merged_id), &merged);
+        env.storage()
+            .instance()
+            .set(&DataKey::ScheduleCount, &merged_id);
+
+        // Delete every source schedule's storage entry and remove it from both indices.
+        let grantor_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::GrantorSchedules(grantor.clone()))
+            .unwrap_or(vec![&env]);
+        let beneficiary_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::BeneficiarySchedules(beneficiary.clone()))
+            .unwrap_or(vec![&env]);
+
+        for id in ids.iter() {
+            env.storage().instance().remove(&DataKey::Schedule(id));
+        }
+
+        let mut new_grantor_ids: Vec<u64> = vec![&env];
+        for gid in grantor_ids.iter() {
+            if !ids.contains(gid) {
+                new_grantor_ids.push_back(gid);
+            }
+        }
+        new_grantor_ids.push_back(merged_id);
+        env.storage().instance().set(
+            &DataKey::GrantorSchedules(grantor.clone()),
+            &new_grantor_ids,
+        );
+
+        let mut new_beneficiary_ids: Vec<u64> = vec![&env];
+        for bid in beneficiary_ids.iter() {
+            if !ids.contains(bid) {
+                new_beneficiary_ids.push_back(bid);
+            }
+        }
+        new_beneficiary_ids.push_back(merged_id);
+        env.storage().instance().set(
+            &DataKey::BeneficiarySchedules(beneficiary.clone()),
+            &new_beneficiary_ids,
+        );
+
+        env.events().publish(
+            (symbol_short!("merged"), merged_id),
+            (ids, merged_id, total_remaining),
+        );
+
+        Ok(merged_id)
+    }
+}
+
+/// Fixed-point weighted component `value * weight`, used to accumulate a
+/// token-weighted sum in [`VestFlowContract::merge_schedules`] before
+/// dividing by the total weight. Panics on overflow rather than wrapping —
+/// with at most 20 schedules and `i128`-range weights this is unreachable
+/// in practice, but wrapping silently would corrupt the weighted average.
+fn weighted_component(value: u64, weight: i128) -> i128 {
+    (value as i128)
+        .checked_mul(weight)
+        .expect("merge weighted-average overflow")
+}
+
+/// Pure computation of a merged schedule's remaining total and
+/// token-weighted-average timeline from a set of already-claimed-out source
+/// schedules (i.e. `claimed_amount` reflects any payout that already
+/// happened). Returns `(total_remaining, start_time, duration, cliff, lockup)`.
+///
+/// Extracted out of [`VestFlowContract::merge_schedules`] so the arithmetic
+/// can be property-tested directly against synthetic `VestingSchedule`
+/// values without registering a contract — every registered-contract
+/// invocation in a `#[cfg(test)]` `Env` writes a `test_snapshots/*.json`
+/// regression file, which is fine for a handful of deterministic tests but
+/// would flood the repo across thousands of proptest cases.
+fn compute_merged_timeline(
+    schedules: &Vec<VestingSchedule>,
+    now: u64,
+) -> (i128, u64, u64, u64, u64) {
+    let mut total_remaining: i128 = 0;
+    let mut weighted_start: i128 = 0;
+    let mut weighted_duration: i128 = 0;
+    let mut weighted_cliff: i128 = 0;
+    let mut weighted_lockup: i128 = 0;
+
+    for schedule in schedules.iter() {
+        let remaining = schedule.total_amount - schedule.claimed_amount;
+        total_remaining = total_remaining
+            .checked_add(remaining)
+            .expect("merge remaining-amount overflow");
+        weighted_start += weighted_component(schedule.start_time, remaining);
+        weighted_duration += weighted_component(schedule.duration_seconds, remaining);
+        weighted_cliff += weighted_component(schedule.cliff_seconds, remaining);
+        weighted_lockup += weighted_component(schedule.lockup_duration, remaining);
+    }
+
+    // Every source may already have been fully vested and claimed, leaving
+    // nothing to merge. Fall back to harmless defaults rather than dividing
+    // by zero — `total_remaining` is 0 either way, so these values are never
+    // observable through `total_amount`.
+    if total_remaining > 0 {
+        (
+            total_remaining,
+            (weighted_start / total_remaining) as u64,
+            (weighted_duration / total_remaining) as u64,
+            (weighted_cliff / total_remaining) as u64,
+            (weighted_lockup / total_remaining) as u64,
+        )
+    } else {
+        (0, now, 60, 0, 0)
+    }
 }
 
 /// Validate that `token` is a recognised Stellar Asset Contract (SAC) by
@@ -4495,5 +4766,398 @@ mod test {
 
         // Any time after must also equal total_amount (caps, never exceeds).
         assert_eq!(schedule.vested_at(end_time + 1_000), total_amount);
+    }
+
+    // --- merge_schedules ---
+
+    #[test]
+    fn test_merge_two_linear_schedules_at_midpoint() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        set_time(&env, 0);
+        let id1 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+        let id2 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &2000,
+            &0,
+            &2000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+
+        // Halfway through schedule 1 (500/1000 vested); schedule 2 is a
+        // quarter through (500/2000 vested).
+        set_time(&env, 500);
+
+        let ids = soroban_sdk::vec![&env, id1, id2];
+        let merged_id = client.merge_schedules(&grantor, &ids);
+
+        // Source schedules no longer exist.
+        assert!(
+            client.try_get_schedule(&id1).is_err()
+                || client.try_get_schedule(&id1).unwrap().is_err()
+        );
+        assert!(
+            client.try_get_schedule(&id2).is_err()
+                || client.try_get_schedule(&id2).unwrap().is_err()
+        );
+
+        let merged = client.get_schedule(&merged_id);
+
+        // remaining_1 = 1000 - 500 = 500; remaining_2 = 2000 - 500 = 1500.
+        // total_remaining = 2000.
+        assert_eq!(merged.total_amount, 2000);
+        assert_eq!(merged.claimed_amount, 0);
+
+        // Weighted start_time: (0*500 + 0*1500) / 2000 = 0.
+        assert_eq!(merged.start_time, 0);
+        // Weighted duration: (1000*500 + 2000*1500) / 2000 = (500000 + 3000000) / 2000 = 1750.
+        assert_eq!(merged.duration_seconds, 1750);
+
+        // The merged schedule is fully claimable at start_time + duration_merged.
+        set_time(&env, merged.start_time + merged.duration_seconds);
+        assert_eq!(client.claimable(&merged_id), 2000);
+        client.claim(&merged_id);
+        // Beneficiary already received the 500+500=1000 auto-claimed at merge time,
+        // plus the 2000 claimed just now.
+        assert_eq!(token.balance(&beneficiary), 1000 + 2000);
+    }
+
+    #[test]
+    fn test_merge_five_schedules_token_invariant() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        let amounts = [1000_i128, 500, 2000, 750, 1250];
+        let total_original: i128 = amounts.iter().sum();
+
+        set_time(&env, 0);
+        let mut ids = soroban_sdk::vec![&env];
+        for (i, amount) in amounts.iter().enumerate() {
+            let id = client.create_schedule(
+                &grantor,
+                &beneficiary,
+                &token_addr,
+                amount,
+                &0,
+                &(1000 + i as u64 * 100),
+                &0,
+                &0,
+                &VestingKind::Linear,
+                &true,
+            );
+            ids.push_back(id);
+        }
+
+        set_time(&env, 300);
+        let claimed_before = token.balance(&beneficiary);
+
+        let merged_id = client.merge_schedules(&grantor, &ids);
+        let merged = client.get_schedule(&merged_id);
+
+        let claimed_during_merge = token.balance(&beneficiary) - claimed_before;
+
+        // Token invariant: claimed + merged total == sum of original totals, with zero dust.
+        assert_eq!(claimed_during_merge + merged.total_amount, total_original);
+
+        for id in ids.iter() {
+            assert!(
+                client.try_get_schedule(&id).is_err()
+                    || client.try_get_schedule(&id).unwrap().is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_rejects_mismatched_grantors() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let other_grantor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_addr)
+            .mock_all_auths()
+            .mint(&other_grantor, &10_000);
+
+        set_time(&env, 0);
+        let id1 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+        let id2 = client.create_schedule(
+            &other_grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+
+        let ids = soroban_sdk::vec![&env, id1, id2];
+        let result = client.try_merge_schedules(&grantor, &ids);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            VestFlowError::MergeOwnerMismatch
+        );
+    }
+
+    #[test]
+    fn test_merge_rejects_linear_and_graded_mismatch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id1 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+        let milestones = soroban_sdk::vec![
+            &env,
+            GradedMilestone {
+                offset_secs: 500,
+                bps: 10_000,
+            },
+        ];
+        let id2 = client.create_graded_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &0,
+            &true,
+            &milestones,
+        );
+
+        let ids = soroban_sdk::vec![&env, id1, id2];
+        let result = client.try_merge_schedules(&grantor, &ids);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            VestFlowError::MergeTypeMismatch
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_merge_missing_beneficiary_auth_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id1 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+        let id2 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+
+        let ids = soroban_sdk::vec![&env, id1, id2];
+
+        // Only the grantor (acting as caller) authorizes — the beneficiary
+        // never signs, so `beneficiary.require_auth()` must panic.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &grantor,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "merge_schedules",
+                args: soroban_sdk::vec![&env, grantor.into_val(&env), ids.into_val(&env),].into(),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.merge_schedules(&grantor, &ids);
+    }
+
+    #[test]
+    fn test_merge_too_few_schedules_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id1 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+
+        let ids = soroban_sdk::vec![&env, id1];
+        let result = client.try_merge_schedules(&grantor, &ids);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            VestFlowError::MergeTooFewSchedules
+        );
+    }
+
+    #[test]
+    fn test_merge_too_many_schedules_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        StellarAssetClient::new(&env, &token_addr)
+            .mock_all_auths()
+            .mint(&grantor, &1_000_000);
+
+        set_time(&env, 0);
+        let mut ids = soroban_sdk::vec![&env];
+        for _ in 0..21 {
+            let id = client.create_schedule(
+                &grantor,
+                &beneficiary,
+                &token_addr,
+                &100,
+                &0,
+                &1000,
+                &0,
+                &0,
+                &VestingKind::Linear,
+                &true,
+            );
+            ids.push_back(id);
+        }
+
+        let result = client.try_merge_schedules(&grantor, &ids);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            VestFlowError::MergeTooManySchedules
+        );
+    }
+
+    /// Build a synthetic Linear `VestingSchedule` for pure-math fuzzing.
+    /// Never registers a contract, so constructing and dropping the `Env`
+    /// here writes no `test_snapshots/*.json` file (see
+    /// [`compute_merged_timeline`]'s doc comment).
+    fn synthetic_schedule(
+        env: &Env,
+        grantor: &Address,
+        beneficiary: &Address,
+        token: &Address,
+        total_amount: i128,
+        start_time: u64,
+        duration_seconds: u64,
+    ) -> VestingSchedule {
+        VestingSchedule {
+            id: 1,
+            grantor: grantor.clone(),
+            beneficiary: beneficiary.clone(),
+            token: token.clone(),
+            total_amount,
+            claimed_amount: 0,
+            start_time,
+            duration_seconds,
+            cliff_seconds: 0,
+            lockup_duration: 0,
+            kind: VestingKind::Linear,
+            revocable: true,
+            revoked: false,
+            vested_at_revoke: 0,
+            paused: false,
+            paused_duration: 0,
+            paused_at: 0,
+            requires_milestones: false,
+            milestones: vec![env],
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #[test]
+        fn test_fuzz_merge_token_invariant_never_violated(
+            schedules_input in proptest::collection::vec((1..1_000_000_000_i128, 60..1_000_000_u64, 0..1_000_000_u64), 2..8),
+            now in 0..2_000_000_u64,
+        ) {
+            let env = Env::default();
+            let grantor = Address::generate(&env);
+            let beneficiary = Address::generate(&env);
+            let token = Address::generate(&env);
+
+            let total_original: i128 = schedules_input.iter().map(|(amount, _, _)| amount).sum();
+
+            let mut claimed_out: Vec<VestingSchedule> = vec![&env];
+            let mut total_claimed: i128 = 0;
+            for (amount, duration, start_time) in schedules_input.iter() {
+                let schedule = synthetic_schedule(
+                    &env, &grantor, &beneficiary, &token, *amount, *start_time, *duration,
+                );
+                let claimable = schedule.claimable_at(now);
+                total_claimed += claimable;
+
+                let mut post_claim = schedule;
+                post_claim.claimed_amount = claimable;
+                claimed_out.push_back(post_claim);
+            }
+
+            let (total_remaining, _, _, _, _) = compute_merged_timeline(&claimed_out, now);
+
+            // Token invariant: claimed-before + merged.total_amount + dust == original total.
+            // Dust is always 0 because total_remaining is an exact sum of remainders.
+            prop_assert_eq!(total_claimed + total_remaining, total_original);
+        }
     }
 }
