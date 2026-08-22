@@ -28,4 +28,5 @@ export type {
   ProposalState,
   GradedMilestone,
   VestingKind,
+  ClaimDelegation,
 } from "./types";

@@ -40,10 +40,14 @@
 //! | `"Upgrade executable time overflow"` | Upgrade announcement timestamp cannot safely add the timelock |
 //! | `"Insufficient balance or below minimum reserve"` | `claim` transfer fails due to balance constraints or Stellar minimum reserve |
 //! | `"Performance oracle must be initialized before enabling milestones"` | `enable_performance_milestones` called before `initialize_performance_oracle` |
+//! | `"Not the beneficiary"` | `create_delegation`/`revoke_delegation` called with a `beneficiary` that doesn't match the schedule |
+//! | `"Delegate must differ from beneficiary"` | `create_delegation` with `delegate == beneficiary` |
+//! | `"Max amount must be positive"` | `create_delegation` with `max_amount` = `Some(n)` where `n <= 0` |
+//! | `"Expiry must be in the future"` | `create_delegation` with `expires_at_ledger` at or before the current ledger sequence |
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
-    Env, Vec,
+    Env, IntoVal, Vec,
 };
 
 pub const VERSION: u32 = 1;
@@ -67,6 +71,12 @@ pub enum VestFlowError {
     ProposalExpired = 13,
     ProposalAlreadyActivated = 14,
     DurationTooShort = 15,
+    DelegationNotFound = 16,
+    DelegationRevoked = 17,
+    DelegationExpired = 18,
+    DelegationExhausted = 19,
+    NotDelegate = 20,
+    TooManyDelegations = 21,
 }
 
 #[contracttype]
@@ -96,6 +106,39 @@ pub enum DataKey {
     Proposal(u64),
     /// Monotonic counter of proposals ever created.
     ProposalCount,
+}
+
+/// Storage keys for claim delegations, keyed separately from [`DataKey`] so
+/// delegation records don't crowd the schedule key space.
+#[contracttype]
+#[derive(Clone)]
+pub enum DelegationKey {
+    /// A single delegation: (schedule_id, delegation_id).
+    Delegation(u64, u32),
+    /// Monotonic delegation-id counter for a schedule, keyed by schedule_id.
+    DelegationCount(u64),
+}
+
+/// Maximum number of concurrently active (non-revoked) delegations a
+/// beneficiary may hold open per schedule.
+pub const MAX_DELEGATIONS_PER_SCHEDULE: u32 = 5;
+
+/// A delegation of claim rights from a schedule's beneficiary to a
+/// third-party address, optionally bounded by amount and/or ledger expiry.
+#[contracttype]
+#[derive(Clone)]
+pub struct ClaimDelegation {
+    /// Address authorized to claim on the beneficiary's behalf.
+    pub delegate: Address,
+    /// Maximum total tokens this delegate may ever claim. `None` = unlimited.
+    pub max_amount: Option<i128>,
+    /// Ledger sequence after which this delegation can no longer be used to
+    /// claim. `None` = no expiry.
+    pub expires_at_ledger: Option<u32>,
+    /// Tokens already claimed through this delegation.
+    pub claimed_so_far: i128,
+    /// Whether the beneficiary has revoked this delegation.
+    pub revoked: bool,
 }
 
 /// Mandatory delay between an on-chain upgrade announcement and execution.
@@ -2424,6 +2467,278 @@ impl VestFlowContract {
             }
         }
         irrevocable
+    }
+
+    /// Delegate claim rights on a schedule to a third-party address.
+    ///
+    /// The delegate may later call [`claim_as_delegate`] to pull vested
+    /// tokens directly to their own address, bounded by `max_amount` and/or
+    /// `expires_at_ledger`. A schedule may have at most
+    /// [`MAX_DELEGATIONS_PER_SCHEDULE`] concurrently active (non-revoked)
+    /// delegations; revoking one frees a slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` if `schedule_id` does not exist.
+    /// Returns `TooManyDelegations` if 5 active delegations already exist for this schedule.
+    /// Panics with `"Not the beneficiary"` if `beneficiary` is not the schedule's beneficiary.
+    /// Panics with `"Delegate must differ from beneficiary"` if `delegate == beneficiary`.
+    /// Panics with `"Max amount must be positive"` if `max_amount` is `Some(n)` with `n <= 0`.
+    /// Panics with `"Expiry must be in the future"` if `expires_at_ledger` is at or before the current ledger sequence.
+    pub fn create_delegation(
+        env: Env,
+        beneficiary: Address,
+        schedule_id: u64,
+        delegate: Address,
+        max_amount: Option<i128>,
+        expires_at_ledger: Option<u32>,
+    ) -> Result<u32, VestFlowError> {
+        beneficiary.require_auth();
+
+        let schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(VestFlowError::NotFound)?;
+        assert!(beneficiary == schedule.beneficiary, "Not the beneficiary");
+        assert!(
+            delegate != beneficiary,
+            "Delegate must differ from beneficiary"
+        );
+        if let Some(max) = max_amount {
+            assert!(max > 0, "Max amount must be positive");
+        }
+        if let Some(expiry) = expires_at_ledger {
+            assert!(
+                expiry > env.ledger().sequence(),
+                "Expiry must be in the future"
+            );
+        }
+
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DelegationKey::DelegationCount(schedule_id))
+            .unwrap_or(0);
+
+        // Count active (non-revoked) delegations against the concurrency cap.
+        let mut active: u32 = 0;
+        for id in 1..=count {
+            if let Some(existing) = env
+                .storage()
+                .instance()
+                .get::<DelegationKey, ClaimDelegation>(&DelegationKey::Delegation(
+                    schedule_id,
+                    id,
+                ))
+            {
+                if !existing.revoked {
+                    active += 1;
+                }
+            }
+        }
+        if active >= MAX_DELEGATIONS_PER_SCHEDULE {
+            return Err(VestFlowError::TooManyDelegations);
+        }
+
+        let delegation_id = count + 1;
+        let delegation = ClaimDelegation {
+            delegate: delegate.clone(),
+            max_amount,
+            expires_at_ledger,
+            claimed_so_far: 0,
+            revoked: false,
+        };
+
+        env.storage().instance().set(
+            &DelegationKey::Delegation(schedule_id, delegation_id),
+            &delegation,
+        );
+        env.storage().instance().set(
+            &DelegationKey::DelegationCount(schedule_id),
+            &delegation_id,
+        );
+
+        env.events().publish(
+            (symbol_short!("dele_new"), schedule_id, delegation_id),
+            (beneficiary, delegate, max_amount, expires_at_ledger),
+        );
+
+        Ok(delegation_id)
+    }
+
+    /// Revoke a claim delegation, immediately and permanently disabling it.
+    ///
+    /// Idempotent: revoking an already-revoked delegation is a no-op success.
+    /// Any `claim_as_delegate` call that has not yet started executing in a
+    /// later transaction will see `revoked == true` and be rejected — Soroban
+    /// applies transactions within a ledger sequentially, so there is no
+    /// window where a revocation and a claim can both partially apply.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` if `schedule_id` does not exist.
+    /// Returns `DelegationNotFound` if `delegation_id` does not exist for this schedule.
+    /// Panics with `"Not the beneficiary"` if `beneficiary` is not the schedule's beneficiary.
+    pub fn revoke_delegation(
+        env: Env,
+        beneficiary: Address,
+        schedule_id: u64,
+        delegation_id: u32,
+    ) -> Result<(), VestFlowError> {
+        beneficiary.require_auth();
+
+        let schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(VestFlowError::NotFound)?;
+        assert!(beneficiary == schedule.beneficiary, "Not the beneficiary");
+
+        let mut delegation: ClaimDelegation = env
+            .storage()
+            .instance()
+            .get(&DelegationKey::Delegation(schedule_id, delegation_id))
+            .ok_or(VestFlowError::DelegationNotFound)?;
+
+        if delegation.revoked {
+            return Ok(());
+        }
+        delegation.revoked = true;
+
+        env.storage().instance().set(
+            &DelegationKey::Delegation(schedule_id, delegation_id),
+            &delegation,
+        );
+
+        env.events().publish(
+            (symbol_short!("dele_rev"), schedule_id, delegation_id),
+            (beneficiary, env.ledger().timestamp()),
+        );
+
+        Ok(())
+    }
+
+    /// Claim vested tokens on behalf of a beneficiary through a delegation.
+    ///
+    /// Tokens are transferred directly to `delegate`. The claim is capped by
+    /// whatever is currently claimable on the schedule and, if set, by the
+    /// delegation's remaining `max_amount - claimed_so_far` budget. The token
+    /// transfer and both counter updates (`delegation.claimed_so_far` and
+    /// `schedule.claimed_amount`) happen within this single invocation, so a
+    /// failed transfer reverts every state change here — there is no window
+    /// where the counters advance without the tokens actually moving.
+    ///
+    /// Soroban auth for this call is scoped to `(schedule_id, delegation_id)`
+    /// via `require_auth_for_args`, not a blanket `delegate.require_auth()`.
+    /// A signature authorizing a claim for one delegation cannot be replayed
+    /// against a different delegation or schedule, even one with the same
+    /// delegate address.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` if `schedule_id` does not exist.
+    /// Returns `DelegationNotFound` if `delegation_id` does not exist for this schedule.
+    /// Returns `NotDelegate` if `delegate` does not match the delegation's stored delegate.
+    /// Returns `DelegationRevoked` if the delegation has been revoked.
+    /// Returns `DelegationExpired` if past `expires_at_ledger`.
+    /// Returns `NothingToClaim` if nothing is currently claimable on the schedule.
+    /// Returns `DelegationExhausted` if the delegation's `max_amount` budget is used up.
+    pub fn claim_as_delegate(
+        env: Env,
+        delegate: Address,
+        schedule_id: u64,
+        delegation_id: u32,
+    ) -> Result<(), VestFlowError> {
+        let mut delegation: ClaimDelegation = env
+            .storage()
+            .instance()
+            .get(&DelegationKey::Delegation(schedule_id, delegation_id))
+            .ok_or(VestFlowError::DelegationNotFound)?;
+
+        if delegate != delegation.delegate {
+            return Err(VestFlowError::NotDelegate);
+        }
+
+        // Scope the delegate's authorization to this exact schedule +
+        // delegation, so it can never be reused for a different delegation.
+        delegate.require_auth_for_args(vec![
+            &env,
+            schedule_id.into_val(&env),
+            delegation_id.into_val(&env),
+        ]);
+
+        // Revocation-wins ordering: re-check state as the first thing after
+        // auth, before any claimable/transfer computation.
+        if delegation.revoked {
+            return Err(VestFlowError::DelegationRevoked);
+        }
+        if let Some(expiry) = delegation.expires_at_ledger {
+            if env.ledger().sequence() > expiry {
+                return Err(VestFlowError::DelegationExpired);
+            }
+        }
+
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(VestFlowError::NotFound)?;
+
+        let now = env.ledger().timestamp();
+        let claimable = schedule.claimable_at(now);
+        if claimable <= 0 {
+            return Err(VestFlowError::NothingToClaim);
+        }
+
+        let actual_claim = match delegation.max_amount {
+            Some(max) => {
+                let allowed = max - delegation.claimed_so_far;
+                claimable.min(allowed.max(0))
+            }
+            None => claimable,
+        };
+        if actual_claim <= 0 {
+            return Err(VestFlowError::DelegationExhausted);
+        }
+
+        delegation.claimed_so_far += actual_claim;
+        schedule.claimed_amount += actual_claim;
+
+        let contract_address = env.current_contract_address();
+        token::Client::new(&env, &schedule.token).transfer(
+            &contract_address,
+            &delegation.delegate,
+            &actual_claim,
+        );
+
+        env.storage().instance().set(
+            &DelegationKey::Delegation(schedule_id, delegation_id),
+            &delegation,
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::Schedule(schedule_id), &schedule);
+
+        env.events().publish(
+            (symbol_short!("dele_clm"), schedule_id, delegation_id),
+            (delegation.delegate.clone(), actual_claim, delegation.claimed_so_far),
+        );
+
+        Ok(())
+    }
+
+    /// Read a claim delegation by (schedule_id, delegation_id).
+    ///
+    /// Returns `None` if unknown rather than panicking.
+    pub fn get_delegation(
+        env: Env,
+        schedule_id: u64,
+        delegation_id: u32,
+    ) -> Option<ClaimDelegation> {
+        env.storage()
+            .instance()
+            .get(&DelegationKey::Delegation(schedule_id, delegation_id))
     }
 
     /// Destroy a schedule and reclaim storage for fully-claimed, irrevocable schedules.
@@ -5353,5 +5668,436 @@ mod test {
             client.get_proposal(&proposal_id).unwrap().state,
             ProposalState::Expired
         );
+    }
+
+    // ── Claim delegation ────────────────────────────────────────────────────
+
+    fn setup_linear_schedule(
+        env: &Env,
+        client: &VestFlowContractClient,
+        grantor: &Address,
+        beneficiary: &Address,
+        token_addr: &Address,
+        total: i128,
+        duration: u64,
+    ) -> u64 {
+        set_time(env, 0);
+        client.create_schedule(
+            grantor,
+            beneficiary,
+            token_addr,
+            &total,
+            &0,
+            &duration,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        )
+    }
+
+    #[test]
+    fn test_delegation_happy_path_claim_transfers_tokens() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let delegate = Address::generate(&env);
+
+        let id =
+            setup_linear_schedule(&env, &client, &grantor, &beneficiary, &token_addr, 1000, 1000);
+
+        let delegation_id = client.create_delegation(&beneficiary, &id, &delegate, &None, &None);
+        assert_eq!(delegation_id, 1);
+
+        set_time(&env, 500);
+        client.claim_as_delegate(&delegate, &id, &delegation_id);
+
+        let token_client = TokenClient::new(&env, &token_addr);
+        assert_eq!(token_client.balance(&delegate), 500);
+
+        let delegation = client.get_delegation(&id, &delegation_id).unwrap();
+        assert_eq!(delegation.claimed_so_far, 500);
+
+        let schedule = client.get_schedule(&id);
+        assert_eq!(schedule.claimed_amount, 500);
+    }
+
+    #[test]
+    fn test_delegation_amount_cap_across_two_calls() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let delegate = Address::generate(&env);
+
+        let id = setup_linear_schedule(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            10_000,
+            1000,
+        );
+
+        // Delegate may claim at most 300 total, ever.
+        let delegation_id =
+            client.create_delegation(&beneficiary, &id, &delegate, &Some(300), &None);
+
+        // At t=500, 5000 are vested. First claim should be capped at 300.
+        set_time(&env, 500);
+        client.claim_as_delegate(&delegate, &id, &delegation_id);
+        let token_client = TokenClient::new(&env, &token_addr);
+        assert_eq!(token_client.balance(&delegate), 300);
+        let delegation = client.get_delegation(&id, &delegation_id).unwrap();
+        assert_eq!(delegation.claimed_so_far, 300);
+
+        // A second claim should be fully exhausted — nothing left in the budget.
+        set_time(&env, 600);
+        let result = client.try_claim_as_delegate(&delegate, &id, &delegation_id);
+        assert_eq!(result, Err(Ok(VestFlowError::DelegationExhausted)));
+
+        // Balance and claimed_so_far are unchanged.
+        assert_eq!(token_client.balance(&delegate), 300);
+        let delegation = client.get_delegation(&id, &delegation_id).unwrap();
+        assert_eq!(delegation.claimed_so_far, 300);
+    }
+
+    #[test]
+    fn test_delegation_expiry_rejects_claim() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let delegate = Address::generate(&env);
+
+        let id =
+            setup_linear_schedule(&env, &client, &grantor, &beneficiary, &token_addr, 1000, 1000);
+
+        set_sequence(&env, 100);
+        let delegation_id =
+            client.create_delegation(&beneficiary, &id, &delegate, &None, &Some(200));
+
+        set_time(&env, 500);
+        set_sequence(&env, 201);
+        let result = client.try_claim_as_delegate(&delegate, &id, &delegation_id);
+        assert_eq!(result, Err(Ok(VestFlowError::DelegationExpired)));
+    }
+
+    #[test]
+    fn test_delegation_revoke_then_claim_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let delegate = Address::generate(&env);
+
+        let id =
+            setup_linear_schedule(&env, &client, &grantor, &beneficiary, &token_addr, 1000, 1000);
+        let delegation_id = client.create_delegation(&beneficiary, &id, &delegate, &None, &None);
+
+        client.revoke_delegation(&beneficiary, &id, &delegation_id);
+
+        set_time(&env, 500);
+        let result = client.try_claim_as_delegate(&delegate, &id, &delegation_id);
+        assert_eq!(result, Err(Ok(VestFlowError::DelegationRevoked)));
+    }
+
+    #[test]
+    fn test_delegation_revocation_wins_same_ledger_as_claim() {
+        // Revoke and claim happen "in the same ledger" (same timestamp/sequence,
+        // back-to-back invocations). The contract checks `revoked` as the first
+        // thing in claim_as_delegate, so whichever transaction the ledger
+        // applies first determines the outcome — here revoke is applied first,
+        // so it must win outright with no partial claim effect.
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let delegate = Address::generate(&env);
+
+        let id =
+            setup_linear_schedule(&env, &client, &grantor, &beneficiary, &token_addr, 1000, 1000);
+        let delegation_id = client.create_delegation(&beneficiary, &id, &delegate, &None, &None);
+
+        set_time(&env, 500);
+        // Same ledger: revoke first, then attempt the claim.
+        client.revoke_delegation(&beneficiary, &id, &delegation_id);
+        let result = client.try_claim_as_delegate(&delegate, &id, &delegation_id);
+
+        assert_eq!(result, Err(Ok(VestFlowError::DelegationRevoked)));
+        let token_client = TokenClient::new(&env, &token_addr);
+        assert_eq!(token_client.balance(&delegate), 0);
+        let schedule = client.get_schedule(&id);
+        assert_eq!(schedule.claimed_amount, 0);
+    }
+
+    #[test]
+    fn test_five_concurrent_delegations_track_independently() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        let id = setup_linear_schedule(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            10_000,
+            1000,
+        );
+
+        let delegates: [Address; 5] = [
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+        let mut delegation_ids: [u32; 5] = [0; 5];
+        for i in 0..5usize {
+            let delegate = &delegates[i];
+            let cap = 100i128 * (i as i128 + 1);
+            let did = client.create_delegation(&beneficiary, &id, delegate, &Some(cap), &None);
+            delegation_ids[i] = did;
+        }
+
+        // A 6th concurrent delegation must be rejected.
+        let sixth = Address::generate(&env);
+        let result = client.try_create_delegation(&beneficiary, &id, &sixth, &None, &None);
+        assert_eq!(result, Err(Ok(VestFlowError::TooManyDelegations)));
+
+        set_time(&env, 1000); // fully vested: all 10_000 claimable in principle
+
+        for i in 0..5usize {
+            let delegate = &delegates[i];
+            let did = delegation_ids[i];
+            let cap = 100i128 * (i as i128 + 1);
+            client.claim_as_delegate(delegate, &id, &did);
+            let delegation = client.get_delegation(&id, &did).unwrap();
+            assert_eq!(delegation.claimed_so_far, cap);
+
+            let token_client = TokenClient::new(&env, &token_addr);
+            assert_eq!(token_client.balance(delegate), cap);
+        }
+
+        // Total claimed on the schedule reflects the sum of all five delegate claims.
+        let schedule = client.get_schedule(&id);
+        assert_eq!(schedule.claimed_amount, 100 + 200 + 300 + 400 + 500);
+
+        // Revoking one frees a slot for a new delegation.
+        client.revoke_delegation(&beneficiary, &id, &delegation_ids[0]);
+        let seventh = client.create_delegation(&beneficiary, &id, &sixth, &None, &None);
+        assert!(seventh > 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_claim_as_delegate_wrong_delegate_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let delegate = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        let id =
+            setup_linear_schedule(&env, &client, &grantor, &beneficiary, &token_addr, 1000, 1000);
+        let delegation_id = client.create_delegation(&beneficiary, &id, &delegate, &None, &None);
+
+        set_time(&env, 500);
+        // `attacker` is not the stored delegate for this delegation, so this
+        // must be rejected even though attacker's own auth is mocked/valid.
+        client.claim_as_delegate(&attacker, &id, &delegation_id);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_claim_as_delegate_auth_not_signed_by_delegate_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let delegate = Address::generate(&env);
+
+        let id =
+            setup_linear_schedule(&env, &client, &grantor, &beneficiary, &token_addr, 1000, 1000);
+        let delegation_id = client.create_delegation(&beneficiary, &id, &delegate, &None, &None);
+
+        set_time(&env, 500);
+        // Only mock an auth entry for some other address — the delegate never
+        // actually authorized this invocation, so require_auth_for_args must fail.
+        let impostor = Address::generate(&env);
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &impostor,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "claim_as_delegate",
+                args: soroban_sdk::vec![
+                    &env,
+                    delegate.into_val(&env),
+                    id.into_val(&env),
+                    delegation_id.into_val(&env),
+                ],
+                sub_invokes: &[],
+            },
+        }]);
+        client.claim_as_delegate(&delegate, &id, &delegation_id);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_delegation_auth_scoped_cannot_reuse_across_delegations() {
+        // A delegate authorized for delegation A's exact args cannot use that
+        // same authorization to claim through delegation B, even for the same
+        // schedule and even with the same delegate address.
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let delegate = Address::generate(&env);
+
+        let id =
+            setup_linear_schedule(&env, &client, &grantor, &beneficiary, &token_addr, 1000, 1000);
+        let delegation_a = client.create_delegation(&beneficiary, &id, &delegate, &None, &None);
+        let delegation_b = client.create_delegation(&beneficiary, &id, &delegate, &None, &None);
+
+        set_time(&env, 500);
+        // Mock an auth entry scoped ONLY to (id, delegation_a) args.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &delegate,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "claim_as_delegate",
+                args: soroban_sdk::vec![
+                    &env,
+                    delegate.into_val(&env),
+                    id.into_val(&env),
+                    delegation_a.into_val(&env),
+                ],
+                sub_invokes: &[],
+            },
+        }]);
+
+        // Attempting to claim delegation_b with an auth entry scoped to
+        // delegation_a's args must fail.
+        client.claim_as_delegate(&delegate, &id, &delegation_b);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_delegate_cannot_revoke_schedule() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let delegate = Address::generate(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+        client.create_delegation(&beneficiary, &id, &delegate, &None, &None);
+
+        // Delegate has no revoke rights — revoke() only accepts the grantor's auth.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &delegate,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "revoke",
+                args: soroban_sdk::vec![&env, id.into_val(&env)],
+                sub_invokes: &[],
+            },
+        }]);
+        client.revoke(&id);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_delegate_cannot_transfer_beneficiary() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let delegate = Address::generate(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+        client.create_delegation(&beneficiary, &id, &delegate, &None, &None);
+
+        // Delegate has no beneficiary-transfer rights either.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &delegate,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "transfer_beneficiary",
+                args: soroban_sdk::vec![&env, id.into_val(&env), delegate.into_val(&env)],
+                sub_invokes: &[],
+            },
+        }]);
+        client.transfer_beneficiary(&id, &delegate);
+    }
+
+    #[test]
+    #[should_panic(expected = "Delegate must differ from beneficiary")]
+    fn test_create_delegation_rejects_self_delegation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        let id =
+            setup_linear_schedule(&env, &client, &grantor, &beneficiary, &token_addr, 1000, 1000);
+        client.create_delegation(&beneficiary, &id, &beneficiary, &None, &None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Not the beneficiary")]
+    fn test_create_delegation_rejects_non_beneficiary() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let delegate = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        let id =
+            setup_linear_schedule(&env, &client, &grantor, &beneficiary, &token_addr, 1000, 1000);
+        client.create_delegation(&attacker, &id, &delegate, &None, &None);
+    }
+
+    #[test]
+    fn test_revoke_delegation_is_idempotent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let delegate = Address::generate(&env);
+
+        let id =
+            setup_linear_schedule(&env, &client, &grantor, &beneficiary, &token_addr, 1000, 1000);
+        let delegation_id = client.create_delegation(&beneficiary, &id, &delegate, &None, &None);
+
+        client.revoke_delegation(&beneficiary, &id, &delegation_id);
+        client.revoke_delegation(&beneficiary, &id, &delegation_id);
+
+        let delegation = client.get_delegation(&id, &delegation_id).unwrap();
+        assert!(delegation.revoked);
+    }
+
+    #[test]
+    fn test_get_delegation_unknown_returns_none() {
+        let env = Env::default();
+        let (client, _, _, _, _) = setup(&env);
+        assert!(client.get_delegation(&999, &1).is_none());
     }
 }

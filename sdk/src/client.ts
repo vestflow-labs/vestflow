@@ -24,6 +24,8 @@ import type {
   ProposeScheduleParams,
   ScheduleProposal,
   ProposalState,
+  VestingKind,
+  ClaimDelegation,
 } from "./types";
 import { xlmToStroops } from "./utils";
 
@@ -231,6 +233,18 @@ export class VestflowClient {
       vested_at_revoke: BigInt(raw.vested_at_revoke ?? 0),
       paused_duration: Number(raw.paused_duration ?? 0),
       paused_at: Number(raw.paused_at ?? 0),
+    };
+  }
+
+  // ── Internal: parse delegation ────────────────────────────────────────────
+
+  private parseDelegation(raw: any): ClaimDelegation {
+    return {
+      delegate: raw.delegate?.toString() ?? "",
+      maxAmount: raw.max_amount == null ? null : BigInt(raw.max_amount),
+      expiresAtLedger: raw.expires_at_ledger == null ? null : Number(raw.expires_at_ledger),
+      claimedSoFar: BigInt(raw.claimed_so_far ?? 0),
+      revoked: Boolean(raw.revoked),
     };
   }
 
@@ -546,6 +560,31 @@ export class VestflowClient {
     const ids = Array.from({ length: count }, (_, i) => i + 1);
     const schedules = await this.getScheduleBatch(ids, publicKey);
     return schedules.filter(Boolean) as ScheduleData[];
+  }
+
+  /**
+   * Fetch a single claim delegation by (scheduleId, delegationId).
+   * Returns null if the delegation does not exist.
+   */
+  async getDelegation(
+    scheduleId: number,
+    delegationId: number,
+    publicKey?: string
+  ): Promise<ClaimDelegation | null> {
+    try {
+      const val = await this.simulate(
+        "get_delegation",
+        [
+          nativeToScVal(scheduleId, { type: "u64" }),
+          nativeToScVal(delegationId, { type: "u32" }),
+        ],
+        publicKey
+      );
+      const native = scValToNative(val);
+      return native == null ? null : this.parseDelegation(native);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -979,6 +1018,91 @@ export class VestflowClient {
       }
     }
     return "Pending";
+  }
+
+  /**
+   * Delegate claim rights on a schedule to a third-party address, optionally
+   * bounded by a total claimable amount and/or a ledger-sequence expiry.
+   *
+   * @param beneficiary - Current beneficiary's Stellar public key (signs the transaction).
+   * @param scheduleId - ID of the schedule to delegate from.
+   * @param delegate - Address that will be authorized to claim on the beneficiary's behalf.
+   * @param maxAmountStroops - Maximum total tokens the delegate may ever claim, or null for unlimited.
+   * @param expiresAtLedger - Ledger sequence after which the delegation stops working, or null for no expiry.
+   * @param signer - Function that signs the transaction XDR.
+   * @returns Transaction hash.
+   */
+  async createDelegation(
+    beneficiary: string,
+    scheduleId: number,
+    delegate: string,
+    maxAmountStroops: bigint | null,
+    expiresAtLedger: number | null,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    const args: xdr.ScVal[] = [
+      nativeToScVal(beneficiary, { type: "address" }),
+      nativeToScVal(scheduleId, { type: "u64" }),
+      nativeToScVal(delegate, { type: "address" }),
+      maxAmountStroops == null ? xdr.ScVal.scvVoid() : nativeToScVal(maxAmountStroops, { type: "i128" }),
+      expiresAtLedger == null ? xdr.ScVal.scvVoid() : nativeToScVal(expiresAtLedger, { type: "u32" }),
+    ];
+    return this.buildAndSend(beneficiary, "create_delegation", args, signer);
+  }
+
+  /**
+   * Revoke a claim delegation, immediately and permanently disabling it.
+   *
+   * @param beneficiary - Current beneficiary's Stellar public key (signs the transaction).
+   * @param scheduleId - ID of the schedule the delegation belongs to.
+   * @param delegationId - ID of the delegation to revoke.
+   * @param signer - Function that signs the transaction XDR.
+   * @returns Transaction hash.
+   */
+  async revokeDelegation(
+    beneficiary: string,
+    scheduleId: number,
+    delegationId: number,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    return this.buildAndSend(
+      beneficiary,
+      "revoke_delegation",
+      [
+        nativeToScVal(beneficiary, { type: "address" }),
+        nativeToScVal(scheduleId, { type: "u64" }),
+        nativeToScVal(delegationId, { type: "u32" }),
+      ],
+      signer
+    );
+  }
+
+  /**
+   * Claim vested tokens on behalf of a beneficiary through a delegation.
+   * Tokens are transferred directly to the delegate's own address.
+   *
+   * @param delegate - Delegate's Stellar public key (signs the transaction).
+   * @param scheduleId - ID of the schedule the delegation belongs to.
+   * @param delegationId - ID of the delegation to claim through.
+   * @param signer - Function that signs the transaction XDR.
+   * @returns Transaction hash.
+   */
+  async claimAsDelegate(
+    delegate: string,
+    scheduleId: number,
+    delegationId: number,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    return this.buildAndSend(
+      delegate,
+      "claim_as_delegate",
+      [
+        nativeToScVal(delegate, { type: "address" }),
+        nativeToScVal(scheduleId, { type: "u64" }),
+        nativeToScVal(delegationId, { type: "u32" }),
+      ],
+      signer
+    );
   }
 
   subscribeToSchedule(
