@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getCorsHeaders } from "@/lib/cors";
 import { verifyJWT } from "@/lib/jwt";
 
 const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -10,6 +11,9 @@ export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   if (!pathname.startsWith("/api/")) return NextResponse.next();
+  if (request.method === "OPTIONS") {
+    return new NextResponse(null, { status: 204, headers: getCorsHeaders() });
+  }
   if (!WRITE_METHODS.has(request.method)) return NextResponse.next();
   if (PUBLIC_PATHS.some((path) => pathname.startsWith(path))) return NextResponse.next();
 
