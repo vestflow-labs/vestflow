@@ -117,6 +117,10 @@ pub enum DataKey {
     DripsListCount,
     /// Active drips stream from funder to member for a list: (list_id, member).
     DripsStream(u64, Address),
+    /// Tokens earmarked for streaming by a funder for a token: (funder, token).
+    StreamsBalance(Address, Address),
+    /// Index of streams opened by a (funder, token): (list_id, member).
+    FunderStreams(Address, Address),
 }
 
 /// Storage keys for claim delegations, keyed separately from [`DataKey`] so
@@ -226,6 +230,13 @@ pub struct DripsStream {
     pub token: Address,
     pub amt_per_sec: i128,
     pub start_time: u64,
+    /// Tokens already drained (delivered) before the current active run, so
+    /// pause/resume keeps accounting without losing delivered amounts.
+    pub accumulated: i128,
+    /// Ledger timestamp when this stream was paused (0 = currently running).
+    /// While paused the effective drip rate is 0 and the balance stops
+    /// depleting; the receiver configuration is preserved.
+    pub paused_at: u64,
 }
 
 /// A contract WASM upgrade that has been announced on-chain but not yet executed.
@@ -3213,6 +3224,16 @@ impl VestFlowContract {
         let amt_per_sec = total_amt_per_sec / count;
         let start_time = env.ledger().timestamp();
 
+        // Track the earmarked balance and the stream index for this (funder,
+        // token) pair so pause/resume and balance views can account precisely.
+        if balance_top_up > 0 {
+            let balance_key = DataKey::StreamsBalance(funder.clone(), token.clone());
+            let funded: i128 = env.storage().instance().get(&balance_key).unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&balance_key, &funded.checked_add(balance_top_up).expect("Streams balance overflow"));
+        }
+
         for member in list.members.iter() {
             let stream = DripsStream {
                 funder: funder.clone(),
@@ -3221,10 +3242,24 @@ impl VestFlowContract {
                 token: token.clone(),
                 amt_per_sec,
                 start_time,
+                accumulated: 0,
+                paused_at: 0,
             };
             env.storage()
                 .instance()
-                .set(&DataKey::DripsStream(list_id, member), &stream);
+                .set(&DataKey::DripsStream(list_id, member.clone()), &stream);
+
+            let index_key = DataKey::FunderStreams(funder.clone(), token.clone());
+            let mut index: Vec<(u64, Address)> = env
+                .storage()
+                .instance()
+                .get(&index_key)
+                .unwrap_or_else(|| -> Vec<(u64, Address)> { Vec::new(&env) });
+            let entry = (list_id, member);
+            if !index.contains(&entry) {
+                index.push_back(entry);
+            }
+            env.storage().instance().set(&index_key, &index);
         }
 
         env.storage().instance().extend_ttl(
@@ -3241,6 +3276,134 @@ impl VestFlowContract {
     /// View helper to fetch a drips stream for a list member.
     pub fn get_drips_stream(env: Env, list_id: u64, member: Address) -> Option<DripsStream> {
         env.storage().instance().get(&DataKey::DripsStream(list_id, member))
+    }
+
+    /// Pause all outgoing streams of `account` for `token`.
+    ///
+    /// Every running stream is frozen at `now`: its active run is settled into
+    /// `accumulated`, `paused_at` is recorded, and the effective drip rate
+    /// becomes 0, so the funder's earmarked balance stops depleting. Each
+    /// stream's receiver configuration is preserved so `resume_streams` can
+    /// restore the original rate exactly.
+    pub fn pause_streams(env: Env, account: Address, token: Address) {
+        account.require_auth();
+        let now = env.ledger().timestamp();
+        let index: Vec<(u64, Address)> = env
+            .storage()
+            .instance()
+            .get(&DataKey::FunderStreams(account.clone(), token.clone()))
+            .unwrap_or_else(|| -> Vec<(u64, Address)> { Vec::new(&env) });
+        for (list_id, member) in index.iter() {
+            if let Some(mut stream) = env
+                .storage()
+                .instance()
+                .get::<DataKey, DripsStream>(&DataKey::DripsStream(list_id, member.clone()))
+            {
+                if stream.funder == account && stream.token == token && stream.paused_at == 0 {
+                    let elapsed: i128 = now.saturating_sub(stream.start_time) as i128;
+                    stream.accumulated = stream
+                        .accumulated
+                        .checked_add(
+                            elapsed.checked_mul(stream.amt_per_sec)
+                                .expect("Stream accumulation overflow"),
+                        )
+                        .expect("Stream accumulated overflow");
+                    stream.paused_at = now;
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::DripsStream(list_id, member.clone()), &stream);
+                    env.events().publish(
+                        (symbol_short!("strmpause"), account.clone(), token.clone()),
+                        list_id,
+                    );
+                }
+            }
+        }
+        env.storage().instance().extend_ttl(
+            INSTANCE_TTL_THRESHOLD_LEDGERS,
+            INSTANCE_TTL_EXTEND_TO_LEDGERS,
+        );
+    }
+
+    /// Resume `account`'s previously paused streams for `token`.
+    ///
+    /// Paused streams restart draining at their original `amt_per_sec` from a
+    /// fresh `start_time`, carrying forward the pre-pause `accumulated`
+    /// amount, so nothing delivered before the pause is lost or double-counted.
+    pub fn resume_streams(env: Env, account: Address, token: Address) {
+        account.require_auth();
+        let now = env.ledger().timestamp();
+        let index: Vec<(u64, Address)> = env
+            .storage()
+            .instance()
+            .get(&DataKey::FunderStreams(account.clone(), token.clone()))
+            .unwrap_or_else(|| -> Vec<(u64, Address)> { Vec::new(&env) });
+        for (list_id, member) in index.iter() {
+            if let Some(mut stream) = env
+                .storage()
+                .instance()
+                .get::<DataKey, DripsStream>(&DataKey::DripsStream(list_id, member.clone()))
+            {
+                if stream.funder == account && stream.token == token && stream.paused_at != 0 {
+                    stream.start_time = now;
+                    stream.paused_at = 0;
+                    env.storage()
+                        .instance()
+                        .set(&DataKey::DripsStream(list_id, member.clone()), &stream);
+                    env.events().publish(
+                        (symbol_short!("strmresm"), account.clone(), token.clone()),
+                        list_id,
+                    );
+                }
+            }
+        }
+        env.storage().instance().extend_ttl(
+            INSTANCE_TTL_THRESHOLD_LEDGERS,
+            INSTANCE_TTL_EXTEND_TO_LEDGERS,
+        );
+    }
+
+    /// The amount of `token` still available to `account` for streaming.
+    ///
+    /// Starts from the earmarked `StreamsBalance` and subtracts the effective
+    /// amount delivered (or committed) by every running stream, computed as
+    /// `accumulated + (now - start_time) * amt_per_sec`; paused streams
+    /// contribute only their `accumulated`, so a pause stops the depletion.
+    pub fn stream_balance(env: Env, account: Address, token: Address) -> i128 {
+        let now = env.ledger().timestamp();
+        let funded: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::StreamsBalance(account.clone(), token.clone()))
+            .unwrap_or(0);
+        let index: Vec<(u64, Address)> = env
+            .storage()
+            .instance()
+            .get(&DataKey::FunderStreams(account.clone(), token.clone()))
+            .unwrap_or_else(|| -> Vec<(u64, Address)> { Vec::new(&env) });
+        let mut delivered: i128 = 0;
+        for (list_id, member) in index.iter() {
+            if let Some(stream) = env
+                .storage()
+                .instance()
+                .get::<DataKey, DripsStream>(&DataKey::DripsStream(list_id, member.clone()))
+            {
+                if stream.funder == account && stream.token == token {
+                    let mut committed = stream.accumulated;
+                    if stream.paused_at == 0 {
+                        let elapsed: i128 = now.saturating_sub(stream.start_time) as i128;
+                        committed = committed
+                            .checked_add(
+                                elapsed.checked_mul(stream.amt_per_sec)
+                                    .expect("Stream balance overflow"),
+                            )
+                            .expect("Stream balance overflow");
+                    }
+                    delivered = delivered.checked_add(committed).expect("Stream balance overflow");
+                }
+            }
+        }
+        funded.saturating_sub(delivered).max(0)
     }
 }
 
@@ -7372,5 +7535,45 @@ mod test {
         let stream2 = client.get_drips_stream(&list_id, &member2).unwrap();
         assert_eq!(stream1_updated.amt_per_sec, 500);
         assert_eq!(stream2.amt_per_sec, 500);
+    }
+
+    #[test]
+    fn test_pause_resume_streams_preserves_balance_and_rate() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, owner, member1, token_address, _) = setup(&env);
+        let funder = owner.clone();
+
+        let list_id = client.create_drips_list(&owner, &soroban_sdk::String::from_str(&env, "Paused List"));
+        client.add_to_drips_list(&owner, &list_id, &member1);
+
+        set_time(&env, 1000);
+        client.fund_drips_list(&funder, &list_id, &token_address, &10, &1000);
+
+        // 50 seconds active -> 10/sec drains 500, leaving 500.
+        set_time(&env, 1050);
+        assert_eq!(client.stream_balance(&funder, &token_address), 500);
+
+        // Pause drains immediately.
+        client.pause_streams(&funder, &token_address);
+        let paused = client.get_drips_stream(&list_id, &member1).unwrap();
+        assert_ne!(paused.paused_at, 0);
+        assert_eq!(paused.accumulated, 500);
+
+        // 100 seconds paused -> balance stays flat, no new drips delivered.
+        set_time(&env, 1150);
+        assert_eq!(client.stream_balance(&funder, &token_address), 500);
+
+        // Resume at the original rate; accounting resumes from the pause point.
+        client.resume_streams(&funder, &token_address);
+        let resumed = client.get_drips_stream(&list_id, &member1).unwrap();
+        assert_eq!(resumed.paused_at, 0);
+        assert_eq!(resumed.amt_per_sec, 10);
+        assert_eq!(resumed.accumulated, 500);
+
+        // 50 more active seconds after resume -> another 500 drained, so the
+        // two active runs match continuous draining (10 * 100 = 1000).
+        set_time(&env, 1200);
+        assert_eq!(client.stream_balance(&funder, &token_address), 0);
     }
 }
