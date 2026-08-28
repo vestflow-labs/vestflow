@@ -82,6 +82,10 @@ pub enum VestFlowError {
     MergeTooManySchedules = 24,
     MergeTokenMismatch = 25,
     MergeOwnerMismatch = 26,
+    /// Split payout could not resolve the current owner of an NFT-gated receiver.
+    NftOwnerNotFound = 27,
+    /// `split` was called for an account with no splits configured.
+    NoSplits = 28,
 }
 
 #[contracttype]
@@ -117,6 +121,8 @@ pub enum DataKey {
     DripsListCount,
     /// Active drips stream from funder to member for a list: (list_id, member).
     DripsStream(u64, Address),
+    /// Proportional splits configuration for an account.
+    Splits(Address),
 }
 
 /// Storage keys for claim delegations, keyed separately from [`DataKey`] so
@@ -226,6 +232,36 @@ pub struct DripsStream {
     pub token: Address,
     pub amt_per_sec: i128,
     pub start_time: u64,
+}
+
+/// A proportional split receiver that routes its share to a fixed address.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AddressSplitsReceiver {
+    pub receiver: Address,
+    pub weight: u128,
+}
+
+/// A proportional split receiver gated by a non-fungible token.
+///
+/// Rather than paying a fixed address, the share is routed to whoever owns
+/// `token_id` on `nft_contract` at split time.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct NftSplitsReceiver {
+    pub nft_contract: Address,
+    pub token_id: u128,
+    pub weight: u128,
+}
+
+/// A single entry in an account's splits configuration.
+///
+/// Receivers can mix fixed addresses and NFT-gated receivers.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum SplitReceiver {
+    Address(AddressSplitsReceiver),
+    Nft(NftSplitsReceiver),
 }
 
 /// A contract WASM upgrade that has been announced on-chain but not yet executed.
@@ -3242,6 +3278,142 @@ impl VestFlowContract {
     pub fn get_drips_stream(env: Env, list_id: u64, member: Address) -> Option<DripsStream> {
         env.storage().instance().get(&DataKey::DripsStream(list_id, member))
     }
+
+    /// Configure `account`'s proportional splits.
+    ///
+    /// Accepts a mixed list of fixed-address receivers and NFT-gated
+    /// receivers. Only the account itself may configure its own splits.
+    /// Passing an empty list removes the account's splits configuration.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"Split receiver weight must be positive"` if any receiver
+    /// has a zero weight.
+    pub fn set_splits(env: Env, account: Address, receivers: Vec<SplitReceiver>) {
+        account.require_auth();
+        for receiver in receivers.iter() {
+            let weight = match &receiver {
+                SplitReceiver::Address(receiver) => receiver.weight,
+                SplitReceiver::Nft(receiver) => receiver.weight,
+            };
+            assert!(weight > 0, "Split receiver weight must be positive");
+        }
+        if receivers.is_empty() {
+            env.storage().instance().remove(&DataKey::Splits(account.clone()));
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::Splits(account.clone()), &receivers);
+            env.storage().instance().extend_ttl(
+                INSTANCE_TTL_THRESHOLD_LEDGERS,
+                INSTANCE_TTL_EXTEND_TO_LEDGERS,
+            );
+        }
+        env.events().publish(
+            (symbol_short!("split_set"), account),
+            receivers.len(),
+        );
+    }
+
+    /// View helper returning the account's current splits configuration.
+    ///
+    /// Returns an empty list when the account has no splits configured.
+    pub fn splits(env: Env, account: Address) -> Vec<SplitReceiver> {
+        env.storage()
+            .instance()
+            .get::<_, Vec<SplitReceiver>>(&DataKey::Splits(account.clone()))
+            .unwrap_or_else(|| vec![&env])
+    }
+
+    /// Build an NFT-gated split receiver for `token_id` using the NFT
+    /// contract configured via [`initialize_nft_contract`].
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"NFT contract not initialized"` when no NFT contract has
+    /// been configured yet.
+    pub fn nft_split(env: Env, token_id: u128, weight: u128) -> NftSplitsReceiver {
+        let nft_contract = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::NftContract)
+            .expect("NFT contract not initialized");
+        NftSplitsReceiver {
+            nft_contract,
+            token_id,
+            weight,
+        }
+    }
+
+    /// Distribute `amount` of `token` from `account` to the account's
+    /// configured splits receivers, weighting each share proportionally.
+    ///
+    /// Shares for NFT-gated receivers are paid to whoever owns the referenced
+    /// NFT at split time (`owner_of`), so the recipient may differ between
+    /// calls when the NFT changes hands.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NoSplits` if `account` has no splits configured.
+    /// Returns `NftOwnerNotFound` if the owner of an NFT-gated receiver cannot
+    /// be resolved.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"Amount must be positive"` if `amount` = 0.
+    pub fn split(
+        env: Env,
+        account: Address,
+        token: Address,
+        amount: i128,
+    ) -> Result<(), VestFlowError> {
+        account.require_auth();
+        assert!(amount > 0, "Amount must be positive");
+
+        let receivers = Self::splits(env.clone(), account.clone());
+        if receivers.is_empty() {
+            return Err(VestFlowError::NoSplits);
+        }
+
+        let total_weight: u128 = receivers
+            .iter()
+            .map(|receiver| match &receiver {
+                SplitReceiver::Address(receiver) => receiver.weight,
+                SplitReceiver::Nft(receiver) => receiver.weight,
+            })
+            .sum();
+        assert!(total_weight > 0, "Total split weight must be positive");
+
+        let contract_address = env.current_contract_address();
+        let amount_units = amount as u128;
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&account, &contract_address, &amount);
+
+        for receiver in receivers.iter() {
+            let (recipient, weight) = match &receiver {
+                SplitReceiver::Address(receiver) => (receiver.receiver.clone(), receiver.weight),
+                SplitReceiver::Nft(receiver) => {
+                    let owner = resolve_nft_owner(&env, &receiver.nft_contract, receiver.token_id)?;
+                    (owner, receiver.weight)
+                }
+            };
+            let share = amount_units
+                .checked_mul(weight)
+                .expect("Split share overflow")
+                .checked_div(total_weight)
+                .expect("Split share computation failed") as i128;
+            if share > 0 {
+                token_client.transfer(&contract_address, &recipient, &share);
+            }
+        }
+
+        env.storage().instance().extend_ttl(
+            INSTANCE_TTL_THRESHOLD_LEDGERS,
+            INSTANCE_TTL_EXTEND_TO_LEDGERS,
+        );
+
+        Ok(())
+    }
 }
 
 fn load_proposal(env: &Env, proposal_id: u64) -> Result<ScheduleProposal, VestFlowError> {
@@ -3426,6 +3598,25 @@ fn validate_token_sac(env: &Env, token: &Address) -> Result<(), VestFlowError> {
     match env.try_invoke_contract::<soroban_sdk::Val, VestFlowError>(token, &func, args) {
         Ok(_) => Ok(()),
         Err(_) => Err(VestFlowError::InvalidToken),
+    }
+}
+
+/// Resolve the current owner of `token_id` on the given NFT contract by
+/// invoking its `owner_of` entry point.
+///
+/// Owners are read live at split time so NFT-gated shares always go to the
+/// current holder. Unresolvable (or non-NFT) contracts yield
+/// `VestFlowError::NftOwnerNotFound`.
+fn resolve_nft_owner(
+    env: &Env,
+    nft_contract: &Address,
+    token_id: u128,
+) -> Result<Address, VestFlowError> {
+    let func = soroban_sdk::Symbol::new(env, "owner_of");
+    let args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::vec![env, token_id.into_val(env)];
+    match env.try_invoke_contract::<Address, VestFlowError>(nft_contract, &func, args) {
+        Ok(Ok(owner)) => Ok(owner),
+        _ => Err(VestFlowError::NftOwnerNotFound),
     }
 }
 
@@ -7372,5 +7563,199 @@ mod test {
         let stream2 = client.get_drips_stream(&list_id, &member2).unwrap();
         assert_eq!(stream1_updated.amt_per_sec, 500);
         assert_eq!(stream2.amt_per_sec, 500);
+    }
+
+    /// Minimal non-fungible token used to exercise NFT-gated splits.
+    #[contract]
+    struct MockNft;
+
+    #[contracttype]
+    #[derive(Clone)]
+    enum MockNftKey {
+        Owner(u128),
+    }
+
+    #[contractimpl]
+    impl MockNft {
+        pub fn owner_of(env: Env, token_id: u128) -> Address {
+            env.storage()
+                .instance()
+                .get(&MockNftKey::Owner(token_id))
+                .unwrap_or_else(|| env.current_contract_address())
+        }
+
+        pub fn transfer(env: Env, to: Address, token_id: u128) {
+            env.storage().instance().set(&MockNftKey::Owner(token_id), &to);
+        }
+
+        pub fn mint(env: Env, to: Address, token_id: u128) {
+            env.storage().instance().set(&MockNftKey::Owner(token_id), &to);
+        }
+    }
+
+    fn register_nft(env: &Env, owner: &Address, token_id: u128) -> Address {
+        let nft_contract_id = env.register(MockNft, ());
+        let nft_address = nft_contract_id.clone();
+        MockNftClient::new(env, &nft_contract_id).mint(owner, &token_id);
+        nft_address
+    }
+
+    #[test]
+    fn test_set_splits_stores_mixed_receivers() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, account, _, _, _) = setup(&env);
+        let receiver = Address::generate(&env);
+        let nft_contract = Address::generate(&env);
+
+        client.set_splits(
+            &account,
+            &soroban_sdk::vec![
+                &env,
+                SplitReceiver::Address(AddressSplitsReceiver {
+                    receiver: receiver.clone(),
+                    weight: 1,
+                }),
+                SplitReceiver::Nft(NftSplitsReceiver {
+                    nft_contract: nft_contract.clone(),
+                    token_id: 7,
+                    weight: 3,
+                }),
+            ],
+        );
+
+        let stored = client.splits(&account);
+        assert_eq!(stored.len(), 2);
+        match stored.get(0).unwrap() {
+            SplitReceiver::Address(entry) => {
+                assert_eq!(entry.receiver, receiver);
+                assert_eq!(entry.weight, 1);
+            }
+            SplitReceiver::Nft(_) => panic!("expected address receiver first"),
+        }
+        match stored.get(1).unwrap() {
+            SplitReceiver::Address(_) => panic!("expected NFT receiver second"),
+            SplitReceiver::Nft(entry) => {
+                assert_eq!(entry.nft_contract, nft_contract);
+                assert_eq!(entry.token_id, 7);
+                assert_eq!(entry.weight, 3);
+            }
+        }
+
+        // Clearing with an empty list removes the configuration.
+        client.set_splits(&account, &soroban_sdk::vec![&env]);
+        assert_eq!(client.splits(&account).len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Split receiver weight must be positive")]
+    fn test_set_splits_rejects_zero_weight() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, account, _, _, _) = setup(&env);
+        let receiver = Address::generate(&env);
+
+        client.set_splits(
+            &account,
+            &soroban_sdk::vec![
+                &env,
+                SplitReceiver::Address(AddressSplitsReceiver {
+                    receiver,
+                    weight: 0,
+                }),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_split_nft_receiver() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, account, _, token_address, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_address);
+        let owner = Address::generate(&env);
+
+        // NFT-gated receiver: the share is paid to whoever owns the token.
+        let nft_contract = register_nft(&env, &owner, 1);
+        client.set_splits(
+            &account,
+            &soroban_sdk::vec![
+                &env,
+                SplitReceiver::Nft(NftSplitsReceiver {
+                    nft_contract,
+                    token_id: 1,
+                    weight: 1,
+                }),
+            ],
+        );
+
+        client.split(&account, &token_address, &1000);
+        assert_eq!(token.balance(&owner), 1000);
+    }
+
+    #[test]
+    fn test_split_nft_receiver_ownership_transfer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, account, _, token_address, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_address);
+        let owner_a = Address::generate(&env);
+        let owner_b = Address::generate(&env);
+
+        let nft_contract = register_nft(&env, &owner_a, 1);
+        client.set_splits(
+            &account,
+            &soroban_sdk::vec![
+                &env,
+                SplitReceiver::Nft(NftSplitsReceiver {
+                    nft_contract: nft_contract.clone(),
+                    token_id: 1,
+                    weight: 1,
+                }),
+            ],
+        );
+
+        // Owner A collects while holding the NFT.
+        client.split(&account, &token_address, &1000);
+        assert_eq!(token.balance(&owner_a), 1000);
+        assert_eq!(token.balance(&owner_b), 0);
+
+        // NFT changes hands -> the next split pays Owner B instead.
+        MockNftClient::new(&env, &nft_contract).transfer(&owner_b, &1);
+        client.split(&account, &token_address, &500);
+        assert_eq!(token.balance(&owner_a), 1000);
+        assert_eq!(token.balance(&owner_b), 500);
+    }
+
+    #[test]
+    fn test_split_mixed_receivers() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, account, _, token_address, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_address);
+        let address_receiver = Address::generate(&env);
+        let nft_owner = Address::generate(&env);
+
+        let nft_contract = register_nft(&env, &nft_owner, 42);
+        client.set_splits(
+            &account,
+            &soroban_sdk::vec![
+                &env,
+                SplitReceiver::Address(AddressSplitsReceiver {
+                    receiver: address_receiver.clone(),
+                    weight: 1,
+                }),
+                SplitReceiver::Nft(NftSplitsReceiver {
+                    nft_contract,
+                    token_id: 42,
+                    weight: 3,
+                }),
+            ],
+        );
+
+        // 25% to the address receiver, 75% to the NFT owner (3:1 ratio).
+        client.split(&account, &token_address, &4000);
+        assert_eq!(token.balance(&address_receiver), 1000);
+        assert_eq!(token.balance(&nft_owner), 3000);
     }
 }
