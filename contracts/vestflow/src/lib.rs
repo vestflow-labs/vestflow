@@ -117,6 +117,10 @@ pub enum DataKey {
     DripsListCount,
     /// Active drips stream from funder to member for a list: (list_id, member).
     DripsStream(u64, Address),
+    /// Token-specific streams configuration + accounting: (funder, token).
+    AccountTokenStreams(Address, Address),
+    /// Tokens a receiver has earned from streams but not yet collected: (receiver, token).
+    Accrued(Address, Address),
 }
 
 /// Storage keys for claim delegations, keyed separately from [`DataKey`] so
@@ -226,6 +230,34 @@ pub struct DripsStream {
     pub token: Address,
     pub amt_per_sec: i128,
     pub start_time: u64,
+}
+
+/// A single outgoing stream target in an account's token-specific
+/// configuration.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamReceiver {
+    pub receiver: Address,
+    pub amt_per_sec: i128,
+}
+
+/// Token-specific streams state for one (funder, token) pair.
+///
+/// Multiple receivers can stream from the same token simultaneously, and each
+/// (funder, token) pair keeps its own independent balance, rate, and
+/// settlement pointer so different tokens never interfere with each other.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccountTokenStreams {
+    pub funder: Address,
+    pub token: Address,
+    pub receivers: Vec<StreamReceiver>,
+    /// Tokens still available in the contract to stream for this pair.
+    pub balance: i128,
+    /// Ledger timestamp when this pair's stream configuration started.
+    pub start_time: u64,
+    /// Ledger timestamp accounting last settled to for this pair.
+    pub last_update: u64,
 }
 
 /// A contract WASM upgrade that has been announced on-chain but not yet executed.
@@ -3241,6 +3273,198 @@ impl VestFlowContract {
     /// View helper to fetch a drips stream for a list member.
     pub fn get_drips_stream(env: Env, list_id: u64, member: Address) -> Option<DripsStream> {
         env.storage().instance().get(&DataKey::DripsStream(list_id, member))
+    }
+
+    /// View helper fetching the streams configuration for a (funder, token) pair.
+    pub fn get_account_token_streams(
+        env: Env,
+        funder: Address,
+        token: Address,
+    ) -> Option<AccountTokenStreams> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AccountTokenStreams(funder, token))
+    }
+
+    /// Open or update a token-specific streams configuration for `funder`.
+    ///
+    /// Every receiver on `receivers` streams from the same `token` at its own
+    /// per-second rate. Each (funder, token) pair tracks balance, rate, and
+    /// settlement independently, so multiple tokens can stream simultaneously
+    /// without interfering. `top_up` amount of `token` is pulled from the
+    /// funder into the contract and added to the pair's streamable balance.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"At least one stream receiver required"` if `receivers` is
+    /// empty, or `"Top-up must be non-negative"` if `top_up` < 0.
+    pub fn set_stream(
+        env: Env,
+        funder: Address,
+        token: Address,
+        receivers: Vec<StreamReceiver>,
+        top_up: i128,
+    ) {
+        funder.require_auth();
+        assert!(!receivers.is_empty(), "At least one stream receiver required");
+        assert!(top_up >= 0, "Top-up must be non-negative");
+
+        let now = env.ledger().timestamp();
+        let previous: Option<AccountTokenStreams> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccountTokenStreams(funder.clone(), token.clone()));
+        let balance = previous
+            .map(|config| config.balance)
+            .unwrap_or(0)
+            .checked_add(top_up)
+            .expect("Stream balance overflow");
+
+        if top_up > 0 {
+            token::Client::new(&env, &token).transfer(
+                &funder,
+                &env.current_contract_address(),
+                &top_up,
+            );
+        }
+
+        let config = AccountTokenStreams {
+            funder: funder.clone(),
+            token: token.clone(),
+            receivers,
+            balance,
+            start_time: now,
+            last_update: now,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::AccountTokenStreams(funder.clone(), token.clone()), &config);
+        env.storage().instance().extend_ttl(
+            INSTANCE_TTL_THRESHOLD_LEDGERS,
+            INSTANCE_TTL_EXTEND_TO_LEDGERS,
+        );
+        env.events().publish(
+            (symbol_short!("strm_set"), funder, token),
+            env.ledger().timestamp(),
+        );
+    }
+
+    /// Settle the accrued drips for a (funder, token) pair.
+    ///
+    /// Advances the pair's independent settlement pointer to `now` and credits
+    /// every receiver in `receivers` with the drips that accrued since the
+    /// last settlement, weighted by each receiver's `amt_per_sec`. The total
+    /// settled is capped by `max` and by the pair's remaining `balance`.
+    /// Returns the total newly accrued amount.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"Streams not configured"` if the funder has no streams for
+    /// this token, or `"Total stream rate must be positive"` if the summed
+    /// receiver rates are zero.
+    pub fn receive_streams(
+        env: Env,
+        funder: Address,
+        token: Address,
+        receivers: Vec<StreamReceiver>,
+        max: i128,
+    ) -> i128 {
+        let mut config: AccountTokenStreams = env
+            .storage()
+            .instance()
+            .get(&DataKey::AccountTokenStreams(funder.clone(), token.clone()))
+            .expect("Streams not configured");
+
+        let now = env.ledger().timestamp();
+        let elapsed: i128 = now.saturating_sub(config.last_update) as i128;
+        if elapsed == 0 || config.balance == 0 || receivers.is_empty() {
+            return 0;
+        }
+
+        let total_rate: i128 = receivers
+            .iter()
+            .map(|receiver| receiver.amt_per_sec)
+            .sum();
+        assert!(total_rate > 0, "Total stream rate must be positive");
+
+        let gross: i128 = elapsed
+            .checked_mul(total_rate)
+            .expect("Stream settlement overflow");
+        let capped: i128 = gross
+            .min(max)
+            .min(config.balance);
+
+        config.last_update = env.ledger().timestamp();
+        config.balance = config
+            .balance
+            .checked_sub(capped)
+            .expect("Stream balance underflow");
+
+        for receiver in receivers.iter() {
+            let share = if gross > 0 {
+                (elapsed * receiver.amt_per_sec)
+                    .checked_mul(capped)
+                    .expect("Stream share overflow")
+                    .checked_div(gross)
+                    .expect("Stream share computation failed")
+            } else {
+                0
+            };
+            if share > 0 {
+                let key = DataKey::Accrued(receiver.receiver.clone(), token.clone());
+                let accrued: i128 = env.storage().instance().get(&key).unwrap_or(0);
+                env.storage()
+                    .instance()
+                    .set(&key, &accrued.checked_add(share).expect("Accrued overflow"));
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::AccountTokenStreams(funder.clone(), token.clone()), &config);
+        env.storage().instance().extend_ttl(
+            INSTANCE_TTL_THRESHOLD_LEDGERS,
+            INSTANCE_TTL_EXTEND_TO_LEDGERS,
+        );
+        env.events().publish(
+            (symbol_short!("strm_recv"), funder, token),
+            capped,
+        );
+
+        capped
+    }
+
+    /// Collect `amount` of `token` earned by `account` from streams.
+    ///
+    /// Transfers from the contract's rolled-up balance up to `amount`, never
+    /// exceeding the account's accrued (and not yet collected) earnings for
+    /// this token. Returns the amount actually transferred.
+    pub fn collect(env: Env, account: Address, token: Address, amount: i128) -> i128 {
+        account.require_auth();
+
+        let key = DataKey::Accrued(account.clone(), token.clone());
+        let accrued: i128 = env.storage().instance().get(&key).unwrap_or(0);
+        let transfer_amount = accrued.min(amount);
+        if transfer_amount > 0 {
+            token::Client::new(&env, &token).transfer(
+                &env.current_contract_address(),
+                &account,
+                &transfer_amount,
+            );
+            env.storage()
+                .instance()
+                .set(&key, &accrued.checked_sub(transfer_amount).expect("Accrued underflow"));
+            env.storage().instance().extend_ttl(
+                INSTANCE_TTL_THRESHOLD_LEDGERS,
+                INSTANCE_TTL_EXTEND_TO_LEDGERS,
+            );
+        }
+        env.events().publish(
+            (symbol_short!("strm_col"), account, token),
+            transfer_amount,
+        );
+
+        transfer_amount
     }
 }
 
@@ -7372,5 +7596,139 @@ mod test {
         let stream2 = client.get_drips_stream(&list_id, &member2).unwrap();
         assert_eq!(stream1_updated.amt_per_sec, 500);
         assert_eq!(stream2.amt_per_sec, 500);
+    }
+
+    #[test]
+    fn test_set_stream_two_tokens_independent_settlement_and_collect() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, funder, _, token_address, _) = setup(&env);
+
+        // Second token, funded independently of the first.
+        let second_token_admin = Address::generate(&env);
+        let second_token_contract =
+            env.register_stellar_asset_contract_v2(second_token_admin.clone());
+        let second_token_address = second_token_contract.address();
+        StellarAssetClient::new(&env, &second_token_address)
+            .mock_all_auths()
+            .mint(&funder, &10_000);
+
+        let token_a = TokenClient::new(&env, &token_address);
+        let token_b = TokenClient::new(&env, &second_token_address);
+        let receiver_a = Address::generate(&env);
+        let receiver_b = Address::generate(&env);
+
+        set_time(&env, 1000);
+        client.set_stream(
+            &funder,
+            &token_address,
+            &soroban_sdk::vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver_a.clone(),
+                    amt_per_sec: 10,
+                },
+            ],
+            &1000,
+        );
+        client.set_stream(
+            &funder,
+            &second_token_address,
+            &soroban_sdk::vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver_b.clone(),
+                    amt_per_sec: 5,
+                },
+            ],
+            &2000,
+        );
+
+        // Both configurations exist and are keyed independently.
+        assert_eq!(
+            client
+                .get_account_token_streams(&funder, &token_address)
+                .unwrap()
+                .balance,
+            1000
+        );
+        assert_eq!(
+            client
+                .get_account_token_streams(&funder, &second_token_address)
+                .unwrap()
+                .balance,
+            2000
+        );
+
+        // Let 100 seconds elapse; each token settles independently and only
+        // credits its own receiver.
+        set_time(&env, 1100);
+        let swept_a = client.receive_streams(
+            &funder,
+            &token_address,
+            &soroban_sdk::vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver_a.clone(),
+                    amt_per_sec: 10,
+                },
+            ],
+            &i128::MAX,
+        );
+        let swept_b = client.receive_streams(
+            &funder,
+            &second_token_address,
+            &soroban_sdk::vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver_b.clone(),
+                    amt_per_sec: 5,
+                },
+            ],
+            &i128::MAX,
+        );
+
+        // Independent settlement: 100s * 10/sec = 1000 for A, 100s * 5/sec = 500 for B.
+        assert_eq!(swept_a, 1000);
+        assert_eq!(swept_b, 500);
+        assert_eq!(token_a.balance(&receiver_a), 0);
+        assert_eq!(token_b.balance(&receiver_b), 0);
+
+        // Independent collect: collecting A's share leaves B (and its balance) untouched.
+        let collected_a = client.collect(&receiver_a, &token_address, &i128::MAX);
+        assert_eq!(collected_a, 1000);
+        assert_eq!(token_a.balance(&receiver_a), 1000);
+
+        let collected_b = client.collect(&receiver_b, &second_token_address, &i128::MAX);
+        assert_eq!(collected_b, 500);
+        assert_eq!(token_b.balance(&receiver_b), 500);
+
+        // Balances drained independently.
+        assert_eq!(
+            client
+                .get_account_token_streams(&funder, &token_address)
+                .unwrap()
+                .balance,
+            0
+        );
+        assert_eq!(
+            client
+                .get_account_token_streams(&funder, &second_token_address)
+                .unwrap()
+                .balance,
+            1500
+        );
+
+        // Double-collect is a no-op.
+        assert_eq!(client.collect(&receiver_a, &token_address, &100), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "At least one stream receiver required")]
+    fn test_set_stream_rejects_empty_receivers() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, funder, _, token_address, _) = setup(&env);
+        client.set_stream(&funder, &token_address, &soroban_sdk::vec![&env], &100);
     }
 }
