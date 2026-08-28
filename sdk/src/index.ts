@@ -14,6 +14,8 @@ export {
   formatDate,
   parseContractError,
   formatSchedule,
+  TOTAL_SPLITS_WEIGHT,
+  MAX_SPLITS_RECEIVERS,
 } from "./utils";
 export type { ScheduleSummary } from "./utils";
 export { isScheduleRevoked } from "./types";
@@ -29,4 +31,7 @@ export type {
   GradedMilestone,
   VestingKind,
   ClaimDelegation,
+  SplitsReceiver,
+  SetSplitsParams,
+  TransactionResult,
 } from "./types";

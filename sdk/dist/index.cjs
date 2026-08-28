@@ -1,176 +1,177 @@
-// ===========================================================================
-// VestFlow SDK — VestflowClient
-// Issue #95: @vestflow/sdk
-//
-// Main client class for interacting with the VestFlow Soroban contract.
-// Supports both read-only simulations and write transactions via Freighter.
-// ===========================================================================
+'use strict';
 
-import {
-  Contract,
-  Networks,
-  TransactionBuilder,
-  BASE_FEE,
-  rpc as StellarRpc,
-  xdr,
-  nativeToScVal,
-  scValToNative,
-} from "@stellar/stellar-sdk";
-import type {
-  ScheduleData,
-  VestflowConfig,
-  CreateScheduleParams,
-  CreateGradedScheduleParams,
-  ProposeScheduleParams,
-  ScheduleProposal,
-  ProposalState,
-  VestingKind,
-  ClaimDelegation,
-  SplitsReceiver,
-  SetSplitsParams,
-  TransactionResult,
-} from "./types";
-import { xlmToStroops, TOTAL_SPLITS_WEIGHT, MAX_SPLITS_RECEIVERS } from "./utils";
+var stellarSdk = require('@stellar/stellar-sdk');
 
-// ---------------------------------------------------------------------------
-// Defaults
-// ---------------------------------------------------------------------------
+// src/client.ts
 
-const DEFAULTS = {
+// src/utils.ts
+function xlmToStroops(amountXlm) {
+  const normalized = amountXlm.trim();
+  if (!/^[0-9]+(?:\.[0-9]+)?$/.test(normalized)) {
+    throw new Error("Invalid amount");
+  }
+  const [whole, fraction = ""] = normalized.split(".");
+  const fractionPadded = (fraction + "0000000").slice(0, 7);
+  return BigInt(whole) * 10000000n + BigInt(fractionPadded);
+}
+function stroopsToXlm(stroops) {
+  return (Number(stroops) / 1e7).toLocaleString(void 0, {
+    maximumFractionDigits: 4
+  });
+}
+function truncate(addr, prefixLen = 6, suffixLen = 4) {
+  if (addr.length <= prefixLen + suffixLen + 3) return addr;
+  return `${addr.slice(0, prefixLen)}...${addr.slice(-suffixLen)}`;
+}
+function vestingProgress(schedule, now) {
+  if (now < schedule.start_time) return 0;
+  const elapsed = now - schedule.start_time;
+  return Math.min(100, Math.round(elapsed / schedule.duration * 100));
+}
+function formatDate(ts) {
+  return new Date(ts * 1e3).toLocaleDateString(void 0, {
+    year: "numeric",
+    month: "short",
+    day: "numeric"
+  });
+}
+function parseContractError(e) {
+  const msg = e.message;
+  if (msg.includes("Nothing to claim yet"))
+    return "No tokens are available to claim yet.";
+  if (msg.includes("Schedule is not revocable"))
+    return "This schedule cannot be revoked.";
+  if (msg.includes("Already revoked"))
+    return "This schedule has already been revoked.";
+  if (msg.includes("Not the grantor"))
+    return "Only the grantor can perform this action.";
+  if (msg.includes("Not the beneficiary"))
+    return "Only the beneficiary can claim tokens.";
+  if (msg.includes("Schedule not found"))
+    return "Schedule not found.";
+  if (msg.includes("Insufficient balance"))
+    return "Insufficient balance to complete this action.";
+  if (msg.includes("Schedule has ended"))
+    return "This vesting schedule has already ended.";
+  if (msg.includes("Start time in the past"))
+    return "The start time must be in the future.";
+  if (msg.includes("Duration too short") || msg.includes("DurationTooShort") || msg.includes("Contract error: 15") || msg.includes("Contract, #15"))
+    return "The vesting duration is too short.";
+  if (msg.includes("Beneficiary must differ from grantor"))
+    return "The beneficiary must be a different address from the grantor.";
+  if (msg.includes("Amount must be positive"))
+    return "The vesting amount must be greater than zero.";
+  if (msg.includes("Duration must be positive"))
+    return "The vesting duration must be greater than zero.";
+  if (msg.includes("Cliff cannot exceed duration"))
+    return "The cliff period cannot be longer than the total vesting duration.";
+  return msg;
+}
+function formatSchedule(s, now = Math.floor(Date.now() / 1e3)) {
+  const endTime = s.start_time + s.duration;
+  const cliffTime = s.cliff_duration > 0 ? s.start_time + s.cliff_duration : null;
+  let status;
+  if (s.revoked) {
+    status = "Revoked";
+  } else if (s.paused) {
+    status = "Paused";
+  } else if (now >= endTime) {
+    status = "Completed";
+  } else {
+    status = "Active";
+  }
+  const elapsed = Math.max(0, now - s.start_time);
+  const progressPct = s.duration > 0 ? Math.min(100, Math.round(elapsed / s.duration * 100)) : 100;
+  const remaining = s.total_amount - s.claimed;
+  return {
+    id: String(s.id),
+    grantor: truncate(s.grantor),
+    beneficiary: truncate(s.beneficiary),
+    totalAmountXlm: stroopsToXlm(s.total_amount),
+    claimedXlm: stroopsToXlm(s.claimed),
+    remainingXlm: stroopsToXlm(remaining >= 0n ? remaining : 0n),
+    startDate: formatDate(s.start_time),
+    endDate: formatDate(endTime),
+    cliffDate: cliffTime !== null ? formatDate(cliffTime) : null,
+    kind: s.kind,
+    status,
+    progressPct
+  };
+}
+var TOTAL_SPLITS_WEIGHT = 1e4;
+var MAX_SPLITS_RECEIVERS = 20;
+
+// src/client.ts
+var DEFAULTS = {
   testnet: {
     contractId: "CCZ6AE75C27DMB3SOIHK7WZSBUG3NQPVLHSVEBQ2FSAEVGRJ5TXAZWCX",
     rpcUrl: "https://soroban-testnet.stellar.org",
     nativeToken: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
-    networkPassphrase: Networks.TESTNET,
+    networkPassphrase: stellarSdk.Networks.TESTNET
   },
   mainnet: {
     contractId: "",
     rpcUrl: "https://mainnet.sorobanrpc.com",
     nativeToken: "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA",
-    networkPassphrase: Networks.PUBLIC,
-  },
-} as const;
-
-// Well-known funded testnet account used as fallback source for read-only
-// simulations when no wallet is connected.
-const FALLBACK_ACCOUNT = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
-
-// ---------------------------------------------------------------------------
-// VestflowClient
-// ---------------------------------------------------------------------------
-
-/**
- * Client for interacting with the VestFlow vesting contract on Stellar/Soroban.
- *
- * @example
- * ```ts
- * import { VestflowClient } from "@vestflow/sdk";
- *
- * const client = new VestflowClient({ network: "testnet" });
- *
- * // Read a schedule
- * const schedule = await client.getSchedule(1);
- *
- * // Create a schedule (requires Freighter)
- * const hash = await client.createSchedule({
- *   grantor: "G...",
- *   beneficiary: "G...",
- *   totalAmountXlm: "1000",
- *   startTime: Math.floor(Date.now() / 1000),
- *   durationDays: 365,
- *   cliffDays: 90,
- *   kind: "LinearWithCliff",
- *   revocable: true,
- * });
- * ```
- */
-export class VestflowClient {
-  private readonly server: StellarRpc.Server;
-  private readonly contractId: string;
-  private readonly nativeToken: string;
-  private readonly networkPassphrase: string;
-  private readonly signTransaction: ((xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>) | null;
-
+    networkPassphrase: stellarSdk.Networks.PUBLIC
+  }
+};
+var FALLBACK_ACCOUNT = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+var VestflowClient = class {
   /**
    * Create a new VestflowClient.
    *
    * @param config - Network and connection overrides. Defaults to testnet.
    */
-  constructor(config: VestflowConfig = {}) {
+  constructor(config = {}) {
     const net = config.network ?? "testnet";
     const defaults = DEFAULTS[net];
-
     this.contractId = config.contractId ?? defaults.contractId;
     this.nativeToken = config.nativeToken ?? defaults.nativeToken;
     this.networkPassphrase = defaults.networkPassphrase;
-    this.server = new StellarRpc.Server(config.rpcUrl ?? defaults.rpcUrl);
+    this.server = new stellarSdk.rpc.Server(config.rpcUrl ?? defaults.rpcUrl);
     this.signTransaction = null;
   }
-
   // ── Internal: simulate ────────────────────────────────────────────────────
-
-  private async simulate(
-    method: string,
-    args: xdr.ScVal[],
-    publicKey?: string
-  ): Promise<xdr.ScVal> {
-    const contract = new Contract(this.contractId);
+  async simulate(method, args, publicKey) {
+    const contract = new stellarSdk.Contract(this.contractId);
     const source = publicKey ?? FALLBACK_ACCOUNT;
     const account = await this.server.getAccount(source);
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: this.networkPassphrase,
-    })
-      .addOperation(contract.call(method, ...args))
-      .setTimeout(30)
-      .build();
-
+    const tx = new stellarSdk.TransactionBuilder(account, {
+      fee: stellarSdk.BASE_FEE,
+      networkPassphrase: this.networkPassphrase
+    }).addOperation(contract.call(method, ...args)).setTimeout(30).build();
     const result = await this.server.simulateTransaction(tx);
-    if (StellarRpc.Api.isSimulationError(result)) {
-      throw new Error((result as any).error);
+    if (stellarSdk.rpc.Api.isSimulationError(result)) {
+      throw new Error(result.error);
     }
-    return (result as any).result!.retval;
+    return result.result.retval;
   }
-
   // ── Internal: build and send ──────────────────────────────────────────────
-
-  private async buildAndSend(
-    publicKey: string,
-    method: string,
-    args: xdr.ScVal[],
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
-    const contract = new Contract(this.contractId);
+  async buildAndSend(publicKey, method, args, signer) {
+    const contract = new stellarSdk.Contract(this.contractId);
     const account = await this.server.getAccount(publicKey);
-    let tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: this.networkPassphrase,
-    })
-      .addOperation(contract.call(method, ...args))
-      .setTimeout(30)
-      .build();
-
+    let tx = new stellarSdk.TransactionBuilder(account, {
+      fee: stellarSdk.BASE_FEE,
+      networkPassphrase: this.networkPassphrase
+    }).addOperation(contract.call(method, ...args)).setTimeout(30).build();
     const simResult = await this.server.simulateTransaction(tx);
-    if (StellarRpc.Api.isSimulationError(simResult)) {
-      throw new Error((simResult as any).error);
+    if (stellarSdk.rpc.Api.isSimulationError(simResult)) {
+      throw new Error(simResult.error);
     }
-    tx = StellarRpc.assembleTransaction(tx, simResult as any).build();
-
+    tx = stellarSdk.rpc.assembleTransaction(tx, simResult).build();
     const signed = await signer(tx.toXDR(), {
-      networkPassphrase: this.networkPassphrase,
+      networkPassphrase: this.networkPassphrase
     });
-    const xdrStr = typeof signed === "string" ? signed : (signed as any).signedTxXdr;
+    const xdrStr = typeof signed === "string" ? signed : signed.signedTxXdr;
     const submitted = await this.server.sendTransaction(
-      TransactionBuilder.fromXDR(xdrStr, this.networkPassphrase)
+      stellarSdk.TransactionBuilder.fromXDR(xdrStr, this.networkPassphrase)
     );
     if (submitted.status === "ERROR") throw new Error("Transaction failed");
-
     await this.waitForTransaction(submitted.hash);
     return submitted.hash;
   }
-
   // ── Poll ──────────────────────────────────────────────────────────────────
-
   /**
    * Poll Soroban RPC for a submitted transaction's outcome until it settles
    * (anything other than `NOT_FOUND`), backing off exponentially between
@@ -185,15 +186,10 @@ export class VestflowClient {
    * @returns The settled transaction response (e.g. status `SUCCESS` or `FAILED`)
    * @throws If the transaction is still `NOT_FOUND` when `timeoutMs` elapses
    */
-  async waitForTransaction(
-    hash: string,
-    timeoutMs = 30_000,
-    options: { initialDelayMs?: number; maxDelayMs?: number } = {}
-  ): Promise<StellarRpc.Api.GetTransactionResponse> {
-    const initialDelayMs = options.initialDelayMs ?? 1000;
-    const maxDelayMs = options.maxDelayMs ?? 8000;
+  async waitForTransaction(hash, timeoutMs = 3e4, options = {}) {
+    const initialDelayMs = options.initialDelayMs ?? 1e3;
+    const maxDelayMs = options.maxDelayMs ?? 8e3;
     const deadline = Date.now() + timeoutMs;
-
     let delay = initialDelayMs;
     let status = await this.server.getTransaction(hash);
     while (status.status === "NOT_FOUND") {
@@ -208,10 +204,8 @@ export class VestflowClient {
     }
     return status;
   }
-
   // ── Internal: parse schedule ──────────────────────────────────────────────
-
-  private parseSchedule(raw: any): ScheduleData {
+  parseSchedule(raw) {
     return {
       id: Number(raw.id),
       grantor: raw.grantor?.toString() ?? "",
@@ -222,12 +216,7 @@ export class VestflowClient {
       start_time: Number(raw.start_time ?? 0),
       duration: Number(raw.duration ?? raw.duration_seconds ?? 0),
       cliff_duration: Number(raw.cliff_duration ?? raw.cliff_seconds ?? 0),
-      kind:
-        raw.kind === "Cliff"
-          ? "Cliff"
-          : raw.kind === "LinearWithCliff"
-          ? "LinearWithCliff"
-          : "Linear",
+      kind: raw.kind === "Cliff" ? "Cliff" : raw.kind === "LinearWithCliff" ? "LinearWithCliff" : "Linear",
       revocable: Boolean(raw.revocable),
       revoked: Boolean(raw.revoked),
       paused: Boolean(raw.paused),
@@ -235,165 +224,152 @@ export class VestflowClient {
       requires_milestones: Boolean(raw.requires_milestones),
       vested_at_revoke: BigInt(raw.vested_at_revoke ?? 0),
       paused_duration: Number(raw.paused_duration ?? 0),
-      paused_at: Number(raw.paused_at ?? 0),
+      paused_at: Number(raw.paused_at ?? 0)
     };
   }
-
   // ── Internal: parse delegation ────────────────────────────────────────────
-
-  private parseDelegation(raw: any): ClaimDelegation {
+  parseDelegation(raw) {
     return {
       delegate: raw.delegate?.toString() ?? "",
       maxAmount: raw.max_amount == null ? null : BigInt(raw.max_amount),
       expiresAtLedger: raw.expires_at_ledger == null ? null : Number(raw.expires_at_ledger),
       claimedSoFar: BigInt(raw.claimed_so_far ?? 0),
-      revoked: Boolean(raw.revoked),
+      revoked: Boolean(raw.revoked)
     };
   }
-
   // ── Read ──────────────────────────────────────────────────────────────────
-
   /**
    * Fetch a single vesting schedule by ID.
    * Returns null if the schedule does not exist.
    */
-  async getSchedule(id: number, publicKey?: string): Promise<ScheduleData | null> {
+  async getSchedule(id, publicKey) {
     try {
       const val = await this.simulate(
         "get_schedule",
-        [nativeToScVal(id, { type: "u64" })],
+        [stellarSdk.nativeToScVal(id, { type: "u64" })],
         publicKey
       );
-      return this.parseSchedule(scValToNative(val));
+      return this.parseSchedule(stellarSdk.scValToNative(val));
     } catch {
       return null;
     }
   }
-
   /**
    * Return the total number of schedules ever created.
    */
-  async getScheduleCount(): Promise<number> {
+  async getScheduleCount() {
     try {
       const val = await this.simulate("schedule_count", []);
-      return Number(scValToNative(val));
+      return Number(stellarSdk.scValToNative(val));
     } catch {
       return 0;
     }
   }
-
   /**
    * Return schedule IDs created by a given grantor address.
    */
-  async getSchedulesByGrantor(grantor: string): Promise<number[]> {
+  async getSchedulesByGrantor(grantor) {
     try {
       const val = await this.simulate("get_schedules_by_grantor", [
-        nativeToScVal(grantor, { type: "address" }),
+        stellarSdk.nativeToScVal(grantor, { type: "address" })
       ]);
-      return (scValToNative(val) as number[]).map(Number);
+      return stellarSdk.scValToNative(val).map(Number);
     } catch {
       return [];
     }
   }
-
   /**
    * Return all schedule IDs created by a given grantor, combining
    * single-token and multi-token schedules into a single list.
    */
-  async getGrantorScheduleIds(grantor: string): Promise<number[]> {
+  async getGrantorScheduleIds(grantor) {
     try {
       const val = await this.simulate("grantor_schedule_ids", [
-        nativeToScVal(grantor, { type: "address" }),
+        stellarSdk.nativeToScVal(grantor, { type: "address" })
       ]);
-      return (scValToNative(val) as number[]).map(Number);
+      return stellarSdk.scValToNative(val).map(Number);
     } catch {
       return [];
     }
   }
-
   /**
    * Return schedule IDs where the given address is the beneficiary.
    */
-  async getSchedulesByBeneficiary(beneficiary: string): Promise<number[]> {
+  async getSchedulesByBeneficiary(beneficiary) {
     try {
       const val = await this.simulate("get_schedules_by_beneficiary", [
-        nativeToScVal(beneficiary, { type: "address" }),
+        stellarSdk.nativeToScVal(beneficiary, { type: "address" })
       ]);
-      return (scValToNative(val) as number[]).map(Number);
+      return stellarSdk.scValToNative(val).map(Number);
     } catch {
       return [];
     }
   }
-
   /**
    * Return all schedule IDs where the given address is the beneficiary,
    * combining single-token and multi-token schedules into a single list.
    */
-  async getBeneficiaryScheduleIds(beneficiary: string): Promise<number[]> {
+  async getBeneficiaryScheduleIds(beneficiary) {
     try {
       const val = await this.simulate("beneficiary_schedule_ids", [
-        nativeToScVal(beneficiary, { type: "address" }),
+        stellarSdk.nativeToScVal(beneficiary, { type: "address" })
       ]);
-      return (scValToNative(val) as number[]).map(Number);
+      return stellarSdk.scValToNative(val).map(Number);
     } catch {
       return [];
     }
   }
-
   /**
    * Return how many tokens are currently claimable for a schedule.
    */
-  async getClaimable(id: number, publicKey?: string): Promise<bigint> {
+  async getClaimable(id, publicKey) {
     try {
       const val = await this.simulate(
         "claimable",
-        [nativeToScVal(id, { type: "u64" })],
+        [stellarSdk.nativeToScVal(id, { type: "u64" })],
         publicKey
       );
-      return BigInt(scValToNative(val));
+      return BigInt(stellarSdk.scValToNative(val));
     } catch {
       return 0n;
     }
   }
-
   /**
    * Return how many tokens are claimable for a schedule at a specific time.
    */
-  async getClaimableAt(id: number, now: number, publicKey?: string): Promise<bigint> {
+  async getClaimableAt(id, now, publicKey) {
     try {
       const val = await this.simulate(
         "claimable_amount",
         [
-          nativeToScVal(id, { type: "u64" }),
-          nativeToScVal(now, { type: "u64" }),
+          stellarSdk.nativeToScVal(id, { type: "u64" }),
+          stellarSdk.nativeToScVal(now, { type: "u64" })
         ],
         publicKey
       );
-      return BigInt(scValToNative(val));
+      return BigInt(stellarSdk.scValToNative(val));
     } catch {
       return 0n;
     }
   }
-
   /**
    * Return how many tokens are vested for a schedule at a specific time.
    */
-  async getVestedAmountAt(id: number, now: number, publicKey?: string): Promise<bigint> {
+  async getVestedAmountAt(id, now, publicKey) {
     try {
       const val = await this.simulate(
         "vested_amount",
         [
-          nativeToScVal(id, { type: "u64" }),
-          nativeToScVal(now, { type: "u64" }),
+          stellarSdk.nativeToScVal(id, { type: "u64" }),
+          stellarSdk.nativeToScVal(now, { type: "u64" })
         ],
         publicKey
       );
-      return BigInt(scValToNative(val));
+      return BigInt(stellarSdk.scValToNative(val));
     } catch {
       return 0n;
     }
   }
-
   /**
    * Fetch claimable amounts for multiple schedule IDs in a single
    * simulation round-trip using the claimable_bulk contract view.
@@ -401,20 +377,19 @@ export class VestflowClient {
    * Results are in the same order as the input ids.
    * Unknown IDs return 0n.
    */
-  async getClaimableBulk(ids: number[], publicKey?: string): Promise<bigint[]> {
+  async getClaimableBulk(ids, publicKey) {
     if (ids.length === 0) return [];
     try {
-      const idsVal = xdr.ScVal.scvVec(
-        ids.map((id) => nativeToScVal(id, { type: "u64" }))
+      const idsVal = stellarSdk.xdr.ScVal.scvVec(
+        ids.map((id) => stellarSdk.nativeToScVal(id, { type: "u64" }))
       );
       const val = await this.simulate("claimable_bulk", [idsVal], publicKey);
-      const native = scValToNative(val) as bigint[];
+      const native = stellarSdk.scValToNative(val);
       return native.map((v) => BigInt(v));
     } catch {
       return ids.map(() => 0n);
     }
   }
-
   /**
    * Fetch total vested amounts (earned, including already-claimed) for multiple
    * schedule IDs in a single simulation round-trip using the vested_amount_bulk
@@ -423,40 +398,38 @@ export class VestflowClient {
    * Results are in the same order as the input ids.
    * Unknown IDs return 0n.
    */
-  async getVestedAmountBulk(ids: number[], publicKey?: string): Promise<bigint[]> {
+  async getVestedAmountBulk(ids, publicKey) {
     if (ids.length === 0) return [];
     try {
-      const idsVal = xdr.ScVal.scvVec(
-        ids.map((id) => nativeToScVal(id, { type: "u64" }))
+      const idsVal = stellarSdk.xdr.ScVal.scvVec(
+        ids.map((id) => stellarSdk.nativeToScVal(id, { type: "u64" }))
       );
       const val = await this.simulate("vested_amount_bulk", [idsVal], publicKey);
-      const native = scValToNative(val) as bigint[];
+      const native = stellarSdk.scValToNative(val);
       return native.map((v) => BigInt(v));
     } catch {
       return ids.map(() => 0n);
     }
   }
-
   /**
    * Fetch multiple schedules in a single simulation round-trip.
    *
    * Returns results in the same order as `ids`. Unknown IDs return null.
    * Replaces the Promise.all(getSchedule) N-call pattern.
    */
-  async getScheduleBatch(ids: number[], publicKey?: string): Promise<(ScheduleData | null)[]> {
+  async getScheduleBatch(ids, publicKey) {
     if (ids.length === 0) return [];
     try {
-      const idsVal = xdr.ScVal.scvVec(
-        ids.map((id) => nativeToScVal(id, { type: "u64" }))
+      const idsVal = stellarSdk.xdr.ScVal.scvVec(
+        ids.map((id) => stellarSdk.nativeToScVal(id, { type: "u64" }))
       );
       const val = await this.simulate("get_schedule_batch", [idsVal], publicKey);
-      const rawItems = scValToNative(val) as any[];
-      return rawItems.map((raw: any) => (raw == null ? null : this.parseSchedule(raw)));
+      const rawItems = stellarSdk.scValToNative(val);
+      return rawItems.map((raw) => raw == null ? null : this.parseSchedule(raw));
     } catch {
       return ids.map(() => null);
     }
   }
-
   /**
    * Return the unvested remainder for a schedule — the amount a grantor would
    * recover by revoking right now.
@@ -467,30 +440,28 @@ export class VestflowClient {
    *
    * Returns 0n if the schedule does not exist.
    */
-  async getRemainingUnvested(scheduleId: number, publicKey?: string): Promise<bigint> {
+  async getRemainingUnvested(scheduleId, publicKey) {
     const schedule = await this.getSchedule(scheduleId, publicKey);
     if (schedule === null) return 0n;
     const vested = await this.getVestedAmountCurrent(scheduleId, publicKey);
     const remaining = schedule.total_amount - vested;
     return remaining > 0n ? remaining : 0n;
   }
-
   /**
    * Return how many tokens are vested for a schedule using the current ledger time.
    */
-  async getVestedAmountCurrent(id: number, publicKey?: string): Promise<bigint> {
+  async getVestedAmountCurrent(id, publicKey) {
     try {
       const val = await this.simulate(
         "vested_amount_current",
-        [nativeToScVal(id, { type: "u64" })],
+        [stellarSdk.nativeToScVal(id, { type: "u64" })],
         publicKey
       );
-      return BigInt(scValToNative(val));
+      return BigInt(stellarSdk.scValToNative(val));
     } catch {
       return 0n;
     }
   }
-
   /**
    * Preview how many tokens will be claimable at an arbitrary future timestamp.
    *
@@ -498,19 +469,18 @@ export class VestflowClient {
    * meaningful for future timestamps.
    * Returns 0n for unknown schedule IDs.
    */
-  async getClaimableAtTimestamp(id: number, ts: number, publicKey?: string): Promise<bigint> {
+  async getClaimableAtTimestamp(id, ts, publicKey) {
     try {
       const val = await this.simulate(
         "claimable_at_timestamp",
-        [nativeToScVal(id, { type: "u64" }), nativeToScVal(ts, { type: "u64" })],
+        [stellarSdk.nativeToScVal(id, { type: "u64" }), stellarSdk.nativeToScVal(ts, { type: "u64" })],
         publicKey
       );
-      return BigInt(scValToNative(val));
+      return BigInt(stellarSdk.scValToNative(val));
     } catch {
       return 0n;
     }
   }
-
   /**
    * Fetch the timestamp at which a schedule reaches 100% vested.
    *
@@ -522,20 +492,19 @@ export class VestflowClient {
    * @param publicKey - Optional source account for the simulation
    * @returns Unix timestamp of full vesting, or null for unknown schedule IDs
    */
-  async getFullyVestedAt(id: number, publicKey?: string): Promise<number | null> {
+  async getFullyVestedAt(id, publicKey) {
     try {
       const val = await this.simulate(
         "fully_vested_at",
-        [nativeToScVal(id, { type: "u64" })],
+        [stellarSdk.nativeToScVal(id, { type: "u64" })],
         publicKey
       );
-      const native = scValToNative(val);
+      const native = stellarSdk.scValToNative(val);
       return native == null ? null : Number(native);
     } catch {
       return null;
     }
   }
-
   /**
    * Fetch all schedules ever created.
    *
@@ -546,67 +515,51 @@ export class VestflowClient {
    * @param timeoutMs - Rejects with a clear timeout error if the RPC hasn't
    * responded within this many milliseconds. Defaults to 30s.
    */
-  async getAllSchedules(
-    publicKey?: string,
-    timeoutMs = 30_000
-  ): Promise<ScheduleData[]> {
+  async getAllSchedules(publicKey, timeoutMs = 3e4) {
     return this.withTimeout(
       this.fetchAllSchedules(publicKey),
       timeoutMs,
       `getAllSchedules timed out after ${timeoutMs}ms waiting for the Soroban RPC`
     );
   }
-
-  private async fetchAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
+  async fetchAllSchedules(publicKey) {
     const count = await this.getScheduleCount();
     if (count === 0) return [];
     const ids = Array.from({ length: count }, (_, i) => i + 1);
     const schedules = await this.getScheduleBatch(ids, publicKey);
-    return schedules.filter(Boolean) as ScheduleData[];
+    return schedules.filter(Boolean);
   }
-
   /**
    * Fetch a single claim delegation by (scheduleId, delegationId).
    * Returns null if the delegation does not exist.
    */
-  async getDelegation(
-    scheduleId: number,
-    delegationId: number,
-    publicKey?: string
-  ): Promise<ClaimDelegation | null> {
+  async getDelegation(scheduleId, delegationId, publicKey) {
     try {
       const val = await this.simulate(
         "get_delegation",
         [
-          nativeToScVal(scheduleId, { type: "u64" }),
-          nativeToScVal(delegationId, { type: "u32" }),
+          stellarSdk.nativeToScVal(scheduleId, { type: "u64" }),
+          stellarSdk.nativeToScVal(delegationId, { type: "u32" })
         ],
         publicKey
       );
-      const native = scValToNative(val);
+      const native = stellarSdk.scValToNative(val);
       return native == null ? null : this.parseDelegation(native);
     } catch {
       return null;
     }
   }
-
   /**
    * Race a promise against a deadline, rejecting with `message` if it fires first.
    */
-  private withTimeout<T>(
-    promise: Promise<T>,
-    timeoutMs: number,
-    message: string
-  ): Promise<T> {
-    let timer: ReturnType<typeof setTimeout>;
-    const deadline = new Promise<never>((_, reject) => {
+  withTimeout(promise, timeoutMs, message) {
+    let timer;
+    const deadline = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error(message)), timeoutMs);
     });
     return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
   }
-
   // ── Write ─────────────────────────────────────────────────────────────────
-
   /**
    * Create a new vesting schedule and lock tokens into the contract.
    *
@@ -615,32 +568,27 @@ export class VestflowClient {
    * @returns Transaction hash
    * @throws If `params.beneficiary` equals `params.grantor`
    */
-  async createSchedule(
-    params: CreateScheduleParams,
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
+  async createSchedule(params, signer) {
     if (params.beneficiary === params.grantor) {
       throw new Error("beneficiary must be different from grantor");
     }
     const totalStroops = xlmToStroops(params.totalAmountXlm);
     const durationSecs = params.durationDays * 86400;
     const cliffSecs = params.cliffDays * 86400;
-    const kindVal = xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(params.kind)]);
-
-    const args: xdr.ScVal[] = [
-      nativeToScVal(params.grantor, { type: "address" }),
-      nativeToScVal(params.beneficiary, { type: "address" }),
-      nativeToScVal(this.nativeToken, { type: "address" }),
-      nativeToScVal(totalStroops, { type: "i128" }),
-      nativeToScVal(params.startTime, { type: "u64" }),
-      nativeToScVal(durationSecs, { type: "u64" }),
-      nativeToScVal(cliffSecs, { type: "u64" }),
+    const kindVal = stellarSdk.xdr.ScVal.scvVec([stellarSdk.xdr.ScVal.scvSymbol(params.kind)]);
+    const args = [
+      stellarSdk.nativeToScVal(params.grantor, { type: "address" }),
+      stellarSdk.nativeToScVal(params.beneficiary, { type: "address" }),
+      stellarSdk.nativeToScVal(this.nativeToken, { type: "address" }),
+      stellarSdk.nativeToScVal(totalStroops, { type: "i128" }),
+      stellarSdk.nativeToScVal(params.startTime, { type: "u64" }),
+      stellarSdk.nativeToScVal(durationSecs, { type: "u64" }),
+      stellarSdk.nativeToScVal(cliffSecs, { type: "u64" }),
       kindVal,
-      nativeToScVal(params.revocable, { type: "bool" }),
+      stellarSdk.nativeToScVal(params.revocable, { type: "bool" })
     ];
     return this.buildAndSend(params.grantor, "create_schedule", args, signer);
   }
-
   /**
    * Create a new graded (percentage-based) vesting schedule.
    *
@@ -652,45 +600,39 @@ export class VestflowClient {
    * @returns Transaction hash
    * @throws If `params.beneficiary` equals `params.grantor`
    */
-  async createGradedSchedule(
-    params: CreateGradedScheduleParams,
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
+  async createGradedSchedule(params, signer) {
     if (params.beneficiary === params.grantor) {
       throw new Error("beneficiary must be different from grantor");
     }
-    const totalStroops = BigInt(Math.round(params.totalAmountXlm * 10_000_000));
+    const totalStroops = BigInt(Math.round(params.totalAmountXlm * 1e7));
     const lockupSecs = params.lockupDays * 86400;
-
-    const milestonesVal = xdr.ScVal.scvVec(
+    const milestonesVal = stellarSdk.xdr.ScVal.scvVec(
       params.milestones.map((m) => {
         const offsetSecs = BigInt(m.offsetDays * 86400);
-        return xdr.ScVal.scvMap([
-          new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("bps"),
-            val: nativeToScVal(m.bps, { type: "u32" }),
+        return stellarSdk.xdr.ScVal.scvMap([
+          new stellarSdk.xdr.ScMapEntry({
+            key: stellarSdk.xdr.ScVal.scvSymbol("bps"),
+            val: stellarSdk.nativeToScVal(m.bps, { type: "u32" })
           }),
-          new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("offset_secs"),
-            val: nativeToScVal(offsetSecs, { type: "u64" }),
-          }),
+          new stellarSdk.xdr.ScMapEntry({
+            key: stellarSdk.xdr.ScVal.scvSymbol("offset_secs"),
+            val: stellarSdk.nativeToScVal(offsetSecs, { type: "u64" })
+          })
         ]);
       })
     );
-
-    const args: xdr.ScVal[] = [
-      nativeToScVal(params.grantor, { type: "address" }),
-      nativeToScVal(params.beneficiary, { type: "address" }),
-      nativeToScVal(this.nativeToken, { type: "address" }),
-      nativeToScVal(totalStroops, { type: "i128" }),
-      nativeToScVal(params.startTime, { type: "u64" }),
-      nativeToScVal(lockupSecs, { type: "u64" }),
-      nativeToScVal(params.revocable, { type: "bool" }),
-      milestonesVal,
+    const args = [
+      stellarSdk.nativeToScVal(params.grantor, { type: "address" }),
+      stellarSdk.nativeToScVal(params.beneficiary, { type: "address" }),
+      stellarSdk.nativeToScVal(this.nativeToken, { type: "address" }),
+      stellarSdk.nativeToScVal(totalStroops, { type: "i128" }),
+      stellarSdk.nativeToScVal(params.startTime, { type: "u64" }),
+      stellarSdk.nativeToScVal(lockupSecs, { type: "u64" }),
+      stellarSdk.nativeToScVal(params.revocable, { type: "bool" }),
+      milestonesVal
     ];
     return this.buildAndSend(params.grantor, "create_graded_schedule", args, signer);
   }
-
   /**
    * Claim all currently vested but unclaimed tokens for a schedule.
    *
@@ -699,19 +641,14 @@ export class VestflowClient {
    * @param signer - Function that signs the transaction XDR
    * @returns Transaction hash
    */
-  async claimVested(
-    publicKey: string,
-    scheduleId: number,
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
+  async claimVested(publicKey, scheduleId, signer) {
     return this.buildAndSend(
       publicKey,
       "claim",
-      [nativeToScVal(scheduleId, { type: "u64" })],
+      [stellarSdk.nativeToScVal(scheduleId, { type: "u64" })],
       signer
     );
   }
-
   /**
    * Revoke a vesting schedule (grantor only, revocable schedules only).
    * Unvested tokens return to the grantor; vested tokens remain claimable.
@@ -721,19 +658,14 @@ export class VestflowClient {
    * @param signer - Function that signs the transaction XDR
    * @returns Transaction hash
    */
-  async revokeSchedule(
-    publicKey: string,
-    scheduleId: number,
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
+  async revokeSchedule(publicKey, scheduleId, signer) {
     return this.buildAndSend(
       publicKey,
       "revoke",
-      [nativeToScVal(scheduleId, { type: "u64" })],
+      [stellarSdk.nativeToScVal(scheduleId, { type: "u64" })],
       signer
     );
   }
-
   /**
    * Pause an active vesting schedule (grantor only).
    * While paused, no additional tokens vest. The beneficiary can still claim
@@ -744,19 +676,14 @@ export class VestflowClient {
    * @param signer - Function that signs the transaction XDR
    * @returns Transaction hash
    */
-  async pauseSchedule(
-    publicKey: string,
-    scheduleId: number,
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
+  async pauseSchedule(publicKey, scheduleId, signer) {
     return this.buildAndSend(
       publicKey,
       "pause_schedule",
-      [nativeToScVal(scheduleId, { type: "u64" })],
+      [stellarSdk.nativeToScVal(scheduleId, { type: "u64" })],
       signer
     );
   }
-
   /**
    * Resume a paused vesting schedule (grantor only).
    *
@@ -765,19 +692,14 @@ export class VestflowClient {
    * @param signer - Function that signs the transaction XDR
    * @returns Transaction hash
    */
-  async resumeSchedule(
-    publicKey: string,
-    scheduleId: number,
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
+  async resumeSchedule(publicKey, scheduleId, signer) {
     return this.buildAndSend(
       publicKey,
       "resume_schedule",
-      [nativeToScVal(scheduleId, { type: "u64" })],
+      [stellarSdk.nativeToScVal(scheduleId, { type: "u64" })],
       signer
     );
   }
-
   /**
    * Transfer beneficiary of a vesting schedule (current beneficiary only).
    *
@@ -787,23 +709,17 @@ export class VestflowClient {
    * @param signer - Function that signs the transaction XDR
    * @returns Transaction hash
    */
-  async transferBeneficiary(
-    currentBeneficiary: string,
-    scheduleId: number,
-    newBeneficiary: string,
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
+  async transferBeneficiary(currentBeneficiary, scheduleId, newBeneficiary, signer) {
     return this.buildAndSend(
       currentBeneficiary,
       "transfer_beneficiary",
       [
-        nativeToScVal(scheduleId, { type: "u64" }),
-        nativeToScVal(newBeneficiary, { type: "address" }),
+        stellarSdk.nativeToScVal(scheduleId, { type: "u64" }),
+        stellarSdk.nativeToScVal(newBeneficiary, { type: "address" })
       ],
       signer
     );
   }
-
   /**
    * Subscribe to live updates for a vesting schedule by polling the chain at a
    * configurable interval.
@@ -847,23 +763,17 @@ export class VestflowClient {
    * @param signer - Function that signs the transaction XDR.
    * @returns Transaction hash.
    */
-  async extendDuration(
-    grantor: string,
-    scheduleId: number,
-    additionalSeconds: number,
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
+  async extendDuration(grantor, scheduleId, additionalSeconds, signer) {
     return this.buildAndSend(
       grantor,
       "extend_duration",
       [
-        nativeToScVal(scheduleId, { type: "u64" }),
-        nativeToScVal(additionalSeconds, { type: "u64" }),
+        stellarSdk.nativeToScVal(scheduleId, { type: "u64" }),
+        stellarSdk.nativeToScVal(additionalSeconds, { type: "u64" })
       ],
       signer
     );
   }
-
   /**
    * Configure token splits for a vesting schedule.
    *
@@ -883,69 +793,53 @@ export class VestflowClient {
    * @throws If weights don't sum to TOTAL_SPLITS_WEIGHT, too many receivers,
    *   or splits already configured.
    */
-  async setSplits(
-    grantor: string,
-    scheduleId: number,
-    receivers: SplitsReceiver[],
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<TransactionResult> {
-    // Validate weights sum to TOTAL_SPLITS_WEIGHT
+  async setSplits(grantor, scheduleId, receivers, signer) {
     const totalWeight = receivers.reduce((sum, r) => sum + r.weight, 0);
     if (totalWeight !== TOTAL_SPLITS_WEIGHT) {
       throw new Error(
         `Invalid splits weight: weights must sum to ${TOTAL_SPLITS_WEIGHT} bps, got ${totalWeight}`
       );
     }
-
-    // Validate receiver count
     if (receivers.length > MAX_SPLITS_RECEIVERS) {
       throw new Error(
         `Too many receivers: maximum is ${MAX_SPLITS_RECEIVERS}, got ${receivers.length}`
       );
     }
-
-    // Validate each weight > 0
     for (const receiver of receivers) {
       if (receiver.weight <= 0) {
         throw new Error(`Invalid weight: each receiver must have weight > 0`);
       }
     }
-
-    // Validate unique addresses
     const addresses = receivers.map((r) => r.address);
     const uniqueAddresses = new Set(addresses);
     if (addresses.length !== uniqueAddresses.size) {
       throw new Error("Duplicate receiver addresses are not allowed");
     }
-
-    const receiversVal = xdr.ScVal.scvVec(
-      receivers.map((r) =>
-        xdr.ScVal.scvMap([
-          new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("address"),
-            val: nativeToScVal(r.address, { type: "address" }),
+    const receiversVal = stellarSdk.xdr.ScVal.scvVec(
+      receivers.map(
+        (r) => stellarSdk.xdr.ScVal.scvMap([
+          new stellarSdk.xdr.ScMapEntry({
+            key: stellarSdk.xdr.ScVal.scvSymbol("address"),
+            val: stellarSdk.nativeToScVal(r.address, { type: "address" })
           }),
-          new xdr.ScMapEntry({
-            key: xdr.ScVal.scvSymbol("weight"),
-            val: nativeToScVal(r.weight, { type: "u32" }),
-          }),
+          new stellarSdk.xdr.ScMapEntry({
+            key: stellarSdk.xdr.ScVal.scvSymbol("weight"),
+            val: stellarSdk.nativeToScVal(r.weight, { type: "u32" })
+          })
         ])
       )
     );
-
     const hash = await this.buildAndSend(
       grantor,
       "set_splits",
       [
-        nativeToScVal(scheduleId, { type: "u64" }),
-        receiversVal,
+        stellarSdk.nativeToScVal(scheduleId, { type: "u64" }),
+        receiversVal
       ],
       signer
     );
-
     return { hash };
   }
-
   /**
    * Atomically merge multiple active vesting schedules belonging to the same
    * grantor-beneficiary pair into a single unified schedule, destroying the
@@ -963,32 +857,24 @@ export class VestflowClient {
    * @param signer - Function that signs the transaction XDR
    * @returns Transaction hash
    */
-  async mergeSchedules(
-    caller: string,
-    ids: number[],
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
-    const idsVal = xdr.ScVal.scvVec(
-      ids.map((id) => nativeToScVal(id, { type: "u64" }))
+  async mergeSchedules(caller, ids, signer) {
+    const idsVal = stellarSdk.xdr.ScVal.scvVec(
+      ids.map((id) => stellarSdk.nativeToScVal(id, { type: "u64" }))
     );
     return this.buildAndSend(
       caller,
       "merge_schedules",
-      [nativeToScVal(caller, { type: "address" }), idsVal],
+      [stellarSdk.nativeToScVal(caller, { type: "address" }), idsVal],
       signer
     );
   }
-
   /**
    * Propose a vesting schedule without transferring tokens.
    *
    * The grantor later calls {@link fundAndActivate} within 72 hours to lock
    * tokens and start the schedule. Beneficiary acknowledgment is optional.
    */
-  async proposeSchedule(
-    params: ProposeScheduleParams,
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
+  async proposeSchedule(params, signer) {
     if (params.beneficiary === params.grantor) {
       throw new Error("beneficiary must be different from grantor");
     }
@@ -996,128 +882,105 @@ export class VestflowClient {
     const durationSecs = params.durationDays * 86400;
     const cliffSecs = params.cliffDays * 86400;
     const lockupSecs = (params.lockupDays ?? 0) * 86400;
-    const kindVal = xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(params.kind)]);
-
-    const args: xdr.ScVal[] = [
-      nativeToScVal(params.grantor, { type: "address" }),
-      nativeToScVal(params.beneficiary, { type: "address" }),
-      nativeToScVal(this.nativeToken, { type: "address" }),
-      nativeToScVal(totalStroops, { type: "i128" }),
-      nativeToScVal(params.startTime, { type: "u64" }),
-      nativeToScVal(durationSecs, { type: "u64" }),
-      nativeToScVal(cliffSecs, { type: "u64" }),
-      nativeToScVal(lockupSecs, { type: "u64" }),
+    const kindVal = stellarSdk.xdr.ScVal.scvVec([stellarSdk.xdr.ScVal.scvSymbol(params.kind)]);
+    const args = [
+      stellarSdk.nativeToScVal(params.grantor, { type: "address" }),
+      stellarSdk.nativeToScVal(params.beneficiary, { type: "address" }),
+      stellarSdk.nativeToScVal(this.nativeToken, { type: "address" }),
+      stellarSdk.nativeToScVal(totalStroops, { type: "i128" }),
+      stellarSdk.nativeToScVal(params.startTime, { type: "u64" }),
+      stellarSdk.nativeToScVal(durationSecs, { type: "u64" }),
+      stellarSdk.nativeToScVal(cliffSecs, { type: "u64" }),
+      stellarSdk.nativeToScVal(lockupSecs, { type: "u64" }),
       kindVal,
-      nativeToScVal(params.revocable, { type: "bool" }),
+      stellarSdk.nativeToScVal(params.revocable, { type: "bool" })
     ];
     return this.buildAndSend(params.grantor, "propose_schedule", args, signer);
   }
-
   /**
    * Record that the beneficiary has seen a proposal.
    *
    * Does not block {@link fundAndActivate}.
    */
-  async acknowledgeProposal(
-    beneficiary: string,
-    proposalId: number,
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
+  async acknowledgeProposal(beneficiary, proposalId, signer) {
     return this.buildAndSend(
       beneficiary,
       "acknowledge_proposal",
       [
-        nativeToScVal(beneficiary, { type: "address" }),
-        nativeToScVal(proposalId, { type: "u64" }),
+        stellarSdk.nativeToScVal(beneficiary, { type: "address" }),
+        stellarSdk.nativeToScVal(proposalId, { type: "u64" })
       ],
       signer
     );
   }
-
   /**
    * Transfer tokens and activate a proposed schedule (grantor only).
    *
    * Must be called within 72 hours of {@link proposeSchedule}.
    */
-  async fundAndActivate(
-    grantor: string,
-    proposalId: number,
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
+  async fundAndActivate(grantor, proposalId, signer) {
     return this.buildAndSend(
       grantor,
       "fund_and_activate",
       [
-        nativeToScVal(grantor, { type: "address" }),
-        nativeToScVal(proposalId, { type: "u64" }),
+        stellarSdk.nativeToScVal(grantor, { type: "address" }),
+        stellarSdk.nativeToScVal(proposalId, { type: "u64" })
       ],
       signer
     );
   }
-
   /**
    * Mark a proposal as expired after the 72-hour window. Anyone may call this.
    * The proposal remains queryable with state `Expired`.
    */
-  async expireProposal(
-    caller: string,
-    proposalId: number,
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
+  async expireProposal(caller, proposalId, signer) {
     return this.buildAndSend(
       caller,
       "expire_proposal",
       [
-        nativeToScVal(caller, { type: "address" }),
-        nativeToScVal(proposalId, { type: "u64" }),
+        stellarSdk.nativeToScVal(caller, { type: "address" }),
+        stellarSdk.nativeToScVal(proposalId, { type: "u64" })
       ],
       signer
     );
   }
-
   /**
    * Fetch a proposal by ID.
    * Returns null if the proposal was never created. Expired proposals are
    * returned with state `Expired`.
    */
-  async getProposal(id: number, publicKey?: string): Promise<ScheduleProposal | null> {
+  async getProposal(id, publicKey) {
     try {
       const val = await this.simulate(
         "get_proposal",
-        [nativeToScVal(id, { type: "u64" })],
+        [stellarSdk.nativeToScVal(id, { type: "u64" })],
         publicKey
       );
-      const native = scValToNative(val);
+      const native = stellarSdk.scValToNative(val);
       if (native == null) return null;
       return this.parseProposal(native);
     } catch {
       return null;
     }
   }
-
-  private parseProposal(raw: Record<string, unknown>): ScheduleProposal {
+  parseProposal(raw) {
     return {
       id: Number(raw.id ?? 0),
       grantor: String(raw.grantor ?? ""),
       beneficiary: String(raw.beneficiary ?? ""),
       token: String(raw.token ?? ""),
-      total_amount: BigInt(raw.total_amount as string | number | bigint ?? 0),
+      total_amount: BigInt(raw.total_amount ?? 0),
       start_time: Number(raw.start_time ?? 0),
       duration: Number(raw.duration ?? 0),
       cliff_duration: Number(raw.cliff_duration ?? 0),
       lockup_duration: Number(raw.lockup_duration ?? 0),
-      kind:
-        raw.kind === "Cliff"
-          ? "Cliff"
-          : raw.kind === "LinearWithCliff"
-            ? "LinearWithCliff"
-            : "Linear",
+      kind: raw.kind === "Cliff" ? "Cliff" : raw.kind === "LinearWithCliff" ? "LinearWithCliff" : "Linear",
       revocable: Boolean(raw.revocable),
       state: this.parseProposalState(raw.state),
-      created_at_ledger: Number(raw.created_at_ledger ?? 0),
+      created_at_ledger: Number(raw.created_at_ledger ?? 0)
     };
   }
-private parseProposalState(raw: unknown): ProposalState {
+  parseProposalState(raw) {
     if (raw == null) return "Pending";
     if (typeof raw === "string") {
       if (raw === "Acknowledged" || raw === "Expired" || raw === "Pending") {
@@ -1125,9 +988,8 @@ private parseProposalState(raw: unknown): ProposalState {
       }
       return "Pending";
     }
-
     if (typeof raw === "object") {
-      const obj = raw as Record<string, unknown>;
+      const obj = raw;
       if ("Activated" in obj) {
         return { tag: "Activated", scheduleId: Number(obj.Activated) };
       }
@@ -1137,29 +999,27 @@ private parseProposalState(raw: unknown): ProposalState {
     }
     return "Pending";
   }
-
   /**
    * Fetch the splits configuration for a schedule.
    * Returns null if no splits are configured.
    */
-  async getSplits(scheduleId: number, publicKey?: string): Promise<SplitsReceiver[] | null> {
+  async getSplits(scheduleId, publicKey) {
     try {
       const val = await this.simulate(
         "get_splits",
-        [nativeToScVal(scheduleId, { type: "u64" })],
+        [stellarSdk.nativeToScVal(scheduleId, { type: "u64" })],
         publicKey
       );
-      const native = scValToNative(val);
+      const native = stellarSdk.scValToNative(val);
       if (native == null) return null;
-      return (native as Array<Record<string, unknown>>).map((r) => ({
+      return native.map((r) => ({
         address: String(r.address ?? ""),
-        weight: Number(r.weight ?? 0),
+        weight: Number(r.weight ?? 0)
       }));
     } catch {
       return null;
     }
   }
-
   /**
    * Delegate claim rights on a schedule to a third-party address, optionally
    * bounded by a total claimable amount and/or a ledger-sequence expiry.
@@ -1172,24 +1032,16 @@ private parseProposalState(raw: unknown): ProposalState {
    * @param signer - Function that signs the transaction XDR.
    * @returns Transaction hash.
    */
-  async createDelegation(
-    beneficiary: string,
-    scheduleId: number,
-    delegate: string,
-    maxAmountStroops: bigint | null,
-    expiresAtLedger: number | null,
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
-    const args: xdr.ScVal[] = [
-      nativeToScVal(beneficiary, { type: "address" }),
-      nativeToScVal(scheduleId, { type: "u64" }),
-      nativeToScVal(delegate, { type: "address" }),
-      maxAmountStroops == null ? xdr.ScVal.scvVoid() : nativeToScVal(maxAmountStroops, { type: "i128" }),
-      expiresAtLedger == null ? xdr.ScVal.scvVoid() : nativeToScVal(expiresAtLedger, { type: "u32" }),
+  async createDelegation(beneficiary, scheduleId, delegate, maxAmountStroops, expiresAtLedger, signer) {
+    const args = [
+      stellarSdk.nativeToScVal(beneficiary, { type: "address" }),
+      stellarSdk.nativeToScVal(scheduleId, { type: "u64" }),
+      stellarSdk.nativeToScVal(delegate, { type: "address" }),
+      maxAmountStroops == null ? stellarSdk.xdr.ScVal.scvVoid() : stellarSdk.nativeToScVal(maxAmountStroops, { type: "i128" }),
+      expiresAtLedger == null ? stellarSdk.xdr.ScVal.scvVoid() : stellarSdk.nativeToScVal(expiresAtLedger, { type: "u32" })
     ];
     return this.buildAndSend(beneficiary, "create_delegation", args, signer);
   }
-
   /**
    * Revoke a claim delegation, immediately and permanently disabling it.
    *
@@ -1199,24 +1051,18 @@ private parseProposalState(raw: unknown): ProposalState {
    * @param signer - Function that signs the transaction XDR.
    * @returns Transaction hash.
    */
-  async revokeDelegation(
-    beneficiary: string,
-    scheduleId: number,
-    delegationId: number,
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
+  async revokeDelegation(beneficiary, scheduleId, delegationId, signer) {
     return this.buildAndSend(
       beneficiary,
       "revoke_delegation",
       [
-        nativeToScVal(beneficiary, { type: "address" }),
-        nativeToScVal(scheduleId, { type: "u64" }),
-        nativeToScVal(delegationId, { type: "u32" }),
+        stellarSdk.nativeToScVal(beneficiary, { type: "address" }),
+        stellarSdk.nativeToScVal(scheduleId, { type: "u64" }),
+        stellarSdk.nativeToScVal(delegationId, { type: "u32" })
       ],
       signer
     );
   }
-
   /**
    * Claim vested tokens on behalf of a beneficiary through a delegation.
    * Tokens are transferred directly to the delegate's own address.
@@ -1227,37 +1073,21 @@ private parseProposalState(raw: unknown): ProposalState {
    * @param signer - Function that signs the transaction XDR.
    * @returns Transaction hash.
    */
-  async claimAsDelegate(
-    delegate: string,
-    scheduleId: number,
-    delegationId: number,
-    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
+  async claimAsDelegate(delegate, scheduleId, delegationId, signer) {
     return this.buildAndSend(
       delegate,
       "claim_as_delegate",
       [
-        nativeToScVal(delegate, { type: "address" }),
-        nativeToScVal(scheduleId, { type: "u64" }),
-        nativeToScVal(delegationId, { type: "u32" }),
+        stellarSdk.nativeToScVal(delegate, { type: "address" }),
+        stellarSdk.nativeToScVal(scheduleId, { type: "u64" }),
+        stellarSdk.nativeToScVal(delegationId, { type: "u32" })
       ],
       signer
     );
   }
-
-  subscribeToSchedule(
-    id: number,
-    callback: (schedule: ScheduleData, claimable: bigint) => void | Promise<void>,
-    options: {
-      intervalMs?: number;
-      publicKey?: string;
-      onError?: (err: unknown) => void;
-    } = {}
-  ): { unsubscribe: () => void } {
-    const { intervalMs = 10_000, publicKey, onError = console.error } = options;
-
+  subscribeToSchedule(id, callback, options = {}) {
+    const { intervalMs = 1e4, publicKey, onError = console.error } = options;
     let active = true;
-
     const poll = async () => {
       if (!active) return;
       try {
@@ -1268,22 +1098,37 @@ private parseProposalState(raw: unknown): ProposalState {
         try {
           await callback(schedule, claimable);
         } catch {
-          // Swallow callback errors — the caller's UI should not kill the poller.
         }
       } catch (err) {
         onError(err);
       }
     };
-
-    // Fire immediately, then on each interval tick.
     void poll();
     const timerId = setInterval(() => void poll(), intervalMs);
-
     return {
       unsubscribe: () => {
         active = false;
         clearInterval(timerId);
-      },
+      }
     };
   }
+};
+
+// src/types.ts
+function isScheduleRevoked(s) {
+  return s.revoked === true;
 }
+
+exports.MAX_SPLITS_RECEIVERS = MAX_SPLITS_RECEIVERS;
+exports.TOTAL_SPLITS_WEIGHT = TOTAL_SPLITS_WEIGHT;
+exports.VestflowClient = VestflowClient;
+exports.formatDate = formatDate;
+exports.formatSchedule = formatSchedule;
+exports.isScheduleRevoked = isScheduleRevoked;
+exports.parseContractError = parseContractError;
+exports.stroopsToXlm = stroopsToXlm;
+exports.truncate = truncate;
+exports.vestingProgress = vestingProgress;
+exports.xlmToStroops = xlmToStroops;
+//# sourceMappingURL=index.cjs.map
+//# sourceMappingURL=index.cjs.map

@@ -168,6 +168,22 @@ offset_secs: u64;
 }
 
 
+/**
+ * A single receiver in a splits configuration.
+ * Each receiver gets a share of vested tokens proportional to their weight.
+ */
+export interface SplitsReceiver {
+  /**
+ * Stellar address of the receiver.
+ */
+address: string;
+  /**
+ * Weight in basis points (out of 10_000).
+ */
+weight: u32;
+}
+
+
 export interface VestingSchedule {
   /**
  * Address that can claim vested tokens.
@@ -414,6 +430,38 @@ export interface Client {
    * Return a proposal by id, or `None` if it was never created.
    */
   get_proposal: ({proposal_id}: {proposal_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Option<ScheduleProposal>>>
+
+  /**
+   * Construct and simulate a set_splits transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Configure token splits for a vesting schedule.
+   *
+   * Allows the grantor to specify multiple receivers and their respective
+   * weights (in basis points). When tokens are claimed, they are distributed
+   * proportionally to each receiver based on their weight.
+   *
+   * The sum of all weights must equal 10_000 bps.
+   * Maximum of 20 receivers allowed.
+   * Can only be called once per schedule.
+   *
+   * # Errors
+   *
+   * Returns `NotFound` if `schedule_id` does not exist.
+   * Returns `NotGrantor` if caller is not the grantor.
+   * Returns `SplitsAlreadySet` if splits already configured for this schedule.
+   * Returns `InvalidSplitsWeight` if weights don't sum to 10_000 bps.
+   * Returns `TooManyReceivers` if more than 20 receivers.
+   * Returns `ScheduleRevoked` if the schedule has been revoked.
+   */
+  set_splits: ({grantor, schedule_id, receivers}: {grantor: string, schedule_id: u64, receivers: Array<SplitsReceiver>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
+   * Construct and simulate a get_splits transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Get the splits configuration for a schedule.
+   *
+   * Returns the list of receivers and their weights if configured,
+   * or `None` if no splits are configured.
+   */
+  get_splits: ({schedule_id}: {schedule_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Option<Array<SplitsReceiver>>>>
 
   /**
    * Construct and simulate a get_schedule transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -1271,6 +1319,8 @@ export class Client extends ContractClient {
         claimable: this.txFromJSON<i128>,
         is_revoked: this.txFromJSON<boolean>,
         get_proposal: this.txFromJSON<Option<ScheduleProposal>>,
+        set_splits: this.txFromJSON<Result<void>>,
+        get_splits: this.txFromJSON<Option<Array<SplitsReceiver>>>,
         get_schedule: this.txFromJSON<Result<VestingSchedule>>,
         nft_contract: this.txFromJSON<Option<string>>,
         total_locked: this.txFromJSON<i128>,

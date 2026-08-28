@@ -82,6 +82,16 @@ pub enum VestFlowError {
     MergeTooManySchedules = 24,
     MergeTokenMismatch = 25,
     MergeOwnerMismatch = 26,
+    /// Splits weights must sum to TOTAL_SPLITS_WEIGHT (10_000 bps).
+    InvalidSplitsWeight = 27,
+    /// Too many receivers in splits configuration.
+    TooManyReceivers = 28,
+    /// Splits configuration not found for this schedule.
+    SplitsNotFound = 29,
+    /// Splits can only be set once per schedule.
+    SplitsAlreadySet = 30,
+    /// Only the grantor can set splits.
+    NotGrantor = 31,
 }
 
 #[contracttype]
@@ -111,6 +121,8 @@ pub enum DataKey {
     Proposal(u64),
     /// Monotonic counter of proposals ever created.
     ProposalCount,
+    /// Splits configuration for a schedule (receivers and weights).
+    SplitsConfig(u64),
 }
 
 /// Storage keys for claim delegations, keyed separately from [`DataKey`] so
@@ -132,6 +144,25 @@ pub enum DelegationKey {
 /// Maximum number of concurrently active (non-revoked) delegations a
 /// beneficiary may hold open per schedule.
 pub const MAX_DELEGATIONS_PER_SCHEDULE: u32 = 5;
+
+/// Total weight for splits (100% = 10_000 basis points).
+/// All receiver weights must sum to this value.
+pub const TOTAL_SPLITS_WEIGHT: u32 = 10_000;
+
+/// Maximum number of receivers allowed in a splits configuration.
+pub const MAX_SPLITS_RECEIVERS: u32 = 20;
+
+/// A single receiver in a splits configuration.
+/// Each receiver gets a share of vested tokens proportional to their weight.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SplitsReceiver {
+    /// Stellar address of the receiver.
+    pub address: Address,
+    /// Weight in basis points (out of TOTAL_SPLITS_WEIGHT).
+    /// Must be > 0 and sum of all weights must equal TOTAL_SPLITS_WEIGHT.
+    pub weight: u32,
+}
 
 /// A delegation of claim rights from a schedule's beneficiary to a
 /// third-party address, optionally bounded by amount and/or ledger expiry.
@@ -1404,6 +1435,9 @@ impl VestFlowContract {
 
     /// Claim all vested tokens from a multi-token schedule.
     ///
+    /// If splits are configured, tokens are distributed proportionally to each
+    /// receiver based on their weight. Otherwise, tokens go to the beneficiary.
+    ///
     /// Transfers all available claimable amounts across all tokens in the schedule
     /// to the beneficiary, subject to cliff and lockup constraints.
     ///
@@ -1428,6 +1462,12 @@ impl VestFlowContract {
             return Err(VestFlowError::NothingToClaim);
         }
 
+        // Check if splits are configured
+        let splits: Option<Vec<SplitsReceiver>> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SplitsConfig(schedule_id));
+
         let mut total_claimed = false;
         let contract_address = env.current_contract_address();
 
@@ -1444,11 +1484,27 @@ impl VestFlowContract {
             if claimable > 0 {
                 tranche.claimed_amount += claimable;
                 schedule.tokens.set(i, tranche);
-                token::Client::new(&env, &schedule.tokens.get(i).expect("i < len").token).transfer(
-                    &contract_address,
-                    &schedule.beneficiary,
-                    &claimable,
-                );
+
+                let token_client = token::Client::new(&env, &tranche.token);
+
+                match &splits {
+                    Some(receivers) => {
+                        // Distribute proportionally to each receiver
+                        for receiver in receivers.iter() {
+                            let amount = claimable
+                                .checked_mul(receiver.weight as i128)
+                                .and_then(|n| n.checked_div(TOTAL_SPLITS_WEIGHT as i128))
+                                .unwrap_or(0);
+                            if amount > 0 {
+                                token_client.transfer(&contract_address, &receiver.address, &amount);
+                            }
+                        }
+                    }
+                    None => {
+                        // Default: send to beneficiary
+                        token_client.transfer(&contract_address, &schedule.beneficiary, &claimable);
+                    }
+                }
                 total_claimed = true;
             }
         }
@@ -1760,6 +1816,9 @@ impl VestFlowContract {
 
     /// Claim all currently vested but unclaimed tokens.
     ///
+    /// If splits are configured, tokens are distributed proportionally to each
+    /// receiver based on their weight. Otherwise, tokens go to the beneficiary.
+    ///
     /// Vested-but-unclaimed tokens remain claimable even after a revocation.
     ///
     /// # Errors
@@ -1811,19 +1870,50 @@ impl VestFlowContract {
         let contract_address = env.current_contract_address();
         let token_client = token::Client::new(&env, &schedule.token);
 
-        token_client.transfer(&contract_address, &schedule.beneficiary, &claimable);
+        // Check if splits are configured
+        let splits: Option<Vec<SplitsReceiver>> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SplitsConfig(schedule_id));
+
+        match splits {
+            Some(receivers) => {
+                // Distribute proportionally to each receiver
+                for receiver in receivers.iter() {
+                    let amount = claimable
+                        .checked_mul(receiver.weight as i128)
+                        .and_then(|n| n.checked_div(TOTAL_SPLITS_WEIGHT as i128))
+                        .unwrap_or(0);
+                    if amount > 0 {
+                        token_client.transfer(&contract_address, &receiver.address, &amount);
+                    }
+                }
+                env.events().publish(
+                    (
+                        symbol_short!("claimed"),
+                        schedule.beneficiary.clone(),
+                        schedule.token.clone(),
+                    ),
+                    (schedule_id, claimable, schedule.claimed_amount),
+                );
+            }
+            None => {
+                // Default: send to beneficiary
+                token_client.transfer(&contract_address, &schedule.beneficiary, &claimable);
+                env.events().publish(
+                    (
+                        symbol_short!("claimed"),
+                        schedule.beneficiary.clone(),
+                        schedule.token.clone(),
+                    ),
+                    (schedule_id, claimable, schedule.claimed_amount),
+                );
+            }
+        }
 
         env.storage()
             .instance()
             .set(&DataKey::Schedule(schedule_id), &schedule);
-        env.events().publish(
-            (
-                symbol_short!("claimed"),
-                schedule.beneficiary.clone(),
-                schedule.token.clone(),
-            ),
-            (schedule_id, claimable, schedule.claimed_amount),
-        );
 
         Ok(())
     }
@@ -2054,6 +2144,98 @@ impl VestFlowContract {
             (old_grantor, new_grantor, env.ledger().timestamp()),
         );
         Ok(())
+    }
+
+    /// Configure token splits for a vesting schedule.
+    ///
+    /// Allows the grantor to specify multiple receivers and their respective
+    /// weights (in basis points). When tokens are claimed, they are distributed
+    /// proportionally to each receiver based on their weight.
+    ///
+    /// The sum of all weights must equal TOTAL_SPLITS_WEIGHT (10_000 bps).
+    /// Maximum of MAX_SPLITS_RECEIVERS (20) receivers allowed.
+    /// Can only be called once per schedule (idempotent with same config returns Ok).
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` if `schedule_id` does not exist.
+    /// Returns `NotGrantor` if caller is not the grantor.
+    /// Returns `SplitsAlreadySet` if splits already configured for this schedule.
+    /// Returns `InvalidSplitsWeight` if weights don't sum to TOTAL_SPLITS_WEIGHT.
+    /// Returns `TooManyReceivers` if more than MAX_SPLITS_RECEIVERS receivers.
+    /// Returns `ScheduleRevoked` if the schedule has been revoked.
+    pub fn set_splits(
+        env: Env,
+        grantor: Address,
+        schedule_id: u64,
+        receivers: Vec<SplitsReceiver>,
+    ) -> Result<(), VestFlowError> {
+        grantor.require_auth();
+
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(VestFlowError::NotFound)?;
+
+        assert!(schedule.grantor == grantor, "Not the grantor");
+        assert!(!schedule.revoked, "Schedule has been revoked");
+
+        // Check if splits already configured
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::SplitsConfig(schedule_id))
+        {
+            return Err(VestFlowError::SplitsAlreadySet);
+        }
+
+        // Validate receiver count
+        if receivers.len() > MAX_SPLITS_RECEIVERS as u32 {
+            return Err(VestFlowError::TooManyReceivers);
+        }
+        if receivers.is_empty() {
+            return Err(VestFlowError::InvalidSplitsWeight);
+        }
+
+        // Validate weights sum to TOTAL_SPLITS_WEIGHT
+        let total_weight: u32 = receivers.iter().map(|r| r.weight).sum();
+        if total_weight != TOTAL_SPLITS_WEIGHT {
+            return Err(VestFlowError::InvalidSplitsWeight);
+        }
+
+        // Validate each weight > 0 and addresses are unique
+        let mut seen_addresses: Vec<Address> = vec![&env];
+        for receiver in receivers.iter() {
+            assert!(receiver.weight > 0, "Weight must be positive");
+            assert!(
+                !seen_addresses.iter().any(|a| a == &receiver.address),
+                "Duplicate receiver address"
+            );
+            seen_addresses.push_back(receiver.address.clone());
+        }
+
+        // Store splits configuration
+        env.storage()
+            .instance()
+            .set(&DataKey::SplitsConfig(schedule_id), &receivers);
+
+        env.events().publish(
+            (symbol_short!("spl_set"), schedule_id),
+            (grantor, receivers.clone()),
+        );
+
+        Ok(())
+    }
+
+    /// Get the splits configuration for a schedule.
+    ///
+    /// Returns the list of receivers and their weights if configured,
+    /// or `None` if no splits are configured.
+    pub fn get_splits(env: Env, schedule_id: u64) -> Option<Vec<SplitsReceiver>> {
+        env.storage()
+            .instance()
+            .get(&DataKey::SplitsConfig(schedule_id))
     }
 
     /// Read a vesting schedule by ID.

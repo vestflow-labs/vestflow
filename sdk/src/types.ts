@@ -207,9 +207,42 @@ export interface CreateGradedScheduleParams {
   lockupDays: number;
   /** Whether the grantor can revoke unvested tokens. */
   revocable: boolean;
-  /**
-   * Ordered list of unlock milestones.
-   * Must be non-empty and sum to exactly 10 000 bps.
-   */
+/**
+ * Ordered list of unlock milestones.
+ * Must be non-empty and sum to exactly 10 000 bps.
+ */
   milestones: GradedMilestone[];
+}
+
+/**
+ * A single receiver in a splits configuration.
+ * Each receiver gets a share of vested tokens proportional to their weight.
+ * Mirrors the SplitsReceiver struct in the Soroban contract.
+ */
+export interface SplitsReceiver {
+  /** Stellar address of the receiver. */
+  address: string;
+  /** Weight in basis points (out of TOTAL_SPLITS_WEIGHT).
+   * Must be > 0 and sum of all weights must equal TOTAL_SPLITS_WEIGHT. */
+  weight: number;
+}
+
+/**
+ * Parameters for configuring token splits on a vesting schedule.
+ */
+export interface SetSplitsParams {
+  /** Stellar public key of the grantor (must sign the transaction). */
+  grantor: string;
+  /** Schedule ID to configure splits for. */
+  scheduleId: number;
+  /** List of receivers and their weights. */
+  receivers: SplitsReceiver[];
+}
+
+/**
+ * Result of a successful transaction.
+ */
+export interface TransactionResult {
+  /** Transaction hash. */
+  hash: string;
 }

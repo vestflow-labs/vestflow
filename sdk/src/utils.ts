@@ -219,3 +219,16 @@ export function formatSchedule(
     progressPct,
   };
 }
+
+/**
+ * Total weight for splits (100% = 10_000 basis points).
+ * All receiver weights must sum to this value.
+ * Mirrors the TOTAL_SPLITS_WEIGHT constant in the Soroban contract.
+ */
+export const TOTAL_SPLITS_WEIGHT = 10_000;
+
+/**
+ * Maximum number of receivers allowed in a splits configuration.
+ * Mirrors the MAX_SPLITS_RECEIVERS constant in the Soroban contract.
+ */
+export const MAX_SPLITS_RECEIVERS = 20;
