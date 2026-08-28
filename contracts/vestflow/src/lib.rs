@@ -50,7 +50,9 @@ use soroban_sdk::{
     Env, IntoVal, String, Vec,
 };
 
-pub const VERSION: u32 = 1;
+/// Human-readable contract version, sourced from the `version` field in
+/// `Cargo.toml` at build time via `env!("CARGO_PKG_VERSION")`.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -667,9 +669,13 @@ impl VestFlowContract {
             .expect("Upgrade authority not initialized")
     }
 
-    /// Return the contract version.
-    pub fn version(_env: Env) -> u32 {
-        VERSION
+    /// Return the deployed contract version as a human-readable string.
+    ///
+    /// Sourced from the `version` field in `Cargo.toml` at build time, so
+    /// deployment scripts and monitoring tools can confirm which contract
+    /// build is live without reading Wasm bytecode.
+    pub fn version(env: Env) -> String {
+        String::from_str(&env, VERSION)
     }
 
     /// Initialize the address that may announce and execute contract upgrades.
@@ -7757,5 +7763,15 @@ mod test {
         client.split(&account, &token_address, &4000);
         assert_eq!(token.balance(&address_receiver), 1000);
         assert_eq!(token.balance(&nft_owner), 3000);
+    }
+
+    #[test]
+    fn test_version_view_is_non_empty_string() {
+        let env = Env::default();
+        let (client, _, _, _, _) = setup(&env);
+
+        let version = client.version();
+        assert!(!version.is_empty());
+        assert_eq!(version, soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION")));
     }
 }
