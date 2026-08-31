@@ -359,7 +359,11 @@ export async function getDripsStream(
 
 // ---------- Write ----------
 
-async function buildAndSend(publicKey: string, method: string, args: xdr.ScVal[]): Promise<string> {
+async function sendOp(
+  publicKey: string,
+  method: string,
+  args: xdr.ScVal[]
+): Promise<{ hash: string; status: any }> {
   const contract = new Contract(CONTRACT_ID);
   const account = await server.getAccount(publicKey);
   let tx = new TransactionBuilder(account, {
@@ -386,7 +390,30 @@ async function buildAndSend(publicKey: string, method: string, args: xdr.ScVal[]
     await new Promise((r) => setTimeout(r, 1000));
     status = await server.getTransaction(submitted.hash);
   }
-  return submitted.hash;
+  return { hash: submitted.hash, status };
+}
+
+async function buildAndSend(publicKey: string, method: string, args: xdr.ScVal[]): Promise<string> {
+  const { hash } = await sendOp(publicKey, method, args);
+  return hash;
+}
+
+/**
+ * Like `buildAndSend`, but also decodes the invocation's on-chain return
+ * value from the confirmed transaction's `returnValue` — needed for
+ * `commit_schedule_batch`, whose caller must know the assigned `batch_id`
+ * to hand beneficiaries their claim instructions.
+ */
+async function buildSendAndDecode<T>(
+  publicKey: string,
+  method: string,
+  args: xdr.ScVal[]
+): Promise<{ hash: string; value: T }> {
+  const { hash, status } = await sendOp(publicKey, method, args);
+  if (status.status !== "SUCCESS" || !status.returnValue) {
+    throw new Error(`Transaction ${hash} did not return a value (status: ${status.status})`);
+  }
+  return { hash, value: scValToNative(status.returnValue) as T };
 }
 
 export async function createDripsList(publicKey: string, name: string): Promise<string> {
@@ -525,6 +552,88 @@ export async function estimateCreateScheduleFee(
   if (StellarRpc.Api.isSimulationError(simResult)) throw new Error((simResult as any).error);
   const assembled = StellarRpc.assembleTransaction(tx, simResult as any).build();
   return BigInt(assembled.fee);
+}
+
+// ---------- Merkle batch (commit_schedule_batch / claim_schedule_slot) ----------
+
+/** A single beneficiary's proof, as produced by `scripts/merkle-batch.ts` / the `/api/bulk-create/merkle-root` route. */
+export interface MerkleBatchBeneficiary {
+  rowIndex: number;
+  beneficiary: string;
+  totalAmountStroops: string;
+  durationSecs: number;
+  cliffSecs: number;
+  startTime: number;
+  kind: "Linear" | "Cliff" | "LinearWithCliff" | "Graded";
+  revocable: boolean;
+  leaf: string;
+  proof: string[];
+}
+
+export interface MerkleBatch {
+  root: string;
+  token: string;
+  totalStroops: string;
+  expiryLedger: number;
+  beneficiaries: MerkleBatchBeneficiary[];
+}
+
+function bytesArg(hex: string): xdr.ScVal {
+  return nativeToScVal(Buffer.from(hex, "hex"), { type: "bytes" });
+}
+
+/**
+ * Commit a Merkle batch: the grantor signs once, depositing `batch.totalStroops`
+ * of `batch.token` and locking in `batch.root`. Each beneficiary later calls
+ * `claimScheduleSlot` themselves with their own proof from `batch.beneficiaries`.
+ */
+export async function commitScheduleBatch(
+  publicKey: string,
+  batch: Pick<MerkleBatch, "token" | "totalStroops" | "root" | "expiryLedger">
+): Promise<{ hash: string; batchId: number }> {
+  const { hash, value } = await buildSendAndDecode<bigint>(publicKey, "commit_schedule_batch", [
+    nativeToScVal(publicKey, { type: "address" }),
+    nativeToScVal(batch.token, { type: "address" }),
+    nativeToScVal(BigInt(batch.totalStroops), { type: "i128" }),
+    bytesArg(batch.root),
+    nativeToScVal(batch.expiryLedger, { type: "u32" }),
+  ]);
+  return { hash, batchId: Number(value) };
+}
+
+/**
+ * Beneficiary self-service claim: proves inclusion in a committed batch's
+ * Merkle tree and creates the corresponding vesting schedule, funded from
+ * the batch's deposit. No further grantor signature is required.
+ */
+export async function claimScheduleSlot(
+  publicKey: string,
+  batchId: number,
+  slot: Pick<
+    MerkleBatchBeneficiary,
+    "totalAmountStroops" | "durationSecs" | "cliffSecs" | "startTime" | "kind" | "revocable" | "proof"
+  >
+): Promise<string> {
+  const kindVal = xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(slot.kind)]);
+  return buildAndSend(publicKey, "claim_schedule_slot", [
+    nativeToScVal(batchId, { type: "u64" }),
+    nativeToScVal(publicKey, { type: "address" }),
+    nativeToScVal(BigInt(slot.totalAmountStroops), { type: "i128" }),
+    nativeToScVal(slot.durationSecs, { type: "u64" }),
+    nativeToScVal(slot.cliffSecs, { type: "u64" }),
+    nativeToScVal(slot.startTime, { type: "u64" }),
+    kindVal,
+    nativeToScVal(slot.revocable, { type: "bool" }),
+    xdr.ScVal.scvVec(slot.proof.map(bytesArg)),
+  ]);
+}
+
+/** Grantor reclaims a batch's unclaimed deposit after `expiryLedger` has passed. */
+export async function reclaimBatch(publicKey: string, batchId: number): Promise<string> {
+  return buildAndSend(publicKey, "reclaim_batch", [
+    nativeToScVal(batchId, { type: "u64" }),
+    nativeToScVal(publicKey, { type: "address" }),
+  ]);
 }
 
 export async function claimVested(publicKey: string, scheduleId: number): Promise<string> {
@@ -729,6 +838,11 @@ export function parseContractError(e: Error): string {
   if (msg.includes("Contract error: 7") || msg.includes("Contract, #7") || msg.includes("Cliff exceeds duration")) return "The cliff duration cannot exceed the total duration.";
   if (msg.includes("Contract error: 8") || msg.includes("Contract, #8") || msg.includes("Schedule has been revoked")) return "This schedule was revoked.";
   if (msg.includes("Contract error: 15") || msg.includes("Contract, #15") || msg.includes("DurationTooShort")) return "Duration must be at least 60 seconds.";
+  if (msg.includes("Contract error: 29") || msg.includes("Contract, #29") || msg.includes("SlotAlreadyClaimed")) return "This beneficiary slot has already been claimed.";
+  if (msg.includes("Contract error: 30") || msg.includes("Contract, #30") || msg.includes("BatchExpired")) return "This batch's claim window has expired.";
+  if (msg.includes("Contract error: 31") || msg.includes("Contract, #31") || msg.includes("InvalidProof")) return "The Merkle proof did not verify against the batch's committed root.";
+  if (msg.includes("Contract error: 32") || msg.includes("Contract, #32") || msg.includes("NotExpired")) return "This batch cannot be reclaimed until its expiry ledger has passed.";
+  if (msg.includes("Contract error: 33") || msg.includes("Contract, #33") || msg.includes("ProofTooDeep")) return "The Merkle proof is too deep (max 20 levels).";
 
   if (msg.includes("Schedule not found")) return "Schedule not found.";
   if (msg.includes("Not authorized")) return "Not authorized to perform this action.";

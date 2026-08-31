@@ -14,7 +14,10 @@ import { defineConfig } from "tsup";
  * which `prebuild` and `predev` invoke automatically.
  */
 export default defineConfig({
-  entry: { "claimable-calculator.worker": "workers/claimable-calculator.worker.ts" },
+  entry: {
+    "claimable-calculator.worker": "workers/claimable-calculator.worker.ts",
+    "sse.worker": "workers/sse.worker.ts",
+  },
   outDir: "public/workers",
   // A classic (non-module) worker script, for the widest browser support.
   format: ["iife"],

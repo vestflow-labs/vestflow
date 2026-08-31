@@ -184,8 +184,8 @@ const faqs: FAQItem[] = [
         </p>
         <ul className="list-disc list-inside text-zinc-400 space-y-1">
           <li>
-            <strong className="text-zinc-300">Vested tokens</strong> remain locked in the
-            contract and can still be claimed by the beneficiary at any time.
+            <strong className="text-zinc-300">Vested tokens</strong> are automatically released
+            to the beneficiary at the moment of revocation.
           </li>
           <li>
             <strong className="text-zinc-300">Unvested tokens</strong> are immediately returned

@@ -5,11 +5,13 @@ import BulkCreateTable, { DisplayRow, SubmitStatus } from "@/components/BulkCrea
 import { useToast } from "@/components/Toast";
 import { useWallet } from "@/lib/WalletContext";
 import {
+  commitScheduleBatch,
   createSchedule,
   estimateCreateScheduleFee,
   getWalletXlmBalance,
   parseContractError,
   stroopsToXlm,
+  type MerkleBatch,
 } from "@/lib/stellar";
 import {
   BULK_CREATE_CSV_TEMPLATE,
@@ -20,7 +22,7 @@ import {
   validateCsv,
 } from "@/lib/csv-validation";
 import { useCsvValidationWorker } from "@/lib/useCsvValidationWorker";
-import { downloadCSV } from "@/lib/csvExport";
+import { downloadCSV, downloadJSON } from "@/lib/csvExport";
 
 export default function BulkCreatePage() {
   const { publicKey } = useWallet();
@@ -49,6 +51,18 @@ export default function BulkCreatePage() {
   const [simulating, setSimulating] = useState(false);
   const [simulationError, setSimulationError] = useState<string | null>(null);
 
+  // ---- Merkle mode: one grantor signature for the whole CSV instead of one per row ----
+  const [mode, setMode] = useState<"per-row" | "merkle">("per-row");
+  const [csvText, setCsvText] = useState("");
+  const [merkleExpiryDays, setMerkleExpiryDays] = useState(30);
+  const [merkleBuilding, setMerkleBuilding] = useState(false);
+  const [merkleError, setMerkleError] = useState<string | null>(null);
+  const [merkleBatch, setMerkleBatch] = useState<MerkleBatch | null>(null);
+  const [merkleCommitting, setMerkleCommitting] = useState(false);
+  const [merkleCommitResult, setMerkleCommitResult] = useState<{ hash: string; batchId: number } | null>(
+    null
+  );
+
   const handleFile = async (file: File) => {
     setFileName(file.name);
     setResults({});
@@ -58,8 +72,12 @@ export default function BulkCreatePage() {
     setUnfundableIds(new Set());
     setBatchFees({});
     setSimulationError(null);
+    setMerkleBatch(null);
+    setMerkleError(null);
+    setMerkleCommitResult(null);
 
     const text = await file.text();
+    setCsvText(text);
     let parsed: ReturnType<typeof validateCsv>;
     try {
       parsed = await validateInWorker(text);
@@ -95,7 +113,83 @@ export default function BulkCreatePage() {
     setUnfundableIds(new Set());
     setBatchFees({});
     setSimulationError(null);
+    setCsvText("");
+    setMerkleBatch(null);
+    setMerkleError(null);
+    setMerkleCommitResult(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const merkleTotalStroops = useMemo(
+    () => validRows.reduce((sum, r) => sum + r.amountStroops, 0n),
+    [validRows]
+  );
+  const merkleDistinctTokens = useMemo(
+    () => new Set(validRows.map((r) => r.token)),
+    [validRows]
+  );
+  const merkleInsufficientBalance =
+    availableStroops !== null && merkleTotalStroops > availableStroops;
+
+  const handleComputeMerkleRoot = async () => {
+    setMerkleBuilding(true);
+    setMerkleError(null);
+    setMerkleBatch(null);
+    setMerkleCommitResult(null);
+    try {
+      if (merkleDistinctTokens.size > 1) {
+        throw new Error(
+          "All rows must use the same token — a Merkle batch deposits a single asset."
+        );
+      }
+      const res = await fetch("/api/bulk-create/merkle-root", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ csv: csvText, expiryDays: merkleExpiryDays }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to compute Merkle root.");
+      setMerkleBatch(data as MerkleBatch);
+    } catch (e: any) {
+      setMerkleError(e?.message || "Failed to compute Merkle root.");
+    } finally {
+      setMerkleBuilding(false);
+    }
+  };
+
+  const handleCommitBatch = async () => {
+    if (!publicKey || !merkleBatch) return;
+    setMerkleCommitting(true);
+    const toastId = addToast({
+      status: "pending",
+      title: "Committing batch…",
+      message: "Approve the transaction in Freighter.",
+    });
+    try {
+      const result = await commitScheduleBatch(publicKey, merkleBatch);
+      setMerkleCommitResult(result);
+      updateToast(toastId, {
+        status: "success",
+        title: "Batch committed",
+        message: `Batch #${result.batchId} committed with ${merkleBatch.beneficiaries.length} beneficiaries. Download the proof file to distribute.`,
+      });
+    } catch (e: any) {
+      updateToast(toastId, {
+        status: "error",
+        title: "Commit failed",
+        message: parseContractError(e),
+      });
+    } finally {
+      setMerkleCommitting(false);
+    }
+  };
+
+  const handleDownloadProofFile = () => {
+    if (!merkleBatch) return;
+    downloadJSON(
+      { ...merkleBatch, batchId: merkleCommitResult?.batchId ?? null },
+      `vestflow-batch-proofs${merkleCommitResult ? `-${merkleCommitResult.batchId}` : ""}.json`
+    );
   };
 
   const fundableRows = useMemo(
@@ -302,6 +396,40 @@ export default function BulkCreatePage() {
           </p>
         </div>
 
+        <div className="flex gap-2 rounded-xl border border-white/8 p-1 w-fit" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "per-row"}
+            onClick={() => setMode("per-row")}
+            disabled={running || merkleCommitting}
+            className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${
+              mode === "per-row" ? "bg-violet-500/20 text-violet-200" : "text-zinc-400 hover:text-white"
+            }`}
+          >
+            Per-row (one signature each)
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "merkle"}
+            onClick={() => setMode("merkle")}
+            disabled={running || merkleCommitting}
+            className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${
+              mode === "merkle" ? "bg-violet-500/20 text-violet-200" : "text-zinc-400 hover:text-white"
+            }`}
+          >
+            Merkle batch (one signature total)
+          </button>
+        </div>
+        {mode === "merkle" && (
+          <p className="text-sm text-zinc-400 -mt-3">
+            You sign once to commit a Merkle root and deposit the full total. Each beneficiary then
+            self-initialises their own schedule with their proof from the downloaded file — no further
+            signatures from you are needed.
+          </p>
+        )}
+
         <div className="card p-6 flex flex-col gap-5">
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <div>
@@ -340,10 +468,17 @@ export default function BulkCreatePage() {
 
           {checkingBalance && <p className="text-sm text-zinc-500">Checking wallet balance…</p>}
 
-          {!headerError && availableStroops !== null && unfundableIds.size > 0 && (
+          {mode === "per-row" && !headerError && availableStroops !== null && unfundableIds.size > 0 && (
             <p className="text-sm text-amber-400" role="alert">
               Insufficient balance: {stroopsToXlm(availableStroops)} XLM available. {unfundableIds.size} row
               {unfundableIds.size !== 1 ? "s" : ""} at the bottom cannot be funded and will be skipped.
+            </p>
+          )}
+
+          {mode === "merkle" && !headerError && merkleInsufficientBalance && (
+            <p className="text-sm text-amber-400" role="alert">
+              Insufficient balance: {stroopsToXlm(availableStroops!)} XLM available, but this batch needs{" "}
+              {stroopsToXlm(merkleTotalStroops)} XLM total.
             </p>
           )}
 
@@ -363,7 +498,7 @@ export default function BulkCreatePage() {
 
               <BulkCreateTable rows={displayRows} />
 
-              {batches.length > 0 && (
+              {mode === "per-row" && batches.length > 0 && (
                 <div className="flex flex-col gap-2">
                   <div className="flex items-center justify-between flex-wrap gap-2">
                     <p className="text-sm font-medium text-zinc-300">
@@ -428,24 +563,102 @@ export default function BulkCreatePage() {
                 </div>
               )}
 
-              {running && (
+              {mode === "per-row" && running && (
                 <p className="text-sm text-zinc-400">
                   Batch {(activeBatchIndex ?? 0) + 1} of {batches.length} — {overallDone}/{fundableRows.length}{" "}
                   schedules submitted…
                 </p>
               )}
 
-              <div className="flex gap-3 flex-wrap">
-                <button
-                  onClick={handleSubmitAllBatches}
-                  disabled={!canSubmit}
-                  className="btn-primary rounded-xl py-3 px-5 font-semibold text-white disabled:opacity-60"
-                >
-                  {running
-                    ? "Submitting…"
-                    : `Submit All Batches (${fundableRows.length} Schedule${fundableRows.length !== 1 ? "s" : ""})`}
-                </button>
-              </div>
+              {mode === "per-row" && (
+                <div className="flex gap-3 flex-wrap">
+                  <button
+                    onClick={handleSubmitAllBatches}
+                    disabled={!canSubmit}
+                    className="btn-primary rounded-xl py-3 px-5 font-semibold text-white disabled:opacity-60"
+                  >
+                    {running
+                      ? "Submitting…"
+                      : `Submit All Batches (${fundableRows.length} Schedule${fundableRows.length !== 1 ? "s" : ""})`}
+                  </button>
+                </div>
+              )}
+
+              {mode === "merkle" && (
+                <div className="flex flex-col gap-4 rounded-xl border border-white/8 p-4">
+                  <div className="flex items-end gap-3 flex-wrap">
+                    <label className="flex flex-col gap-1 text-sm">
+                      <span className="text-zinc-400">Claim window (days)</span>
+                      <input
+                        type="number"
+                        min={1}
+                        value={merkleExpiryDays}
+                        onChange={(e) => setMerkleExpiryDays(Math.max(1, Number(e.target.value) || 1))}
+                        disabled={merkleBuilding || merkleCommitting}
+                        className="input w-28"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handleComputeMerkleRoot}
+                      disabled={
+                        merkleBuilding ||
+                        merkleCommitting ||
+                        checkingBalance ||
+                        validRows.length === 0 ||
+                        merkleInsufficientBalance
+                      }
+                      className="btn-primary rounded-xl py-2.5 px-4 font-semibold text-white disabled:opacity-60"
+                    >
+                      {merkleBuilding ? "Computing…" : "Compute Merkle Root"}
+                    </button>
+                  </div>
+
+                  {merkleError && (
+                    <p className="text-sm text-red-400" role="alert">
+                      {merkleError}
+                    </p>
+                  )}
+
+                  {merkleBatch && (
+                    <div className="flex flex-col gap-2 text-sm">
+                      <p className="text-zinc-300">
+                        Root: <code className="font-mono text-xs break-all">{merkleBatch.root}</code>
+                      </p>
+                      <p className="text-zinc-300">
+                        Total deposit: {stroopsToXlm(BigInt(merkleBatch.totalStroops))} XLM across{" "}
+                        {merkleBatch.beneficiaries.length} beneficiar
+                        {merkleBatch.beneficiaries.length !== 1 ? "ies" : "y"}
+                      </p>
+                      <p className="text-zinc-300">Expiry ledger: {merkleBatch.expiryLedger}</p>
+
+                      {merkleCommitResult ? (
+                        <p className="text-emerald-400">
+                          Batch #{merkleCommitResult.batchId} committed (tx {merkleCommitResult.hash.slice(0, 10)}…).
+                          Download the proof file below and share it with your beneficiaries.
+                        </p>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={handleCommitBatch}
+                          disabled={merkleCommitting}
+                          className="btn-primary rounded-xl py-3 px-5 font-semibold text-white disabled:opacity-60 w-fit"
+                        >
+                          {merkleCommitting ? "Committing…" : "Commit Batch (1 Signature)"}
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={handleDownloadProofFile}
+                        className="text-violet-400 hover:underline w-fit"
+                      >
+                        Download proof file
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </>
           )}
         </div>

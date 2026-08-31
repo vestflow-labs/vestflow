@@ -15,20 +15,35 @@
  */
 
 import { rpc as StellarRpc, xdr, scValToNative } from "@stellar/stellar-sdk";
-import { getCheckpoint, setCheckpoint, insertEvent, computeTvlStats, insertBeneficiarySchedule, getPendingReplayCount } from "./db";
+import {
+  getCheckpoint,
+  setCheckpoint,
+  insertEvent,
+  computeTvlStats,
+  insertBeneficiarySchedule,
+  getPendingReplayCount,
+} from "./db";
 import { materialize } from "./analytics";
 import { invalidateToday } from "./analytics-cache";
 import { getNetworkConfig, parseNetwork } from "./config";
 import { WebhookDeliveryWorker, fanOutEvent } from "./webhook-delivery";
-import { runStartupGapDetection, runPeriodicGapDetection } from "./gap-detector";
+import { recordAppNotification } from "./app-notifications";
+import {
+  runStartupGapDetection,
+  runPeriodicGapDetection,
+} from "./gap-detector";
 import { ReplayEngine } from "./replay";
 import type { EventType } from "./types";
 
 const NETWORK = parseNetwork(process.env.INDEXER_NETWORK);
 const CONFIG = getNetworkConfig(NETWORK);
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? "10000");
-const TVL_COMPUTE_INTERVAL_MS = Number(process.env.TVL_COMPUTE_INTERVAL_MS ?? "60000");
-const GAP_DETECTION_INTERVAL_MS = Number(process.env.GAP_DETECTION_INTERVAL_MS ?? "300000");
+const TVL_COMPUTE_INTERVAL_MS = Number(
+  process.env.TVL_COMPUTE_INTERVAL_MS ?? "60000",
+);
+const GAP_DETECTION_INTERVAL_MS = Number(
+  process.env.GAP_DETECTION_INTERVAL_MS ?? "300000",
+);
 const START_LEDGER = Number(process.env.START_LEDGER ?? "0");
 const ENABLE_GAP_DETECTION = process.env.ENABLE_GAP_DETECTION !== "false";
 const ENABLE_REPLAY_ENGINE = process.env.ENABLE_REPLAY_ENGINE !== "false";
@@ -39,7 +54,9 @@ const HORIZON_URL: string | undefined =
   process.env.HORIZON_URL;
 
 if (!CONFIG.contractId) {
-  throw new Error(`Missing CONTRACT_ID_${NETWORK.toUpperCase()} for ${NETWORK}`);
+  throw new Error(
+    `Missing CONTRACT_ID_${NETWORK.toUpperCase()} for ${NETWORK}`,
+  );
 }
 
 const server = new StellarRpc.Server(CONFIG.rpcUrl);
@@ -48,12 +65,20 @@ const server = new StellarRpc.Server(CONFIG.rpcUrl);
 
 function decodeTopics(rawTopics: xdr.ScVal[]): unknown[] {
   return rawTopics.map((t) => {
-    try { return scValToNative(t); } catch { return null; }
+    try {
+      return scValToNative(t);
+    } catch {
+      return null;
+    }
   });
 }
 
 function decodeValue(raw: xdr.ScVal): unknown {
-  try { return scValToNative(raw); } catch { return null; }
+  try {
+    return scValToNative(raw);
+  } catch {
+    return null;
+  }
 }
 
 function inferEventType(topics: unknown[]): EventType {
@@ -73,13 +98,17 @@ function inferEventType(topics: unknown[]): EventType {
 
 function toStr(v: unknown): string | null {
   if (v == null) return null;
-  try { return String(v); } catch { return null; }
+  try {
+    return String(v);
+  } catch {
+    return null;
+  }
 }
 
 /** JSON.stringify does not support bigint values returned by scValToNative. */
 function jsonStringify(value: unknown): string {
   return JSON.stringify(value, (_key, item) =>
-    typeof item === "bigint" ? item.toString() : item
+    typeof item === "bigint" ? item.toString() : item,
   );
 }
 
@@ -91,13 +120,88 @@ function asArray(v: unknown): unknown[] {
   if (Array.isArray(v)) return v;
   if (v && typeof v === "object") {
     // Object with numeric keys, e.g. {"0": ..., "1": ...}
-    const keys = Object.keys(v).map(Number).filter((k) => !isNaN(k));
+    const keys = Object.keys(v)
+      .map(Number)
+      .filter((k) => !isNaN(k));
     if (keys.length > 0) {
       keys.sort((a, b) => a - b);
       return keys.map((k) => (v as Record<string, unknown>)[String(k)]);
     }
   }
   return [];
+}
+
+// ── In-app notification fan-out ───────────────────────────────────────
+
+/** Maps an indexed contract event type to its user-facing notification type. */
+function notificationTypeFor(eventType: EventType): string | null {
+  switch (eventType) {
+    case "schedule_created":
+      return "VestingStarted";
+    case "claimed":
+      return "Claimed";
+    case "revoked":
+      return "Revoked";
+    default:
+      return null;
+  }
+}
+
+interface IndexedEventFields {
+  event_id: string;
+  event_type: EventType;
+  ledger: number;
+  ledger_closed_at: string;
+  schedule_id: number | null;
+  grantor: string | null;
+  beneficiary: string | null;
+  token: string | null;
+  amount: string | null;
+}
+
+/**
+ * Writes one notification row per wallet that has a stake in this event.
+ * Only the affected wallets are notified — never a global broadcast — which is
+ * the server-side filtering that keeps SSE bandwidth proportional to interest.
+ */
+function fanOutAppNotifications(fields: IndexedEventFields): void {
+  const eventType = notificationTypeFor(fields.event_type);
+  if (!eventType) return;
+
+  const wallets = new Set<string>();
+  if (fields.grantor) wallets.add(fields.grantor);
+  if (fields.beneficiary) wallets.add(fields.beneficiary);
+  if (wallets.size === 0) return;
+
+  const payload = JSON.stringify({
+    event_id: fields.event_id,
+    event_type: eventType,
+    schedule_id: fields.schedule_id,
+    ledger: fields.ledger,
+    ledger_closed_at: fields.ledger_closed_at,
+    grantor: fields.grantor,
+    beneficiary: fields.beneficiary,
+    token: fields.token,
+    amount: fields.amount,
+  });
+
+  for (const wallet of wallets) {
+    try {
+      recordAppNotification(
+        {
+          wallet,
+          event_type: eventType,
+          schedule_id: fields.schedule_id,
+          event_id: fields.event_id,
+          ledger: fields.ledger,
+          payload,
+        },
+        NETWORK,
+      );
+    } catch (err) {
+      console.error("[poller] App notification write failed:", err);
+    }
+  }
 }
 
 // ── Core poll ─────────────────────────────────────────────────────────
@@ -151,21 +255,30 @@ async function poll(): Promise<void> {
             // value [grantor, beneficiary, token, total_amount, ...].
             // Older deployments used topics ["created", grantor, beneficiary, token],
             // value [id, total_amount]; keep both decoders for replay safety.
-            scheduleId = topics[1] != null && !Number.isNaN(Number(topics[1]))
-              ? Number(topics[1])
-              : valueArr[0] != null ? Number(valueArr[0]) : null;
-            grantor = valueArr[0] != null && scheduleId === Number(topics[1])
-              ? toStr(valueArr[0])
-              : toStr(topics[1]);
-            beneficiary = valueArr[1] != null && scheduleId === Number(topics[1])
-              ? toStr(valueArr[1])
-              : toStr(topics[2]);
-            token = valueArr[2] != null && scheduleId === Number(topics[1])
-              ? toStr(valueArr[2])
-              : toStr(topics[3]);
-            createdAmount = valueArr[3] != null && scheduleId === Number(topics[1])
-              ? String(valueArr[3])
-              : valueArr[1] != null ? String(valueArr[1]) : null;
+            scheduleId =
+              topics[1] != null && !Number.isNaN(Number(topics[1]))
+                ? Number(topics[1])
+                : valueArr[0] != null
+                  ? Number(valueArr[0])
+                  : null;
+            grantor =
+              valueArr[0] != null && scheduleId === Number(topics[1])
+                ? toStr(valueArr[0])
+                : toStr(topics[1]);
+            beneficiary =
+              valueArr[1] != null && scheduleId === Number(topics[1])
+                ? toStr(valueArr[1])
+                : toStr(topics[2]);
+            token =
+              valueArr[2] != null && scheduleId === Number(topics[1])
+                ? toStr(valueArr[2])
+                : toStr(topics[3]);
+            createdAmount =
+              valueArr[3] != null && scheduleId === Number(topics[1])
+                ? String(valueArr[3])
+                : valueArr[1] != null
+                  ? String(valueArr[1])
+                  : null;
             // Vesting curve params: only present in the current event shape
             // (grantor, beneficiary, token, total_amount, start_time,
             // duration, cliff_duration, vesting_kind, ...). Older replayed
@@ -212,17 +325,22 @@ async function poll(): Promise<void> {
             // topics: ["prop_act", proposal_id]
             // value: schedule_id
             proposalId = topics[1] != null ? Number(topics[1]) : null;
-            scheduleId = value != null && !Array.isArray(value)
-              ? Number(value)
-              : valueArr[0] != null ? Number(valueArr[0]) : null;
+            scheduleId =
+              value != null && !Array.isArray(value)
+                ? Number(value)
+                : valueArr[0] != null
+                  ? Number(valueArr[0])
+                  : null;
             break;
           case "proposal_expired":
             // topics: ["prop_exp", proposal_id]
             // value: expired_by
             proposalId = topics[1] != null ? Number(topics[1]) : null;
-            grantor = toStr(Array.isArray(value) || (value && typeof value === "object")
-              ? valueArr[0]
-              : value);
+            grantor = toStr(
+              Array.isArray(value) || (value && typeof value === "object")
+                ? valueArr[0]
+                : value,
+            );
             break;
           case "stream_set":
             // topics: ["stream_set", account, token]
@@ -237,45 +355,62 @@ async function poll(): Promise<void> {
             grantor = toStr(topics[1]);
             beneficiary = toStr(topics[2]);
             token = toStr(topics[3]);
-            amount = Array.isArray(value) || (value && typeof value === "object")
-              ? valueArr[0] != null ? String(valueArr[0]) : null
-              : value != null ? String(value) : null;
+            amount =
+              Array.isArray(value) || (value && typeof value === "object")
+                ? valueArr[0] != null
+                  ? String(valueArr[0])
+                  : null
+                : value != null
+                  ? String(value)
+                  : null;
             break;
           case "collected":
             // topics: ["collected", account, token]
             // value: amount_stroops, or [amount_stroops, ...metadata]
             beneficiary = toStr(topics[1]);
             token = toStr(topics[2]);
-            amount = Array.isArray(value) || (value && typeof value === "object")
-              ? valueArr[0] != null ? String(valueArr[0]) : null
-              : value != null ? String(value) : null;
+            amount =
+              Array.isArray(value) || (value && typeof value === "object")
+                ? valueArr[0] != null
+                  ? String(valueArr[0])
+                  : null
+                : value != null
+                  ? String(value)
+                  : null;
             break;
         }
 
-        const isNew = insertEvent({
-          id: raw.id,
-          event_type: eventType,
-          ledger: raw.ledger,
-          ledger_closed_at: raw.ledgerClosedAt,
-          schedule_id: scheduleId,
-          proposal_id: proposalId,
-          grantor,
-          beneficiary,
-          amount,
-          token,
-          created_amount: createdAmount,
-          start_time: startTime,
-          duration,
-          cliff_duration: cliffDuration,
-          vesting_kind: vestingKind,
-          raw_topics: jsonStringify(topics),
-          raw_value: jsonStringify(value),
-        }, NETWORK);
+        const isNew = insertEvent(
+          {
+            id: raw.id,
+            event_type: eventType,
+            ledger: raw.ledger,
+            ledger_closed_at: raw.ledgerClosedAt,
+            schedule_id: scheduleId,
+            proposal_id: proposalId,
+            grantor,
+            beneficiary,
+            amount,
+            token,
+            created_amount: createdAmount,
+            start_time: startTime,
+            duration,
+            cliff_duration: cliffDuration,
+            vesting_kind: vestingKind,
+            raw_topics: jsonStringify(topics),
+            raw_value: jsonStringify(value),
+          },
+          NETWORK,
+        );
 
         if (isNew) {
           ingested++;
           // Populate beneficiary index for O(1) lookup
-          if (eventType === "schedule_created" && beneficiary && scheduleId !== null) {
+          if (
+            eventType === "schedule_created" &&
+            beneficiary &&
+            scheduleId !== null
+          ) {
             insertBeneficiarySchedule(beneficiary, scheduleId, NETWORK);
           }
           // Queue webhook deliveries. This only writes rows — the HTTP
@@ -297,11 +432,25 @@ async function poll(): Promise<void> {
                 amount,
                 created_amount: createdAmount,
               },
-              NETWORK
+              NETWORK,
             );
           } catch (err) {
             console.error("[poller] Webhook fan-out failed:", err);
           }
+
+          // Write in-app notifications for the affected wallets so the SSE
+          // stream can push them out.
+          fanOutAppNotifications({
+            event_id: raw.id,
+            event_type: eventType,
+            ledger: raw.ledger,
+            ledger_closed_at: raw.ledgerClosedAt,
+            schedule_id: scheduleId,
+            grantor,
+            beneficiary,
+            token,
+            amount,
+          });
         }
         if (raw.ledger > highestLedger) highestLedger = raw.ledger;
       }
@@ -321,10 +470,12 @@ async function poll(): Promise<void> {
 
     if (ingested > 0) {
       console.log(
-        `[poller] Ingested ${ingested} new event(s). Checkpoint: ledger ${highestLedger}.`
+        `[poller] Ingested ${ingested} new event(s). Checkpoint: ledger ${highestLedger}.`,
       );
     } else {
-      console.log(`[poller] No new events. Checkpoint: ledger ${highestLedger}.`);
+      console.log(
+        `[poller] No new events. Checkpoint: ledger ${highestLedger}.`,
+      );
     }
 
     // Fold newly ingested (and any previously unmaterialized, e.g. from a
@@ -335,7 +486,7 @@ async function poll(): Promise<void> {
       if (result.events_processed > 0) {
         console.log(
           `[poller] Analytics: materialized ${result.events_processed} event(s) → ` +
-            `${result.schedules_affected} schedule(s), ${result.tokens_affected} token(s), ${result.grantors_affected} grantor(s).`
+            `${result.schedules_affected} schedule(s), ${result.tokens_affected} token(s), ${result.grantors_affected} grantor(s).`,
         );
         // Today's TVL numbers just changed; historical days are untouched
         // and stay cached.
@@ -348,7 +499,7 @@ async function poll(): Promise<void> {
     // Log but do not crash — the loop will retry on the next interval.
     console.error(
       "[poller] Poll failed:",
-      err instanceof Error ? err.message : String(err)
+      err instanceof Error ? err.message : String(err),
     );
   }
 }
@@ -374,7 +525,7 @@ async function runStartupDetection(): Promise<void> {
     if (result.gapsDetected > 0) {
       console.log(
         `[poller] Startup gap detection complete: found ${result.gapsDetected} gap(s) ` +
-        `covering ${result.currentLedger - result.lastCheckpoint} ledgers`
+          `covering ${result.currentLedger - result.lastCheckpoint} ledgers`,
       );
     } else {
       console.log("[poller] Startup gap detection complete: no gaps found");
@@ -399,7 +550,9 @@ function startReplayEngine(): ReplayEngine | null {
       batchSize: Number(process.env.REPLAY_BATCH_SIZE ?? "200"),
       maxRetries: Number(process.env.REPLAY_MAX_RETRIES ?? "8"),
       retryDelayMs: Number(process.env.REPLAY_RETRY_DELAY_MS ?? "1000"),
-      progressUpdateInterval: Number(process.env.REPLAY_PROGRESS_INTERVAL ?? "100"),
+      progressUpdateInterval: Number(
+        process.env.REPLAY_PROGRESS_INTERVAL ?? "100",
+      ),
       webhookDelivery: true,
     });
 
@@ -409,7 +562,7 @@ function startReplayEngine(): ReplayEngine | null {
     });
 
     console.log("[poller]   Replay   : background worker started");
-    
+
     const shutdown = () => {
       replayEngine.stop();
     };
@@ -434,11 +587,11 @@ async function runPeriodicDetection(): Promise<void> {
       network: NETWORK,
       ...(HORIZON_URL ? { horizonUrl: HORIZON_URL } : {}),
     });
-    
+
     if (result.gapsDetected > 0) {
       console.warn(
         `[poller] Periodic gap detection found ${result.gapsDetected} gap(s) - ` +
-        'live polling may be missing events'
+          "live polling may be missing events",
       );
     }
   } catch (error) {
@@ -456,18 +609,22 @@ async function runPeriodicDetection(): Promise<void> {
  */
 function startWebhookWorker(): WebhookDeliveryWorker | null {
   if (process.env.WEBHOOK_DELIVERY_ENABLED === "false") {
-    console.log("[poller]   Webhooks : disabled (WEBHOOK_DELIVERY_ENABLED=false)");
+    console.log(
+      "[poller]   Webhooks : disabled (WEBHOOK_DELIVERY_ENABLED=false)",
+    );
     return null;
   }
   if (!process.env.WEBHOOK_ENCRYPTION_KEY) {
-    console.log("[poller]   Webhooks : disabled (WEBHOOK_ENCRYPTION_KEY not set)");
+    console.log(
+      "[poller]   Webhooks : disabled (WEBHOOK_ENCRYPTION_KEY not set)",
+    );
     return null;
   }
 
   const worker = new WebhookDeliveryWorker({ network: NETWORK });
   worker.start();
   console.log(
-    `[poller]   Webhooks : delivering with ${worker.concurrency} concurrent senders`
+    `[poller]   Webhooks : delivering with ${worker.concurrency} concurrent senders`,
   );
 
   return worker;
@@ -482,7 +639,9 @@ async function run(): Promise<void> {
   console.log(`[poller]   RPC      : ${CONFIG.rpcUrl}`);
   console.log(`[poller]   Interval : ${POLL_INTERVAL_MS} ms`);
   console.log(`[poller]   TVL job  : every ${TVL_COMPUTE_INTERVAL_MS} ms`);
-  console.log(`[poller]   Gap check: every ${GAP_DETECTION_INTERVAL_MS} ms (enabled: ${ENABLE_GAP_DETECTION})`);
+  console.log(
+    `[poller]   Gap check: every ${GAP_DETECTION_INTERVAL_MS} ms (enabled: ${ENABLE_GAP_DETECTION})`,
+  );
   console.log(`[poller]   Replay   : enabled: ${ENABLE_REPLAY_ENGINE}`);
   if (HORIZON_URL) console.log(`[poller]   Horizon  : ${HORIZON_URL}`);
   console.log(`[poller]   Checkpoint: ledger ${getCheckpoint(NETWORK)}`);
@@ -499,21 +658,21 @@ async function run(): Promise<void> {
   const shutdown = async () => {
     if (isShuttingDown) return;
     isShuttingDown = true;
-    
+
     console.log("[poller] Shutting down gracefully...");
-    
+
     // Stop replay engine first to avoid new work
     if (replayEngine) {
       console.log("[poller] Stopping replay engine...");
       replayEngine.stop();
     }
-    
+
     // Stop webhook worker
     if (webhookWorker) {
       console.log("[poller] Stopping webhook worker...");
       await webhookWorker.stop();
     }
-    
+
     console.log("[poller] Shutdown complete");
     process.exit(0);
   };
@@ -530,13 +689,13 @@ async function run(): Promise<void> {
 
     // Run normal event polling
     await poll();
-    
+
     // Periodic tasks
     if (now - lastTvlCompute >= TVL_COMPUTE_INTERVAL_MS) {
       const tvl = computeTvlStats(NETWORK);
       lastTvlCompute = now;
       console.log(
-        `[poller] TVL refreshed for ${tvl.assets.length} asset(s): ${tvl.total_value_locked}`
+        `[poller] TVL refreshed for ${tvl.assets.length} asset(s): ${tvl.total_value_locked}`,
       );
     }
 
@@ -544,16 +703,20 @@ async function run(): Promise<void> {
     if (now - lastGapDetection >= GAP_DETECTION_INTERVAL_MS) {
       await runPeriodicDetection();
       lastGapDetection = now;
-      
+
       // Log replay queue status
       const pendingReplays = getPendingReplayCount(NETWORK);
       if (pendingReplays > 0) {
-        console.log(`[poller] Replay queue status: ${pendingReplays} ranges pending`);
+        console.log(
+          `[poller] Replay queue status: ${pendingReplays} ranges pending`,
+        );
       }
     }
 
     if (!isShuttingDown) {
-      await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, POLL_INTERVAL_MS),
+      );
     }
   }
 }
