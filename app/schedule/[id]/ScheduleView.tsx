@@ -117,7 +117,7 @@ export default function ScheduleView({ schedule, claimable: initialClaimable }: 
   return (
     <>
       <Navbar />
-      <main className="max-w-4xl mx-auto px-6 py-12">
+      <main className="max-w-4xl mx-auto px-4 sm:px-6 py-12">
         {/* Header */}
         <div className="mb-8">
           <Link href="/" className="text-zinc-400 hover:text-zinc-300 transition-colors text-sm mb-4 inline-block">
@@ -135,14 +135,14 @@ export default function ScheduleView({ schedule, claimable: initialClaimable }: 
                 <>
                   <button
                     onClick={() => setShowTopUp(true)}
-                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold transition-colors"
+                    className="px-3 py-1.5 min-h-[44px] rounded-lg bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold transition-colors"
                   >
                     Top Up
                   </button>
                   <button
                     onClick={() => setShowWithdraw(true)}
                     disabled={BigInt(schedule.total_amount) - BigInt(schedule.claimed) === 0n}
-                    className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="px-3 py-1.5 min-h-[44px] rounded-lg bg-amber-600 hover:bg-amber-700 text-sm font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     Withdraw
                   </button>
@@ -301,7 +301,7 @@ export default function ScheduleView({ schedule, claimable: initialClaimable }: 
           <button
             onClick={handleSimulateClaim}
             disabled={simulating}
-            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded font-semibold text-sm transition-colors"
+            className="px-4 py-2 min-h-[44px] bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded font-semibold text-sm transition-colors"
           >
             {simulating ? "Simulating…" : "Simulate Claim"}
           </button>
@@ -330,12 +330,12 @@ export default function ScheduleView({ schedule, claimable: initialClaimable }: 
         <div className="card p-6 border-violet-500/20 bg-violet-500/5">
           <h3 className="font-semibold mb-3">Share This Schedule</h3>
           <p className="text-sm text-zinc-400 mb-4">Copy the link below to share this public schedule view:</p>
-          <div className="flex gap-2">
+          <div className="flex flex-col sm:flex-row gap-2">
             <input
               type="text"
               value={shareUrl || `/schedule/${schedule.id}`}
               readOnly
-              className="flex-1 px-3 py-2 bg-zinc-900 border border-zinc-700 rounded text-sm font-mono text-zinc-300"
+              className="flex-1 min-h-[44px] px-3 py-2 bg-zinc-900 border border-zinc-700 rounded text-sm font-mono text-zinc-300"
             />
             <button
               onClick={async () => {
@@ -345,7 +345,7 @@ export default function ScheduleView({ schedule, claimable: initialClaimable }: 
                 copyTimerRef.current = window.setTimeout(() => setLinkCopied(false), 1500);
               }}
               aria-label="Copy share link"
-              className="px-4 py-2 bg-violet-600 hover:bg-violet-700 rounded font-semibold transition-colors"
+              className="px-4 py-2 min-h-[44px] bg-violet-600 hover:bg-violet-700 rounded font-semibold transition-colors sm:w-auto w-full"
             >
               {linkCopied ? "Copied!" : "Copy"}
             </button>

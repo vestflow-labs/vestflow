@@ -66,7 +66,7 @@ export default function SplitsPage() {
           </div>
           <Link
             href="/app"
-            className="text-sm text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3.5 py-2 transition-colors"
+            className="text-sm text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3.5 py-2 min-h-[44px] inline-flex items-center transition-colors"
           >
             ← Dashboard
           </Link>
@@ -86,7 +86,7 @@ export default function SplitsPage() {
           </div>
         ) : (
           <div className="card p-6 sm:p-8 space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-3">
               <div>
                 <h2 className="text-lg font-semibold text-white">Receivers</h2>
                 <p className="text-sm text-zinc-500">
@@ -101,7 +101,7 @@ export default function SplitsPage() {
               <button
                 onClick={fetchSplits}
                 disabled={loading}
-                className="text-sm text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-40"
+                className="text-sm text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3 py-1.5 min-h-[44px] transition-colors disabled:opacity-40 inline-flex items-center"
               >
                 ↻ Refresh
               </button>
@@ -116,8 +116,8 @@ export default function SplitsPage() {
             {/* Receiver table */}
             <div className="border-t border-white/5 pt-4">
               <h3 className="text-sm font-medium text-zinc-300 mb-3">All Receivers</h3>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
+               <div className="overflow-x-auto -mx-1 px-1">
+                 <table className="w-full text-sm min-w-[28rem]">
                   <thead>
                     <tr className="text-xs text-zinc-500 uppercase tracking-wider">
                       <th className="text-left py-2 px-3">Address</th>

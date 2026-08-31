@@ -125,36 +125,36 @@ export default function DripsListDetail({
             <div className="flex items-center justify-between gap-2 mb-1">
               <p className="text-xs text-zinc-400 uppercase tracking-wider">Target Rate</p>
               {isOwner && !isEditingTarget && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTargetInput(list.target_rate_per_sec);
-                    setIsEditingTarget(true);
-                  }}
-                  className="text-[11px] text-violet-400 hover:text-violet-300 font-medium underline"
-                  aria-label="Edit target rate"
-                >
-                  Edit
-                </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setTargetInput(list.target_rate_per_sec);
+                  setIsEditingTarget(true);
+                }}
+                className="text-[11px] text-violet-400 hover:text-violet-300 font-medium underline min-h-[44px] flex items-center"
+                aria-label="Edit target rate"
+              >
+                Edit
+              </button>
               )}
             </div>
 
             {isEditingTarget ? (
               <div className="space-y-2 mt-1">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <input
                     type="text"
                     value={targetInput}
                     onChange={e => setTargetInput(e.target.value)}
                     placeholder="Base units / sec"
-                    className="w-full text-xs font-mono bg-black/50 border border-violet-500/50 rounded px-2 py-1 text-white outline-none"
+                    className="flex-1 min-w-0 text-xs font-mono bg-black/50 border border-violet-500/50 rounded px-2 py-2 min-h-[44px] text-white outline-none"
                     aria-label="Target rate input in base units per second"
                   />
                   <button
                     type="button"
                     disabled={savingTarget}
                     onClick={handleSaveTargetRate}
-                    className="btn-primary rounded px-2.5 py-1 text-[11px] font-semibold text-white disabled:opacity-50"
+                    className="btn-primary rounded px-3 py-2 text-[11px] font-semibold text-white disabled:opacity-50 min-h-[44px] shrink-0"
                   >
                     {savingTarget ? "…" : "Save"}
                   </button>
@@ -162,7 +162,7 @@ export default function DripsListDetail({
                     type="button"
                     disabled={savingTarget}
                     onClick={() => setIsEditingTarget(false)}
-                    className="text-[11px] text-zinc-400 hover:text-white px-1"
+                    className="text-[11px] text-zinc-400 hover:text-white px-2 min-h-[44px] shrink-0 flex items-center"
                   >
                     ✕
                   </button>

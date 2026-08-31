@@ -330,16 +330,16 @@ function OutgoingStreamsList({
                   </span>
                 </div>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
                 <button
                   onClick={() => onEdit(s)}
-                  className="px-2.5 py-1 rounded-lg text-xs font-medium border border-white/10 text-zinc-300 hover:border-white/20 transition-colors"
+                  className="px-3 py-2 min-h-[44px] rounded-lg text-xs font-medium border border-white/10 text-zinc-300 hover:border-white/20 transition-colors"
                 >
                   Edit
                 </button>
                 <button
                   onClick={() => onStop(s)}
-                  className="px-2.5 py-1 rounded-lg text-xs font-medium bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 transition-colors"
+                  className="px-3 py-2 min-h-[44px] rounded-lg text-xs font-medium bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 transition-colors"
                 >
                   Stop
                 </button>
@@ -348,7 +348,7 @@ function OutgoingStreamsList({
                     onClick={() => {
                       // TODO: implement collect call
                     }}
-                    className="px-3 py-1.5 rounded-lg text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-500 transition-colors flex items-center gap-2">
+                    className="px-3 py-2 min-h-[44px] rounded-lg text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-500 transition-colors flex items-center gap-2 grow sm:grow-0">
                     Collect {stroopsToXlm(claimable)} XLM
                   </button>
                 )}

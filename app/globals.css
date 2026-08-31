@@ -103,6 +103,9 @@ body {
   font-family: var(--font-geist-sans, sans-serif);
   -webkit-font-smoothing: antialiased;
   transition: background 0.2s, color 0.2s;
+  /* Guard against any incidental horizontal overflow on small viewports */
+  overflow-x: hidden;
+  max-width: 100vw;
 }
 
 /* ── Utility classes ────────────────────────────────────────────────── */
@@ -123,6 +126,10 @@ body {
 .btn-primary {
   background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
   transition: opacity 0.2s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
 }
 
 .btn-primary:hover:not(:disabled) {

@@ -92,7 +92,7 @@ export default function GiveModal({ open, onClose, onSuccess }: GiveModalProps) 
             <h2 className="text-lg font-bold">Give Tokens</h2>
             <p className="text-sm text-zinc-400">Send vested tokens to another address</p>
           </div>
-          <button onClick={onClose} className="text-zinc-500 hover:text-zinc-300 transition-colors p-1" aria-label="Close">
+          <button onClick={onClose} className="flex items-center justify-center text-zinc-500 hover:text-zinc-300 transition-colors shrink-0 min-h-[44px] min-w-[44px] -mr-2" aria-label="Close">
             ✕
           </button>
         </div>
@@ -109,7 +109,7 @@ export default function GiveModal({ open, onClose, onSuccess }: GiveModalProps) 
                 setErr("");
               }}
               required
-              className="input w-full"
+              className="input w-full min-h-[44px]"
             />
           </div>
 
@@ -127,18 +127,18 @@ export default function GiveModal({ open, onClose, onSuccess }: GiveModalProps) 
                 if (val) setErr("");
               }}
               required
-              className="input w-full"
+              className="input w-full min-h-[44px]"
             />
           </div>
 
           <div className="flex gap-3 pt-1">
-            <button type="button" onClick={onClose} className="flex-1 rounded-xl border border-white/10 py-2.5 text-sm font-semibold text-zinc-300 hover:border-white/20 transition-colors disabled:opacity-50">
+            <button type="button" onClick={onClose} className="flex-1 min-h-[44px] rounded-xl border border-white/10 py-2.5 text-sm font-semibold text-zinc-300 hover:border-white/20 transition-colors disabled:opacity-50">
               Cancel
             </button>
             <button
               type="submit"
               disabled={loading || !amount.trim()}
-              className="flex-1 btn-primary rounded-xl py-2.5 font-semibold disabled:opacity-50">
+              className="flex-1 min-h-[44px] btn-primary rounded-xl py-2.5 font-semibold disabled:opacity-50">
               {loading ? (
                 <span className="flex items-center justify-center gap-2">
                   <span className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />

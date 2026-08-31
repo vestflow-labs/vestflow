@@ -133,7 +133,7 @@ export default function CopyLinkButton({
           onClick={handleCopy}
           aria-label={label}
           title={copied ? "Copied!" : label}
-          className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border transition-all ${
+          className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 min-h-[44px] rounded-lg border transition-all ${
             copied
               ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300 shadow-sm shadow-emerald-500/20"
               : "border-white/10 bg-white/5 text-zinc-300 hover:border-white/20 hover:text-white hover:bg-white/10"
@@ -170,7 +170,7 @@ export default function CopyLinkButton({
               <button
                 type="button"
                 onClick={() => setShowFallbackModal(false)}
-                className="text-zinc-400 hover:text-white transition-colors p-1"
+                className="text-zinc-400 hover:text-white transition-colors p-1 min-h-[44px] min-w-[44px] flex items-center justify-center"
                 aria-label="Close modal"
               >
                 ✕
@@ -195,7 +195,7 @@ export default function CopyLinkButton({
               <button
                 type="button"
                 onClick={() => setShowFallbackModal(false)}
-                className="btn-primary rounded-lg px-4 py-1.5 text-xs font-semibold text-white"
+                className="btn-primary rounded-lg px-4 py-1.5 min-h-[44px] text-xs font-semibold text-white"
               >
                 Done
               </button>

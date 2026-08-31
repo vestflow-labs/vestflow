@@ -189,7 +189,7 @@ export default function SplitsPieChart({
               onClick={() =>
                 onSelect?.(selectedAddress === arc.address ? null : arc.address)
               }
-              className={`flex items-center gap-2 px-3 py-2 rounded-lg text-left transition-colors w-full ${
+              className={`flex items-center gap-2 px-3 py-2 rounded-lg text-left transition-colors w-full min-h-[44px] ${
                 isSelected
                   ? "bg-white/10 border border-white/20"
                   : "hover:bg-white/5 border border-transparent"

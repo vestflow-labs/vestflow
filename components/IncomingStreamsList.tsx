@@ -75,12 +75,12 @@ export default function IncomingStreamsList({ publicKey, refreshKey }: IncomingS
           <h2 className="text-lg font-semibold">Incoming Streams</h2>
           <p className="text-sm text-zinc-500">Accounts streaming tokens to your wallet</p>
         </div>
-        <button
-          onClick={fetchStreams}
-          disabled={loading}
-          className="text-sm text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-40"
-          aria-label="Refresh incoming streams"
-        >
+          <button
+            onClick={fetchStreams}
+            disabled={loading}
+            className="text-sm text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3 py-1.5 min-h-[44px] transition-colors disabled:opacity-40 inline-flex items-center"
+            aria-label="Refresh incoming streams"
+          >
           ↻ Refresh
         </button>
       </div>
