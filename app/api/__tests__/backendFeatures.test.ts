@@ -6,9 +6,10 @@ import { GET as getScheduleHistory } from "../schedules/[id]/history/route";
 import { GET as getAnalyticsStats } from "../analytics/stats/route";
 import { GET as getContractVersion } from "../contracts/version/route";
 import { GET as getContractMetrics } from "../contracts/metrics/route";
+import { POST as topUpContract } from "../contracts/top-up/route";
 import { promises as fs } from "fs";
 
-vi.mock("fs/promises", () => ({
+vi.mock("fs", () => ({
   promises: {
     readFile: vi.fn(),
   },
@@ -83,6 +84,7 @@ vi.mock("@/lib/stellar", () => ({
     return Promise.resolve(null);
   }),
   getContractVersion: vi.fn().mockResolvedValue(1),
+  topUp: vi.fn().mockResolvedValue({ hash: "mock-hash" }),
 }));
 
 vi.mock("@/lib/rateLimit", () => ({
@@ -230,6 +232,24 @@ describe("Backend Features (#428, #429, #430, #431)", () => {
       expect(res.status).toBe(503);
       const body = await res.json();
       expect(body.error).toBe("Failed to fetch contract metrics");
+    });
+  });
+
+  describe("Issue #433: POST /api/contracts/top-up", () => {
+    it("returns 200 when top-up is submitted", async () => {
+      const req = new NextRequest("http://localhost:3000/api/contracts/top-up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          account: "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN",
+          token: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+          amount: "10000000",
+        }),
+      });
+      const res = await topUpContract(req);
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Type")).toContain("application/json");
     });
   });
 });
