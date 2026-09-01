@@ -7,15 +7,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { 
   getDb, 
   getCheckpoint, 
-  getPendingReplayCount, 
   getReplayQueueItems, 
-  getLastGapDetection,
-  type ReplayQueueItem 
 } from "@/indexer/src/db";
 import { 
   getGapDetectionHealth, 
   getCurrentLedgerFromHorizon,
-  type GapDetectionConfig 
 } from "@/indexer/src/gap-detector";
 import { parseNetwork, getNetworkConfig } from "@/indexer/src/config";
 import { withLogging } from "@/lib/requestLogger";
@@ -30,8 +26,6 @@ export const GET = withLogging(async function GET(request: NextRequest): Promise
 
     // Basic indexer status
     const checkpoint = getCheckpoint(NETWORK);
-    const pendingReplays = getPendingReplayCount(NETWORK);
-    const lastGapDetection = getLastGapDetection(NETWORK);
     const gapDetectionHealth = getGapDetectionHealth(NETWORK);
 
     // Get current Horizon ledger for lag calculation
