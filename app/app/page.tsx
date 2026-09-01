@@ -260,11 +260,13 @@ function OutgoingStreamsList({
   publicKey,
   onEdit,
   onStop,
+  claimableMap,
 }: {
   schedules: ScheduleData[];
   publicKey: string;
   onEdit: (s: ScheduleData) => void;
   onStop: (s: ScheduleData) => void;
+  claimableMap: Map<string, bigint>;
 }) {
   const outgoing = schedules.filter(
     (s) => s.grantor === publicKey && !s.revoked,
