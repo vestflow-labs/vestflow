@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
+import { createHash } from "node:crypto";
 import { parseNetwork, type NetworkName } from "./config";
 import type {
   EventQueryParams,
@@ -1078,6 +1079,37 @@ export function queryDripsStreams(params: {
   };
 }
 
+/**
+ * The most recent last-updated timestamp across an account's active streams.
+ * Used to derive an `ETag` for `GET /streams` so the cache invalidates the
+ * instant new stream data lands.
+ */
+export function getDripsStreamsLastUpdated(account: string, network?: NetworkName): number {
+  const row = getDb(network)
+    .prepare(
+      `SELECT MAX(COALESCE(created_at, ended_at, 0)) AS last_updated
+       FROM drips_streams
+       WHERE account = ?`
+    )
+    .get(account) as { last_updated: number | null } | undefined;
+  return row?.last_updated ?? 0;
+}
+
+/**
+ * The most recent `updated_at` across an account's current stream (splits)
+ * configuration rows. Used to derive an `ETag` for `GET /splits`.
+ */
+export function getDripsSplitsLastUpdated(account: string, network?: NetworkName): number {
+  const row = getDb(network)
+    .prepare(
+      `SELECT MAX(updated_at) AS last_updated
+       FROM current_streams
+       WHERE account = ?`
+    )
+    .get(account) as { last_updated: number | null } | undefined;
+  return row?.last_updated ?? 0;
+}
+
 export function getDripsStreamingTvl(
   token: string,
   network?: NetworkName,
@@ -1111,6 +1143,49 @@ export function getCurrentStream(
       }
     | undefined;
   return row ?? null;
+}
+
+/**
+ * The current splits configuration for an account, aggregated across every
+ * token for which a `current_streams` row exists.
+ *
+ * `receivers_json` stores the raw `stream_set` value as an array of
+ * `{ receiver, rate_per_second }` entries. We surface the receivers verbatim
+ * and derive a stable `hash` from the joined configuration so clients can
+ * detect changes cheaply.
+ */
+export function queryDripsSplits(
+  account: string,
+  network?: NetworkName
+): { receivers: unknown[]; hash: string; last_updated: number } {
+  const rows = getDb(network)
+    .prepare(
+      `SELECT receivers_json, updated_at
+       FROM current_streams
+       WHERE account = ?
+       ORDER BY updated_at DESC`
+    )
+    .all(account) as { receivers_json: string; updated_at: number }[];
+
+  const receivers: unknown[] = [];
+  for (const row of rows) {
+    try {
+      const parsed = JSON.parse(row.receivers_json);
+      if (Array.isArray(parsed)) receivers.push(...parsed);
+    } catch {
+      // Defensive: ignore malformed config rows; they are not surfaced.
+    }
+  }
+
+  const last_updated = rows.reduce(
+    (max, row) => (row.updated_at > max ? row.updated_at : max),
+    0
+  );
+  const hash = createHash("sha256")
+    .update(JSON.stringify(receivers))
+    .digest("hex");
+
+  return { receivers, hash, last_updated };
 }
 
 export function queryGivesForAccount(
