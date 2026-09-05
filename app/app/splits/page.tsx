@@ -27,7 +27,7 @@ export default function SplitsPage() {
     if (!publicKey) { setLoading(false); return; }
     setLoading(true);
     try {
-      const res = await fetch(`/api/splits?account=${publicKey}&network=${NETWORK`});
+      const res = await fetch(`/api/splits?account=${publicKey}&network=${NETWORK`);
       if (res.ok) {
         const data = await res.json();
         setSplits({

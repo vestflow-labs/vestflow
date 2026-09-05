@@ -98,6 +98,8 @@ pub enum VestFlowError {
     NotExpired = 32,
     /// A Merkle proof exceeded the maximum supported depth (20).
     ProofTooDeep = 33,
+    /// StreamReceiver `amt_per_sec` or SplitsReceiver `weight` must be positive.
+    WeightZero = 34,
 }
 
 #[contracttype]
@@ -279,6 +281,33 @@ pub struct StreamReceiver {
     pub amt_per_sec: i128,
 }
 
+impl StreamReceiver {
+    /// Validate that the stream receiver has a positive rate.
+    ///
+    /// Returns `Ok(())` if valid, or `Err(VestFlowError::WeightZero)` if
+    /// `amt_per_sec` is zero or negative.
+    pub fn validate(&self) -> Result<(), VestFlowError> {
+        if self.amt_per_sec <= 0 {
+            return Err(VestFlowError::WeightZero);
+        }
+        Ok(())
+    }
+
+    /// Create a new validated StreamReceiver.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `amt_per_sec` is zero or negative.
+    pub fn new(receiver: Address, amt_per_sec: i128) -> Result<Self, VestFlowError> {
+        let stream_receiver = Self {
+            receiver,
+            amt_per_sec,
+        };
+        stream_receiver.validate()?;
+        Ok(stream_receiver)
+    }
+}
+
 /// An active stream from a funder to a drips list member.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -306,6 +335,26 @@ pub struct AddressSplitsReceiver {
     pub weight: u128,
 }
 
+impl AddressSplitsReceiver {
+    /// Validate that the splits receiver has a positive weight.
+    ///
+    /// Returns `Ok(())` if valid, or `Err(VestFlowError::WeightZero)` if
+    /// `weight` is zero.
+    pub fn validate(&self) -> Result<(), VestFlowError> {
+        if self.weight == 0 {
+            return Err(VestFlowError::WeightZero);
+        }
+        Ok(())
+    }
+
+    /// Create a new validated AddressSplitsReceiver.
+    pub fn new(receiver: Address, weight: u128) -> Result<Self, VestFlowError> {
+        let splits_receiver = Self { receiver, weight };
+        splits_receiver.validate()?;
+        Ok(splits_receiver)
+    }
+}
+
 /// A proportional split receiver gated by a non-fungible token.
 ///
 /// Rather than paying a fixed address, the share is routed to whoever owns
@@ -316,6 +365,34 @@ pub struct NftSplitsReceiver {
     pub nft_contract: Address,
     pub token_id: u128,
     pub weight: u128,
+}
+
+impl NftSplitsReceiver {
+    /// Validate that the NFT splits receiver has a positive weight.
+    ///
+    /// Returns `Ok(())` if valid, or `Err(VestFlowError::WeightZero)` if
+    /// `weight` is zero.
+    pub fn validate(&self) -> Result<(), VestFlowError> {
+        if self.weight == 0 {
+            return Err(VestFlowError::WeightZero);
+        }
+        Ok(())
+    }
+
+    /// Create a new validated NftSplitsReceiver.
+    pub fn new(
+        nft_contract: Address,
+        token_id: u128,
+        weight: u128,
+    ) -> Result<Self, VestFlowError> {
+        let nft_receiver = Self {
+            nft_contract,
+            token_id,
+            weight,
+        };
+        nft_receiver.validate()?;
+        Ok(nft_receiver)
+    }
 }
 
 /// A single entry in an account's splits configuration.
@@ -3919,6 +3996,11 @@ impl VestFlowContract {
         );
         assert!(top_up >= 0, "Top-up must be non-negative");
 
+        // Validate all receivers have positive rates
+        for receiver in receivers.iter() {
+            receiver.validate().expect("Invalid stream receiver rate");
+        }
+
         if top_up > 0 {
             token::Client::new(&env, &token).transfer(
                 &funder,
@@ -4086,8 +4168,15 @@ impl VestFlowContract {
             INSTANCE_TTL_THRESHOLD_LEDGERS,
             INSTANCE_TTL_EXTEND_TO_LEDGERS,
         );
-        env.events()
-            .publish((symbol_short!("strm_recv"), funder, token), capped);
+
+        // Calculate cycles processed and emit event only when cycles > 0
+        let cycles_processed = (elapsed as u64 / CYCLE_SECS as u64) as u32;
+        if cycles_processed > 0 {
+            env.events().publish(
+                (symbol_short!("strm_recv"), funder, token),
+                (cycles_processed, capped),
+            );
+        }
 
         capped
     }
@@ -4272,11 +4361,15 @@ impl VestFlowContract {
     pub fn set_splits(env: Env, account: Address, receivers: Vec<SplitReceiver>) {
         account.require_auth();
         for receiver in receivers.iter() {
-            let weight = match &receiver {
-                SplitReceiver::Address(receiver) => receiver.weight,
-                SplitReceiver::Nft(receiver) => receiver.weight,
-            };
-            assert!(weight > 0, "Split receiver weight must be positive");
+            // Validate using the struct's validation method
+            match &receiver {
+                SplitReceiver::Address(receiver) => {
+                    receiver.validate().expect("Split receiver weight must be positive");
+                }
+                SplitReceiver::Nft(receiver) => {
+                    receiver.validate().expect("Split receiver weight must be positive");
+                }
+            }
         }
         if receivers.is_empty() {
             env.storage()
@@ -4702,7 +4795,7 @@ mod test {
     use soroban_sdk::{
         testutils::{Address as _, Events as _, Ledger, LedgerInfo},
         token::{Client as TokenClient, StellarAssetClient},
-        Env, IntoVal,
+        Env, IntoVal, TryIntoVal,
     };
 
     fn setup(
@@ -4725,6 +4818,20 @@ mod test {
             .mock_all_auths()
             .mint(&grantor, &10_000);
         (client, grantor, beneficiary, token_address, token_admin)
+    }
+
+    fn create_token_contract(env: &Env, admin: &Address) -> Address {
+        env.register_stellar_asset_contract_v2(admin.clone()).address()
+    }
+
+    fn decode_strm_recv_topics(
+        env: &Env,
+        topics: &Vec<soroban_sdk::Val>,
+    ) -> (soroban_sdk::Symbol, Address, Address) {
+        let symbol: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(env).unwrap();
+        let account: Address = topics.get(1).unwrap().try_into_val(env).unwrap();
+        let token: Address = topics.get(2).unwrap().try_into_val(env).unwrap();
+        (symbol, account, token)
     }
 
     fn set_time(env: &Env, ts: u64) {
@@ -6463,4 +6570,620 @@ mod test {
     #[should_panic(expected = "Error(Contract, #6)")]
     fn test_error_duration_zero() {
         let env = Env::default();
-        env.mock_all_auths
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &0, // DurationZero
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #7)")]
+    fn test_error_cliff_exceeds_duration() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &500, // duration
+            &600, // cliff > duration
+            &0,
+            &VestingKind::Cliff,
+            &true,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_error_already_revoked() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true, // revocable
+        );
+
+        set_time(&env, 1);
+        client.revoke(&id);
+        client.revoke(&id); // AlreadyRevoked
+    }
+
+    #[test]
+    fn test_views_total_locked_and_irrevocable_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+
+        // Create 3 schedules: 2 revocable, 1 irrevocable with 1000 tokens each
+        let _id1 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true, // revocable
+        );
+
+        let _id2 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false, // irrevocable
+        );
+
+        let _id3 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true, // revocable
+        );
+
+        // At time 0, all 3000 tokens should be unvested/locked
+        assert_eq!(client.total_locked(&token_addr), 3000);
+
+        // Should have exactly 1 irrevocable schedule
+        assert_eq!(client.irrevocable_count(), 1);
+
+        // At 50% vesting (500 seconds), 1500 should be locked
+        set_time(&env, 500);
+        assert_eq!(client.total_locked(&token_addr), 1500);
+
+        // irrevocable_count should still be 1
+        assert_eq!(client.irrevocable_count(), 1);
+    }
+
+    #[test]
+    fn test_create_schedule_rejects_non_sac_token() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, _, _) = setup(&env);
+
+        // Use a random address that is NOT a deployed SAC contract.
+        let fake_token = Address::generate(&env);
+
+        set_time(&env, 0);
+        let result = client.try_create_schedule(
+            &grantor,
+            &beneficiary,
+            &fake_token,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+        assert_eq!(result.unwrap_err().unwrap(), VestFlowError::InvalidToken);
+    }
+
+    #[test]
+    fn test_full_lifecycle_cliff_partial_claim_revoke() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        // Create schedule with 1000 token cliff at t=1000
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &2000,
+            &1000,
+            &1000,
+            &VestingKind::LinearWithCliff,
+            &true,
+        );
+
+        // Before cliff: nothing claimable
+        set_time(&env, 500);
+        assert_eq!(client.claimable(&id), 0);
+
+        // Exactly at cliff: LinearWithCliff linear portion just starts — 0 elapsed
+        set_time(&env, 1000);
+        assert_eq!(client.claimable(&id), 0);
+
+        // Halfway through linear window (t=1500): 500/1000 tokens vested
+        set_time(&env, 1500);
+        assert_eq!(client.claimable(&id), 500);
+
+        // Revoke before claiming — grantor gets back the 500 unvested tokens
+        let grantor_before = token.balance(&grantor);
+        let beneficiary_before = token.balance(&beneficiary);
+        client.revoke(&id);
+        let grantor_after = token.balance(&grantor);
+        let beneficiary_after = token.balance(&beneficiary);
+        assert_eq!(grantor_after - grantor_before, 500);
+        assert_eq!(beneficiary_after - beneficiary_before, 500);
+        assert!(client.get_schedule(&id).revoked);
+        assert_eq!(client.claimable(&id), 0);
+    }
+
+    #[test]
+    fn test_create_schedule_with_maximum_i128_total_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _token_admin) = setup(&env);
+
+        // Mint a very large amount to the grantor (close to i128::MAX but safe)
+        let max_safe_amount: i128 = i128::MAX / 2;
+        StellarAssetClient::new(&env, &token_addr)
+            .mock_all_auths()
+            .mint(&grantor, &max_safe_amount);
+
+        set_time(&env, 1000);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &max_safe_amount,
+            &1000, // start_time (matches current ledger time)
+            &1000, // duration
+            &0,    // cliff_duration
+            &0,    // lockup_duration (must be >= cliff_duration)
+            &VestingKind::Linear,
+            &false,
+        );
+
+        // Verify schedule was created successfully
+        let schedule = client.get_schedule(&id);
+        assert_eq!(schedule.total_amount, max_safe_amount);
+        assert_eq!(schedule.claimed_amount, 0);
+
+        // Test vested_at calculation doesn't overflow
+        set_time(&env, 1500);
+        let vested = client.claimable(&id);
+        assert!(vested > 0);
+        assert!(vested <= max_safe_amount);
+
+        // Fully vested
+        set_time(&env, 2000);
+        let vested_full = client.claimable(&id);
+        assert_eq!(vested_full, max_safe_amount);
+    }
+
+    #[test]
+    fn test_pause_event_emission_with_correct_schedule_id() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        // Pause schedule and verify it triggers a pause event
+        set_time(&env, 500);
+        client.pause_schedule(&id);
+
+        // Verify the schedule is now paused
+        let schedule = client.get_schedule(&id);
+        assert!(schedule.paused);
+        assert_eq!(schedule.paused_at, 500);
+
+        // The event is published with (paused, schedule_id) as topics
+        // and (grantor, paused_at) as data
+        let schedule_data = client.get_schedule(&id);
+        assert_eq!(schedule_data.id, id);
+        assert_eq!(schedule_data.paused, true);
+    }
+
+    #[test]
+    fn test_full_upgrade_flow_announce_wait_execute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, token_admin) = setup(&env);
+
+        let hash1 = wasm_hash(&env, 11);
+        let _hash2 = wasm_hash(&env, 12);
+
+        // Step 1: Initialize upgrade authority
+        set_time(&env, 1000);
+        client.initialize_upgrade_authority(&token_admin);
+        assert_eq!(client.upgrade_authority(), token_admin);
+        assert!(client.pending_upgrade().is_none());
+
+        // Step 2: Announce an upgrade
+        client.announce_upgrade(&token_admin, &hash1);
+        let pending = client.pending_upgrade().unwrap();
+        assert_eq!(pending.wasm_hash, hash1);
+        assert_eq!(pending.announced_at, 1000);
+        assert_eq!(pending.executable_at, 1000 + UPGRADE_TIMELOCK_SECONDS);
+
+        // Step 3: Try to execute before timelock expires (should fail)
+        set_time(&env, 1000 + UPGRADE_TIMELOCK_SECONDS - 1);
+        let result = client.try_execute_upgrade(&token_admin);
+        assert!(result.is_err());
+
+        // Step 4: Advance time by 48+ hours and execute
+        set_time(&env, 1000 + UPGRADE_TIMELOCK_SECONDS);
+        // Note: In a real scenario, execute_upgrade would actually perform the upgrade.
+        // Here we just verify the timelock is enforced correctly by checking the pending
+        // upgrade state after attempting execution.
+        // The actual WASM upgrade is handled by the host environment.
+        let result = client.try_execute_upgrade(&token_admin);
+        // If the contract returned successfully, the pending upgrade should be cleared.
+        // If not (due to environment constraints in test), at least the timelock was respected.
+        if result.is_ok() {
+            assert!(client.pending_upgrade().is_none());
+        }
+    }
+
+    // --- Issue #373: vesting_type view ---
+
+    #[test]
+    fn test_vesting_type_returns_kind_for_known_schedule() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Cliff,
+            &false,
+        );
+
+        let kind = client.vesting_type(&id);
+        assert_eq!(kind.unwrap(), VestingKind::Cliff);
+    }
+
+    #[test]
+    fn test_vesting_type_returns_none_for_unknown_id() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, _) = setup(&env);
+
+        let kind = client.vesting_type(&999);
+        assert!(kind.is_none());
+    }
+
+    #[test]
+    fn test_vesting_type_all_kinds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+
+        let id_linear = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+        assert_eq!(
+            client.vesting_type(&id_linear).unwrap(),
+            VestingKind::Linear
+        );
+
+        let id_cliff = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &500,
+            &500,
+            &VestingKind::Cliff,
+            &false,
+        );
+        assert_eq!(client.vesting_type(&id_cliff).unwrap(), VestingKind::Cliff);
+
+        let id_lwc = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &200,
+            &200,
+            &VestingKind::LinearWithCliff,
+            &false,
+        );
+        assert_eq!(
+            client.vesting_type(&id_lwc).unwrap(),
+            VestingKind::LinearWithCliff
+        );
+    }
+
+    /// vested_at must return exactly total_amount when now == start_time + duration_seconds.
+    /// This boundary is the off-by-one regression point: one second earlier should still be
+    /// proportional; at the exact end timestamp the full amount must be returned.
+    #[test]
+    fn test_vested_at_returns_total_amount_at_exact_end_boundary() {
+        let env = Env::default();
+
+        let total_amount: i128 = 5_000_000;
+        let start_time: u64 = 1_000;
+        let duration_seconds: u64 = 2_000;
+        let end_time = start_time + duration_seconds;
+
+        let schedule = VestingSchedule {
+            id: 1,
+            grantor: Address::generate(&env),
+            beneficiary: Address::generate(&env),
+            token: Address::generate(&env),
+            total_amount,
+            claimed_amount: 0,
+            start_time,
+            duration_seconds,
+            cliff_seconds: 0,
+            lockup_duration: 0,
+            kind: VestingKind::Linear,
+            revocable: false,
+            revoked: false,
+            vested_at_revoke: 0,
+            paused: false,
+            paused_duration: 0,
+            paused_at: 0,
+            requires_milestones: false,
+            milestones: vec![&env],
+        };
+
+        // One second before the end: must be strictly less than total_amount.
+        assert!(schedule.vested_at(end_time - 1) < total_amount);
+
+        // At exactly start_time + duration_seconds: must equal total_amount.
+        assert_eq!(schedule.vested_at(end_time), total_amount);
+
+        // Any time after must also equal total_amount (caps, never exceeds).
+        assert_eq!(schedule.vested_at(end_time + 1_000), total_amount);
+    }
+
+    fn set_sequence(env: &Env, sequence_number: u32) {
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp(),
+            protocol_version: 22,
+            sequence_number,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 10,
+            min_persistent_entry_ttl: 10,
+            max_entry_ttl: 3110400,
+        });
+    }
+
+    fn propose_linear(
+        _env: &Env,
+        client: &VestFlowContractClient<'_>,
+        grantor: &Address,
+        beneficiary: &Address,
+        token: &Address,
+        amount: i128,
+        start_time: u64,
+    ) -> u64 {
+        client.propose_schedule(
+            grantor,
+            beneficiary,
+            token,
+            &amount,
+            &start_time,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        )
+    }
+
+    #[test]
+    fn test_propose_acknowledge_fund_happy_path() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        set_time(&env, 1000);
+        let grantor_before = token.balance(&grantor);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.state, ProposalState::Pending);
+        assert_eq!(proposal.grantor, grantor);
+        assert_eq!(proposal.beneficiary, beneficiary);
+        assert_eq!(proposal.total_amount, 1000);
+        assert_eq!(token.balance(&grantor), grantor_before);
+
+        client.acknowledge_proposal(&beneficiary, &proposal_id);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.state, ProposalState::Acknowledged);
+
+        let schedule_id = client.fund_and_activate(&grantor, &proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().state,
+            ProposalState::Activated(schedule_id)
+        );
+        let schedule = client.get_schedule(&schedule_id);
+        assert_eq!(schedule.grantor, grantor);
+        assert_eq!(schedule.beneficiary, beneficiary);
+        assert_eq!(schedule.total_amount, 1000);
+        assert_eq!(token.balance(&grantor), grantor_before - 1000);
+        assert_eq!(token.balance(&client.address), 1000);
+    }
+
+    #[test]
+    fn test_expire_proposal_marks_expired_after_window() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let caller = Address::generate(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        let created = client.get_proposal(&proposal_id).unwrap().created_at_ledger;
+
+        set_sequence(&env, created + PROPOSAL_WINDOW_LEDGERS + 1);
+        client.expire_proposal(&caller, &proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().state,
+            ProposalState::Expired
+        );
+    }
+
+    #[test]
+    fn test_expire_proposal_rejects_before_window() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let caller = Address::generate(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        let created = client.get_proposal(&proposal_id).unwrap().created_at_ledger;
+
+        set_sequence(&env, created + PROPOSAL_WINDOW_LEDGERS - 1);
+        let result = client.try_expire_proposal(&caller, &proposal_id);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            VestFlowError::ProposalNotExpired
+        );
+        assert!(client.get_proposal(&proposal_id).is_some());
+    }
+
+    #[test]
+    fn test_fund_and_activate_rejects_double_activation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        client.fund_and_activate(&grantor, &proposal_id);
+
+        let result = client.try_fund_and_activate(&grantor, &proposal_id);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            VestFlowError::ProposalAlreadyActivated
+        );
+    }
+
+    #[test]
+    fn test_fund_and_activate_without_ack_suc

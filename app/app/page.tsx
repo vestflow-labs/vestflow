@@ -258,12 +258,14 @@ function StreamsAnalyticsSummary({ publicKey, refreshKey }: { publicKey: string;
 function OutgoingStreamsList({
   schedules,
   publicKey,
+  claimableMap,
   onEdit,
   onStop,
   claimableMap,
 }: {
   schedules: ScheduleData[];
   publicKey: string;
+  claimableMap: Map<number, bigint>;
   onEdit: (s: ScheduleData) => void;
   onStop: (s: ScheduleData) => void;
   claimableMap: Map<string, bigint>;
@@ -459,6 +461,7 @@ export default function DashboardPage() {
   const { getLabel } = useAddressBook();
   const { recentlyViewed } = useRecentlyViewed();
   const [schedules, setSchedules] = useState<ScheduleData[]>([]);
+  const [claimableMap, setClaimableMap] = useState<Map<number, bigint>>(new Map());
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [rpcError, setRpcError] = useState(false);
@@ -497,12 +500,13 @@ export default function DashboardPage() {
         const claimableAmounts = await getClaimableBulk(userIds, publicKey);
         const vestedAmounts = await getVestedAmountBulk(userIds, publicKey);
         
-        const claimableMap = new Map<number, bigint>();
+        const newClaimableMap = new Map<number, bigint>();
         const vestedMap = new Map<number, bigint>();
         userIds.forEach((id, i) => {
-          claimableMap.set(id, claimableAmounts[i] ?? 0n);
+          newClaimableMap.set(id, claimableAmounts[i] ?? 0n);
           vestedMap.set(id, vestedAmounts[i] ?? 0n);
         });
+        setClaimableMap(newClaimableMap);
 
         const now = Math.floor(Date.now() / 1000);
         let totalGranted = 0n;
@@ -517,7 +521,7 @@ export default function DashboardPage() {
           }
           if (s.beneficiary === publicKey) {
             totalReceiving += s.total_amount;
-            claimableNow += claimableMap.get(s.id) ?? 0n;
+            claimableNow += newClaimableMap.get(s.id) ?? 0n;
             totalVested += vestedMap.get(s.id) ?? 0n;
           }
           if (!s.revoked && vestingProgress(s, now) < 100) {
@@ -731,6 +735,7 @@ export default function DashboardPage() {
           <OutgoingStreamsList
             schedules={schedules}
             publicKey={publicKey}
+            claimableMap={claimableMap}
             onEdit={(s) => { window.location.href = `/schedule/${s.id}`; }}
             onStop={(s) => setStopConfirmSchedule(s)}
           />

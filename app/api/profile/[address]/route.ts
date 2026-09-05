@@ -9,6 +9,8 @@ import {
   queryDripsLists,
   queryDripsStreams,
   queryGivesForAccount,
+  type DripsStream,
+  type DripsList,
 } from "@/indexer/src/db";
 import { createIpBasedRateLimiter } from "@/lib/rateLimit";
 import { getOrSetCache } from "@/lib/redisCache";
@@ -45,8 +47,8 @@ interface ProfileResponse {
     schedule_count_as_beneficiary: number;
     records: ReturnType<typeof queryGivesForAccount>;
   };
-  outgoing_streams: ReturnType<typeof queryDripsStreams>["items"];
-  drips_lists: ReturnType<typeof queryDripsLists> extends { items: infer T } ? T : never[];
+  outgoing_streams: DripsStream[];
+  drips_lists: DripsList[];
   timestamp: number;
 }
 

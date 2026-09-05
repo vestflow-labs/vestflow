@@ -23,7 +23,7 @@ export default function StreamsNewPage() {
           <p className="text-zinc-400 mt-1">Create a new vesting schedule</p>
         </div>
 
-        {step === "form" && <CreateForm onCreate={handleCreate} />}
+        {step === "form" && <CreateForm />}
         {step === "confirm" && (
           <div className="card p-6">
             <h2 className="text-lg font-semibold">Confirm Schedule</h2>

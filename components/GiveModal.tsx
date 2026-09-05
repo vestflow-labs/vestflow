@@ -65,7 +65,7 @@ export default function GiveModal({ open, onClose, onSuccess }: GiveModalProps) 
       updateToast(toastId, {
         status: "success",
         title: "Transfer successful",
-        message: `${stroopsToXlm(parseFloat(amount)!)} XLM transferred to ${recipient}`,
+        message: `${amount} XLM transferred to ${recipient}`,
       });
       onSuccess();
       onClose();

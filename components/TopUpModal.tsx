@@ -55,7 +55,7 @@ export default function TopUpModal({ scheduleId, open, onClose, onSuccess }: Pro
       updateToast(toastId, { status: "success", title: "Top Up confirmed!", message: "Balance has been added to the schedule." });
       onSuccess();
     } catch (e: unknown) {
-      const msg = parseContractError(e instanceof Error ? e.message : String(e));
+      const msg = parseContractError(e instanceof Error ? e : new Error(String(e)));
       setErr(msg);
       updateToast(toastId, { status: "error", title: "Top Up failed", message: msg });
     } finally {

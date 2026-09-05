@@ -56,7 +56,7 @@ export default function WithdrawModal({
       updateToast(toastId, { status: "success", title: "Withdraw confirmed!", message: "Tokens returned to your wallet." });
       onSuccess();
     } catch (e: unknown) {
-      const msg = parseContractError(e instanceof Error ? e.message : String(e));
+      const msg = parseContractError(e instanceof Error ? e : new Error(String(e)));
       setErr(msg);
       updateToast(toastId, { status: "error", title: "Withdraw failed", message: msg });
     } finally {

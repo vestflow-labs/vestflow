@@ -1,9 +1,9 @@
 "use client";
-import { useEffect, useState } from"react";
-import Navbar from"@/components/Navbar";
-import { getGrantorScheduleIds, getScheduleBatch, getWalletXmmBalance, stroopsToXlm } from"@/lib/stellar";
-import { useWallet } from"@/lib/WalletContext";
-import TopUpModal from"@/components/TopUpModal";
+import { useEffect, useState } from "react";
+import Navbar from "@/components/Navbar";
+import { getGrantorScheduleIds, getScheduleBatch, getWalletXlmBalance, stroopsToXlm } from "@/lib/stellar";
+import { useWallet } from "@/lib/WalletContext";
+import TopUpModal from "@/components/TopUpModal";
 
 export default function FundDependenciesPage() {
   const { publicKey } = useWallet();
@@ -51,7 +51,7 @@ export default function FundDependenciesPage() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {schedules.map((s) => (
-              <div key=s.id className="card p-4">
+              <div key={s.id} className="card p-4">
                 <h3 className="font-semibold">Schedule #{s.id}</h3>
                 <p className="text-zinc-400">Beneficiary: {s.beneficiary.slice(0, 8)}#{s.beneficiary.slice(-6)}</p>
                 <p className="text-zinc-300">Total: {stroopsToXlm(s.total_amount)} XLM</p>

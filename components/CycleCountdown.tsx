@@ -34,7 +34,7 @@ export default function CycleCountdown({ onCycleEnd }: CycleCountdownProps) {
   const [settling, setSettling] = useState(false);
 
   const onCycleEndRef = useRef(onCycleEnd);
-  onCycleEndRef.current = onCycleEnd;
+  useEffect(() => { onCycleEndRef.current = onCycleEnd; });
 
   useEffect(() => {
     const nextCycleEnd = computeNextCycleEnd();

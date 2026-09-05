@@ -125,7 +125,7 @@ export function AddressAutocomplete({
       {showSuggestions && filteredSuggestions.length > 0 && (
         <div className="absolute top-full left-0 right-0 mt-1 rounded-lg shadow-lg z-10 overflow-hidden"
              style={{ background: "var(--card-bg)", border: "1px solid var(--card-border)" }}>
-          <ul className="divide-y" style={{ dividingColor: "var(--border-subtle)" }}>
+          <ul className="divide-y divide-white/10">
             {filteredSuggestions.map(({ address, label }, index) => (
               <li key={address}>
                 <button
