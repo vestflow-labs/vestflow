@@ -302,7 +302,7 @@ export default function AnalyticsDashboard() {
               <strong className="text-zinc-300">Total Value Locked (TVL):</strong> Sum of all active vesting schedules not yet claimed.
             </li>
             <li>
-              <strong className="text-zinc-300">Active Schedules:</strong> Schedules that haven't reached their end date and haven't been revoked.
+              <strong className="text-zinc-300">Active Schedules:</strong> Schedules that haven&apos;t reached their end date and haven&apos;t been revoked.
             </li>
             <li>
               <strong className="text-zinc-300">Unique Beneficiaries:</strong> Number of unique addresses that have claimed tokens.
