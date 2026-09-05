@@ -1,0 +1,17 @@
+﻿## Description
+Closes #613. Implemented top_up(env: Env, account: Address, token: Address, amount: i128) to add funds to a streaming balance without changing receiver config.
+
+## Type of Change
+- [x] ✨ New feature (non-breaking change which adds functionality)
+
+## Testing
+- [x] Existing tests pass
+- [x] New tests added (if applicable)
+
+### Test Coverage
+- [x] Smart contract compilation and tests
+
+## Checklist
+- [x] Code follows project style guidelines
+- [x] Self-review completed
+- [x] No sensitive information exposed
