@@ -15,12 +15,15 @@
 
 import http from "http";
 import { URL } from "url";
+import { createHash } from "node:crypto";
 import {
   getCheckpoint,
   getDripsStreamingTvl,
+  getDripsStreamsLastUpdated,
   getTvlStats,
   queryDripsListMembers,
   queryDripsLists,
+  queryDripsSplits,
   queryDripsStreams,
   queryEvents,
   queryGives,
@@ -51,6 +54,53 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
     "Cache-Control": "no-store",
   });
 
+  res.end(JSON.stringify(body));
+}
+
+/**
+ * Compute a strong `ETag` for a response. The value is derived from a hash of
+ * the canonical JSON body joined with a caller-supplied last-updated
+ * timestamp, so it is stable across identical payloads and changes the instant
+ * the underlying data changes.
+ */
+function computeEtag(body: unknown, lastUpdated: number): string {
+  const hash = createHash("sha256")
+    .update(String(lastUpdated))
+    .update("\0")
+    .update(JSON.stringify(body));
+  return `"${hash.digest("hex")}"`;
+}
+
+/**
+ * If the caller sent `If-None-Match` equal to the current `ETag`, answer with
+ * 304 Not Modified and no body. Otherwise write a full 200 JSON response with
+ * the fresh `ETag`.
+ */
+function jsonWithEtag(
+  res: http.ServerResponse,
+  body: unknown,
+  lastUpdated: number,
+  ifNoneMatch: string | undefined
+): void {
+  const etag = computeEtag(body, lastUpdated);
+  const headers = {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+    "Cache-Control": "public, max-age=30, stale-while-revalidate=120",
+    ETag: etag,
+  };
+
+  if (ifNoneMatch && ifNoneMatch.trim() === etag) {
+    res.writeHead(304, {
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "public, max-age=30, stale-while-revalidate=120",
+      ETag: etag,
+    });
+    res.end();
+    return;
+  }
+
+  res.writeHead(200, headers);
   res.end(JSON.stringify(body));
 }
 
@@ -124,6 +174,7 @@ function handleListMembers(
 function handleStreams(
   res: http.ServerResponse,
   searchParams: URLSearchParams,
+  ifNoneMatch?: string,
 ): void {
   const account = searchParams.get("account");
   const limit = limitParam(searchParams);
@@ -141,7 +192,19 @@ function handleStreams(
     network,
   });
   if (!page) return json(res, 400, { error: "cursor is invalid" });
-  return json(res, 200, { streams: page.items, next_cursor: page.nextCursor });
+  const body = { streams: page.items, next_cursor: page.nextCursor };
+  const lastUpdated = getDripsStreamsLastUpdated(account, network);
+  return jsonWithEtag(res, body, lastUpdated, ifNoneMatch);
+}
+
+function handleSplits(res: http.ServerResponse, searchParams: URLSearchParams, ifNoneMatch?: string): void {
+  const account = searchParams.get("account");
+  const network = networkParam(searchParams);
+  if (!account || !STELLAR_ADDRESS.test(account)) return json(res, 400, { error: "account must be a valid Stellar address" });
+  if (!network) return json(res, 400, { error: "network must be mainnet or testnet" });
+  const { receivers, hash, last_updated } = queryDripsSplits(account, network);
+  const body = { account, network, receivers, hash };
+  return jsonWithEtag(res, body, last_updated, ifNoneMatch);
 }
 
 function handleStreamsTvl(
@@ -508,7 +571,10 @@ export function createServer(): http.Server {
         return handleLists(res, url.searchParams);
 
       case "/streams":
-        return handleStreams(res, url.searchParams);
+        return handleStreams(res, url.searchParams, req.headers["if-none-match"]);
+
+      case "/splits":
+        return handleSplits(res, url.searchParams, req.headers["if-none-match"]);
 
       default:
         if (historyMatch) {
