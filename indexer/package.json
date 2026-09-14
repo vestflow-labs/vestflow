@@ -23,7 +23,7 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
-    "@types/node": "^20",
+    "@types/node": "^26",
     "autocannon": "^8.0.0",
     "concurrently": "^9.0.0",
     "ts-node": "^10.9.2",
