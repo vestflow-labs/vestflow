@@ -18,11 +18,14 @@ import { xlmToStroops } from "@/lib/stroops";
 
 export { xlmToStroops } from "@/lib/stroops";
 
-export const NETWORK = process.env.NEXT_PUBLIC_NETWORK === "mainnet" ? "mainnet" : "testnet";
-export const NETWORK_PASSPHRASE = NETWORK === "mainnet" ? Networks.PUBLIC : Networks.TESTNET;
-export const RPC_URL = NETWORK === "mainnet"
-  ? "https://mainnet.sorobanrpc.com"
-  : "https://soroban-testnet.stellar.org";
+export const NETWORK =
+  process.env.NEXT_PUBLIC_NETWORK === "mainnet" ? "mainnet" : "testnet";
+export const NETWORK_PASSPHRASE =
+  NETWORK === "mainnet" ? Networks.PUBLIC : Networks.TESTNET;
+export const RPC_URL =
+  NETWORK === "mainnet"
+    ? "https://mainnet.sorobanrpc.com"
+    : "https://soroban-testnet.stellar.org";
 export const CONTRACT_ID =
   process.env.NEXT_PUBLIC_CONTRACT_ID ??
   "CCZ6AE75C27DMB3SOIHK7WZSBUG3NQPVLHSVEBQ2FSAEVGRJ5TXAZWCX";
@@ -33,13 +36,15 @@ export const NATIVE_TOKEN =
 const server = new StellarRpc.Server(RPC_URL);
 
 // Well-known funded testnet account used as fallback source for read-only simulations.
-const FALLBACK_ACCOUNT = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+const FALLBACK_ACCOUNT =
+  "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
 
 // ---------- Wallet ----------
 
 export async function connectWallet(): Promise<string> {
   const connected = await isConnected();
-  if (!connected) throw new Error("Freighter not found. Install from freighter.app");
+  if (!connected)
+    throw new Error("Freighter not found. Install from freighter.app");
   await requestAccess();
   const result = await getAddress();
   if (!result?.address) throw new Error("Could not get address from Freighter");
@@ -71,12 +76,13 @@ export async function getWalletXlmBalance(publicKey: string): Promise<bigint> {
       "balance",
       [nativeToScVal(publicKey, { type: "address" })],
       publicKey,
-      NATIVE_TOKEN
+      NATIVE_TOKEN,
     );
     const stroops = scValToNative(val) as bigint;
-    const spendable = stroops > XLM_MIN_RESERVE_STROOPS
-      ? stroops - XLM_MIN_RESERVE_STROOPS
-      : 0n;
+    const spendable =
+      stroops > XLM_MIN_RESERVE_STROOPS
+        ? stroops - XLM_MIN_RESERVE_STROOPS
+        : 0n;
     return spendable;
   } catch {
     return 0n;
@@ -89,7 +95,7 @@ async function simulate(
   method: string,
   args: xdr.ScVal[],
   publicKey?: string,
-  contractId: string = CONTRACT_ID
+  contractId: string = CONTRACT_ID,
 ): Promise<xdr.ScVal> {
   const contract = new Contract(contractId);
   const source = publicKey ?? FALLBACK_ACCOUNT;
@@ -103,22 +109,41 @@ async function simulate(
     .build();
 
   const result = await server.simulateTransaction(tx);
-  if (StellarRpc.Api.isSimulationError(result)) throw new Error((result as any).error);
+  if (StellarRpc.Api.isSimulationError(result))
+    throw new Error((result as any).error);
   return (result as any).result!.retval;
 }
 
-export async function getSchedule(id: number, publicKey?: string): Promise<ScheduleData | null> {
+export async function getSchedule(
+  id: number,
+  publicKey?: string,
+): Promise<ScheduleData | null> {
   try {
-    const val = await simulate("get_schedule", [nativeToScVal(id, { type: "u64" })], publicKey);
+    const val = await simulate(
+      "get_schedule",
+      [nativeToScVal(id, { type: "u64" })],
+      publicKey,
+    );
     return parseSchedule(scValToNative(val));
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
-export async function isRevoked(id: number, publicKey?: string): Promise<boolean> {
+export async function isRevoked(
+  id: number,
+  publicKey?: string,
+): Promise<boolean> {
   try {
-    const val = await simulate("is_revoked", [nativeToScVal(id, { type: "u64" })], publicKey);
+    const val = await simulate(
+      "is_revoked",
+      [nativeToScVal(id, { type: "u64" })],
+      publicKey,
+    );
     return Boolean(scValToNative(val));
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
 export async function getContractVersion(): Promise<number> {
@@ -134,78 +159,111 @@ export async function getScheduleCount(): Promise<number> {
   try {
     const val = await simulate("schedule_count", []);
     return Number(scValToNative(val));
-  } catch { return 0; }
+  } catch {
+    return 0;
+  }
 }
 
-export async function getSchedulesByGrantor(grantor: string): Promise<number[]> {
+export async function getSchedulesByGrantor(
+  grantor: string,
+): Promise<number[]> {
   try {
     const val = await simulate("get_schedules_by_grantor", [
       nativeToScVal(grantor, { type: "address" }),
     ]);
     return (scValToNative(val) as number[]).map(Number);
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }
 
-export async function getGrantorScheduleIds(grantor: string): Promise<number[]> {
+export async function getGrantorScheduleIds(
+  grantor: string,
+): Promise<number[]> {
   try {
     const val = await simulate("grantor_schedule_ids", [
       nativeToScVal(grantor, { type: "address" }),
     ]);
     return (scValToNative(val) as number[]).map(Number);
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }
 
-export async function getSchedulesByBeneficiary(beneficiary: string): Promise<number[]> {
+export async function getSchedulesByBeneficiary(
+  beneficiary: string,
+): Promise<number[]> {
   try {
     const val = await simulate("get_schedules_by_beneficiary", [
       nativeToScVal(beneficiary, { type: "address" }),
     ]);
     return (scValToNative(val) as number[]).map(Number);
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }
 
-export async function getBeneficiaryScheduleIds(beneficiary: string): Promise<number[]> {
+export async function getBeneficiaryScheduleIds(
+  beneficiary: string,
+): Promise<number[]> {
   try {
     const val = await simulate("beneficiary_schedule_ids", [
       nativeToScVal(beneficiary, { type: "address" }),
     ]);
     return (scValToNative(val) as number[]).map(Number);
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }
 
-export async function getClaimableAt(id: number, now: number, publicKey?: string): Promise<bigint> {
+export async function getClaimableAt(
+  id: number,
+  now: number,
+  publicKey?: string,
+): Promise<bigint> {
   try {
     const val = await simulate(
       "claimable_amount",
-      [
-        nativeToScVal(id, { type: "u64" }),
-        nativeToScVal(now, { type: "u64" }),
-      ],
-      publicKey
+      [nativeToScVal(id, { type: "u64" }), nativeToScVal(now, { type: "u64" })],
+      publicKey,
     );
     return BigInt(scValToNative(val));
-  } catch { return 0n; }
+  } catch {
+    return 0n;
+  }
 }
 
-export async function getClaimable(id: number, publicKey?: string): Promise<bigint> {
+export async function getClaimable(
+  id: number,
+  publicKey?: string,
+): Promise<bigint> {
   try {
-    const val = await simulate("claimable", [nativeToScVal(id, { type: "u64" })], publicKey);
+    const val = await simulate(
+      "claimable",
+      [nativeToScVal(id, { type: "u64" })],
+      publicKey,
+    );
     return BigInt(scValToNative(val));
-  } catch { return 0n; }
+  } catch {
+    return 0n;
+  }
 }
 
-export async function getVestedAmountAt(id: number, now: number, publicKey?: string): Promise<bigint> {
+export async function getVestedAmountAt(
+  id: number,
+  now: number,
+  publicKey?: string,
+): Promise<bigint> {
   try {
     const val = await simulate(
       "vested_amount",
-      [
-        nativeToScVal(id, { type: "u64" }),
-        nativeToScVal(now, { type: "u64" }),
-      ],
-      publicKey
+      [nativeToScVal(id, { type: "u64" }), nativeToScVal(now, { type: "u64" })],
+      publicKey,
     );
     return BigInt(scValToNative(val));
-  } catch { return 0n; }
+  } catch {
+    return 0n;
+  }
 }
 
 /**
@@ -221,13 +279,13 @@ export async function getVestedAmountAt(id: number, now: number, publicKey?: str
 export async function getClaimableAtTimestamp(
   id: number,
   ts: number,
-  publicKey?: string
+  publicKey?: string,
 ): Promise<bigint> {
   try {
     const val = await simulate(
       "claimable_at_timestamp",
       [nativeToScVal(id, { type: "u64" }), nativeToScVal(ts, { type: "u64" })],
-      publicKey
+      publicKey,
     );
     return BigInt(scValToNative(val));
   } catch {
@@ -245,12 +303,12 @@ export async function getClaimableAtTimestamp(
  */
 export async function getScheduleBatch(
   ids: number[],
-  publicKey?: string
+  publicKey?: string,
 ): Promise<(ScheduleData | null)[]> {
   if (ids.length === 0) return [];
   try {
     const idsVal = xdr.ScVal.scvVec(
-      ids.map((id) => nativeToScVal(id, { type: "u64" }))
+      ids.map((id) => nativeToScVal(id, { type: "u64" })),
     );
     const val = await simulate("get_schedule_batch", [idsVal], publicKey);
     // scValToNative decodes Option<VestingSchedule> as a raw JS object or
@@ -258,7 +316,9 @@ export async function getScheduleBatch(
     // Soroban field names (claimed_amount, duration_seconds) are mapped to
     // the ScheduleData interface fields (claimed, duration).
     const rawItems = scValToNative(val) as any[];
-    return rawItems.map((raw: any) => (raw == null ? null : parseSchedule(raw)));
+    return rawItems.map((raw: any) =>
+      raw == null ? null : parseSchedule(raw),
+    );
   } catch {
     return ids.map(() => null);
   }
@@ -272,12 +332,12 @@ export async function getScheduleBatch(
  */
 export async function getClaimableBulk(
   ids: number[],
-  publicKey?: string
+  publicKey?: string,
 ): Promise<bigint[]> {
   if (ids.length === 0) return [];
   try {
     const idsVal = xdr.ScVal.scvVec(
-      ids.map((id) => nativeToScVal(id, { type: "u64" }))
+      ids.map((id) => nativeToScVal(id, { type: "u64" })),
     );
     const val = await simulate("claimable_bulk", [idsVal], publicKey);
     const native = scValToNative(val) as bigint[];
@@ -297,12 +357,12 @@ export async function getClaimableBulk(
  */
 export async function getVestedAmountBulk(
   ids: number[],
-  publicKey?: string
+  publicKey?: string,
 ): Promise<bigint[]> {
   if (ids.length === 0) return [];
   try {
     const idsVal = xdr.ScVal.scvVec(
-      ids.map((id) => nativeToScVal(id, { type: "u64" }))
+      ids.map((id) => nativeToScVal(id, { type: "u64" })),
     );
     const val = await simulate("vested_amount_bulk", [idsVal], publicKey);
     const native = scValToNative(val) as bigint[];
@@ -313,8 +373,9 @@ export async function getVestedAmountBulk(
   }
 }
 
-
-export async function getAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
+export async function getAllSchedules(
+  publicKey?: string,
+): Promise<ScheduleData[]> {
   const count = await getScheduleCount();
   if (count === 0) return [];
   const ids = Array.from({ length: count }, (_, i) => i + 1);
@@ -338,10 +399,14 @@ export async function getDripsStream(
   publicKey?: string,
 ): Promise<DripsStreamData | null> {
   try {
-    const val = await simulate("get_drips_stream", [
-      nativeToScVal(listId, { type: "u64" }),
-      nativeToScVal(member, { type: "address" }),
-    ], publicKey);
+    const val = await simulate(
+      "get_drips_stream",
+      [
+        nativeToScVal(listId, { type: "u64" }),
+        nativeToScVal(member, { type: "address" }),
+      ],
+      publicKey,
+    );
     const stream = scValToNative(val) as any;
     if (!stream) return null;
     return {
@@ -362,7 +427,7 @@ export async function getDripsStream(
 async function sendOp(
   publicKey: string,
   method: string,
-  args: xdr.ScVal[]
+  args: xdr.ScVal[],
 ): Promise<{ hash: string; status: any }> {
   const contract = new Contract(CONTRACT_ID);
   const account = await server.getAccount(publicKey);
@@ -375,13 +440,17 @@ async function sendOp(
     .build();
 
   const simResult = await server.simulateTransaction(tx);
-  if (StellarRpc.Api.isSimulationError(simResult)) throw new Error((simResult as any).error);
+  if (StellarRpc.Api.isSimulationError(simResult))
+    throw new Error((simResult as any).error);
   tx = StellarRpc.assembleTransaction(tx, simResult as any).build();
 
-  const signed = await signTransaction(tx.toXDR(), { networkPassphrase: NETWORK_PASSPHRASE });
-  const xdrStr = typeof signed === "string" ? signed : (signed as any).signedTxXdr;
+  const signed = await signTransaction(tx.toXDR(), {
+    networkPassphrase: NETWORK_PASSPHRASE,
+  });
+  const xdrStr =
+    typeof signed === "string" ? signed : (signed as any).signedTxXdr;
   const submitted = await server.sendTransaction(
-    TransactionBuilder.fromXDR(xdrStr, NETWORK_PASSPHRASE)
+    TransactionBuilder.fromXDR(xdrStr, NETWORK_PASSPHRASE),
   );
   if (submitted.status === "ERROR") throw new Error("Transaction failed");
 
@@ -393,9 +462,44 @@ async function sendOp(
   return { hash: submitted.hash, status };
 }
 
-async function buildAndSend(publicKey: string, method: string, args: xdr.ScVal[]): Promise<string> {
+async function buildAndSend(
+  publicKey: string,
+  method: string,
+  args: xdr.ScVal[],
+): Promise<string> {
   const { hash } = await sendOp(publicKey, method, args);
   return hash;
+}
+
+export interface SplitsReceiverInput {
+  receiver: string;
+  weightBps: number;
+}
+
+function addressSplitsReceiver(receiver: SplitsReceiverInput): xdr.ScVal {
+  return xdr.ScVal.scvVec([
+    xdr.ScVal.scvSymbol("Address"),
+    xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("receiver"),
+        val: nativeToScVal(receiver.receiver, { type: "address" }),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("weight"),
+        val: nativeToScVal(BigInt(receiver.weightBps), { type: "u128" }),
+      }),
+    ]),
+  ]);
+}
+
+export async function setSplits(
+  publicKey: string,
+  receivers: SplitsReceiverInput[],
+): Promise<string> {
+  return buildAndSend(publicKey, "set_splits", [
+    nativeToScVal(publicKey, { type: "address" }),
+    xdr.ScVal.scvVec(receivers.map(addressSplitsReceiver)),
+  ]);
 }
 
 /**
@@ -407,16 +511,21 @@ async function buildAndSend(publicKey: string, method: string, args: xdr.ScVal[]
 async function buildSendAndDecode<T>(
   publicKey: string,
   method: string,
-  args: xdr.ScVal[]
+  args: xdr.ScVal[],
 ): Promise<{ hash: string; value: T }> {
   const { hash, status } = await sendOp(publicKey, method, args);
   if (status.status !== "SUCCESS" || !status.returnValue) {
-    throw new Error(`Transaction ${hash} did not return a value (status: ${status.status})`);
+    throw new Error(
+      `Transaction ${hash} did not return a value (status: ${status.status})`,
+    );
   }
   return { hash, value: scValToNative(status.returnValue) as T };
 }
 
-export async function createDripsList(publicKey: string, name: string): Promise<string> {
+export async function createDripsList(
+  publicKey: string,
+  name: string,
+): Promise<string> {
   return buildAndSend(publicKey, "create_drips_list", [
     nativeToScVal(publicKey, { type: "address" }),
     nativeToScVal(name, { type: "string" }),
@@ -457,7 +566,7 @@ function buildCreateScheduleArgs(
   cliffDays: number,
   kind: "Linear" | "Cliff" | "LinearWithCliff",
   revocable: boolean,
-  lockupDays: number = cliffDays
+  lockupDays: number = cliffDays,
 ): xdr.ScVal[] {
   const totalStroops = xlmToStroops(totalAmountXlm);
   const durationSecs = durationDays * 86400;
@@ -490,7 +599,7 @@ export async function createSchedule(
   cliffDays: number,
   kind: "Linear" | "Cliff" | "LinearWithCliff",
   revocable: boolean,
-  lockupDays: number = cliffDays
+  lockupDays: number = cliffDays,
 ): Promise<string> {
   const args = buildCreateScheduleArgs(
     publicKey,
@@ -502,7 +611,7 @@ export async function createSchedule(
     cliffDays,
     kind,
     revocable,
-    lockupDays
+    lockupDays,
   );
   return buildAndSend(publicKey, "create_schedule", args);
 }
@@ -524,7 +633,7 @@ export async function estimateCreateScheduleFee(
   cliffDays: number,
   kind: "Linear" | "Cliff" | "LinearWithCliff",
   revocable: boolean,
-  lockupDays: number = cliffDays
+  lockupDays: number = cliffDays,
 ): Promise<bigint> {
   const args = buildCreateScheduleArgs(
     publicKey,
@@ -536,7 +645,7 @@ export async function estimateCreateScheduleFee(
     cliffDays,
     kind,
     revocable,
-    lockupDays
+    lockupDays,
   );
   const contract = new Contract(CONTRACT_ID);
   const account = await server.getAccount(publicKey);
@@ -549,8 +658,12 @@ export async function estimateCreateScheduleFee(
     .build();
 
   const simResult = await server.simulateTransaction(tx);
-  if (StellarRpc.Api.isSimulationError(simResult)) throw new Error((simResult as any).error);
-  const assembled = StellarRpc.assembleTransaction(tx, simResult as any).build();
+  if (StellarRpc.Api.isSimulationError(simResult))
+    throw new Error((simResult as any).error);
+  const assembled = StellarRpc.assembleTransaction(
+    tx,
+    simResult as any,
+  ).build();
   return BigInt(assembled.fee);
 }
 
@@ -589,15 +702,19 @@ function bytesArg(hex: string): xdr.ScVal {
  */
 export async function commitScheduleBatch(
   publicKey: string,
-  batch: Pick<MerkleBatch, "token" | "totalStroops" | "root" | "expiryLedger">
+  batch: Pick<MerkleBatch, "token" | "totalStroops" | "root" | "expiryLedger">,
 ): Promise<{ hash: string; batchId: number }> {
-  const { hash, value } = await buildSendAndDecode<bigint>(publicKey, "commit_schedule_batch", [
-    nativeToScVal(publicKey, { type: "address" }),
-    nativeToScVal(batch.token, { type: "address" }),
-    nativeToScVal(BigInt(batch.totalStroops), { type: "i128" }),
-    bytesArg(batch.root),
-    nativeToScVal(batch.expiryLedger, { type: "u32" }),
-  ]);
+  const { hash, value } = await buildSendAndDecode<bigint>(
+    publicKey,
+    "commit_schedule_batch",
+    [
+      nativeToScVal(publicKey, { type: "address" }),
+      nativeToScVal(batch.token, { type: "address" }),
+      nativeToScVal(BigInt(batch.totalStroops), { type: "i128" }),
+      bytesArg(batch.root),
+      nativeToScVal(batch.expiryLedger, { type: "u32" }),
+    ],
+  );
   return { hash, batchId: Number(value) };
 }
 
@@ -611,8 +728,14 @@ export async function claimScheduleSlot(
   batchId: number,
   slot: Pick<
     MerkleBatchBeneficiary,
-    "totalAmountStroops" | "durationSecs" | "cliffSecs" | "startTime" | "kind" | "revocable" | "proof"
-  >
+    | "totalAmountStroops"
+    | "durationSecs"
+    | "cliffSecs"
+    | "startTime"
+    | "kind"
+    | "revocable"
+    | "proof"
+  >,
 ): Promise<string> {
   const kindVal = xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(slot.kind)]);
   return buildAndSend(publicKey, "claim_schedule_slot", [
@@ -629,19 +752,32 @@ export async function claimScheduleSlot(
 }
 
 /** Grantor reclaims a batch's unclaimed deposit after `expiryLedger` has passed. */
-export async function reclaimBatch(publicKey: string, batchId: number): Promise<string> {
+export async function reclaimBatch(
+  publicKey: string,
+  batchId: number,
+): Promise<string> {
   return buildAndSend(publicKey, "reclaim_batch", [
     nativeToScVal(batchId, { type: "u64" }),
     nativeToScVal(publicKey, { type: "address" }),
   ]);
 }
 
-export async function claimVested(publicKey: string, scheduleId: number): Promise<string> {
-  return buildAndSend(publicKey, "claim", [nativeToScVal(scheduleId, { type: "u64" })]);
+export async function claimVested(
+  publicKey: string,
+  scheduleId: number,
+): Promise<string> {
+  return buildAndSend(publicKey, "claim", [
+    nativeToScVal(scheduleId, { type: "u64" }),
+  ]);
 }
 
-export async function revokeSchedule(publicKey: string, scheduleId: number): Promise<string> {
-  return buildAndSend(publicKey, "revoke", [nativeToScVal(scheduleId, { type: "u64" })]);
+export async function revokeSchedule(
+  publicKey: string,
+  scheduleId: number,
+): Promise<string> {
+  return buildAndSend(publicKey, "revoke", [
+    nativeToScVal(scheduleId, { type: "u64" }),
+  ]);
 }
 
 export async function topUpSchedule(
@@ -668,18 +804,28 @@ export async function withdrawSchedule(
   ]);
 }
 
-export async function pauseSchedule(publicKey: string, scheduleId: number): Promise<string> {
-  return buildAndSend(publicKey, "pause_schedule", [nativeToScVal(scheduleId, { type: "u64" })]);
+export async function pauseSchedule(
+  publicKey: string,
+  scheduleId: number,
+): Promise<string> {
+  return buildAndSend(publicKey, "pause_schedule", [
+    nativeToScVal(scheduleId, { type: "u64" }),
+  ]);
 }
 
-export async function resumeSchedule(publicKey: string, scheduleId: number): Promise<string> {
-  return buildAndSend(publicKey, "resume_schedule", [nativeToScVal(scheduleId, { type: "u64" })]);
+export async function resumeSchedule(
+  publicKey: string,
+  scheduleId: number,
+): Promise<string> {
+  return buildAndSend(publicKey, "resume_schedule", [
+    nativeToScVal(scheduleId, { type: "u64" }),
+  ]);
 }
 
 export async function transferGrantor(
   publicKey: string,
   scheduleId: number,
-  newGrantor: string
+  newGrantor: string,
 ): Promise<string> {
   return buildAndSend(publicKey, "transfer_grantor", [
     nativeToScVal(scheduleId, { type: "u64" }),
@@ -690,7 +836,7 @@ export async function transferGrantor(
 export async function transferBeneficiary(
   publicKey: string,
   scheduleId: number,
-  newBeneficiary: string
+  newBeneficiary: string,
 ): Promise<string> {
   return buildAndSend(publicKey, "transfer_beneficiary", [
     nativeToScVal(scheduleId, { type: "u64" }),
@@ -702,7 +848,10 @@ export async function transferBeneficiary(
  * Squeeze a stream — collect tokens dripped so far in the current (not yet settled) cycle.
  * The receiver can call this to claim accrued tokens without waiting for full stream settlement.
  */
-export async function squeezeStream(publicKey: string, scheduleId: number): Promise<string> {
+export async function squeezeStream(
+  publicKey: string,
+  scheduleId: number,
+): Promise<string> {
   return buildAndSend(publicKey, "squeeze_streams", [
     nativeToScVal(scheduleId, { type: "u64" }),
   ]);
@@ -748,17 +897,19 @@ function parseSchedule(raw: any): ScheduleData {
       raw.kind === "Cliff"
         ? "Cliff"
         : raw.kind === "LinearWithCliff"
-        ? "LinearWithCliff"
-        : raw.kind === "Graded"
-        ? "Graded"
-        : "Linear",
+          ? "LinearWithCliff"
+          : raw.kind === "Graded"
+            ? "Graded"
+            : "Linear",
     revocable: Boolean(raw.revocable),
     revoked: Boolean(raw.revoked),
     paused: Boolean(raw.paused),
     paused_duration: Number(raw.paused_duration ?? 0),
     paused_at: Number(raw.paused_at ?? 0),
     requires_milestones: Boolean(raw.requires_milestones),
-    vested_at_revoke: BigInt(raw.vested_at_revoke ?? raw.vested_at_revocation ?? 0),
+    vested_at_revoke: BigInt(
+      raw.vested_at_revoke ?? raw.vested_at_revocation ?? 0,
+    ),
     milestones: Array.isArray(raw.milestones)
       ? (raw.milestones as any[]).map((m) => ({
           pct: Number(m.pct ?? m.percent ?? 0),
@@ -791,7 +942,7 @@ export function vestingProgress(s: ScheduleData, now: number): number {
     if (s.total_amount <= 0n) return 0;
     return Math.min(
       100,
-      Math.round((Number(s.vested_at_revoke) / Number(s.total_amount)) * 100)
+      Math.round((Number(s.vested_at_revoke) / Number(s.total_amount)) * 100),
     );
   }
   if (s.kind === "Graded" && s.milestones && s.milestones.length > 0) {
@@ -799,21 +950,26 @@ export function vestingProgress(s: ScheduleData, now: number): number {
       100,
       s.milestones
         .filter((m) => now >= m.timestamp)
-        .reduce((sum, m) => sum + m.pct, 0)
+        .reduce((sum, m) => sum + m.pct, 0),
     );
   }
   if (now < s.start_time) return 0;
   if (s.duration <= 0) return 100;
   const activePauseSeconds =
     s.paused && s.paused_at > 0 ? Math.max(0, now - s.paused_at) : 0;
-  const elapsed = Math.max(0, now - s.start_time - s.paused_duration - activePauseSeconds);
+  const elapsed = Math.max(
+    0,
+    now - s.start_time - s.paused_duration - activePauseSeconds,
+  );
   return Math.min(100, Math.round((elapsed / s.duration) * 100));
 }
 
 export function formatDate(ts: number): string {
   if (!ts || ts <= 0) return "—";
   return new Date(ts * 1000).toLocaleDateString(undefined, {
-    year: "numeric", month: "short", day: "numeric",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
   });
 }
 
@@ -821,7 +977,10 @@ export function formatDate(ts: number): string {
  * Format a cliff timestamp for display.
  * Returns "No cliff" when ts is 0 or cliff_duration is 0 (no cliff configured).
  */
-export function formatCliffDate(cliffDuration: number, startTime: number): string {
+export function formatCliffDate(
+  cliffDuration: number,
+  startTime: number,
+): string {
   if (!cliffDuration || cliffDuration <= 0) return "No cliff";
   return formatDate(startTime + cliffDuration);
 }
@@ -829,33 +988,110 @@ export function formatCliffDate(cliffDuration: number, startTime: number): strin
 export function parseContractError(e: Error): string {
   const msg = e.message;
   // Map Soroban VestFlowError variants (Error(Contract, #X))
-  if (msg.includes("Contract error: 1") || msg.includes("Contract, #1")) return "Schedule not found.";
-  if (msg.includes("Contract error: 2") || msg.includes("Contract, #2") || msg.includes("Schedule is not revocable")) return "This schedule cannot be revoked.";
-  if (msg.includes("Contract error: 3") || msg.includes("Contract, #3") || msg.includes("Already revoked")) return "This schedule has already been revoked.";
-  if (msg.includes("Contract error: 4") || msg.includes("Contract, #4") || msg.includes("Nothing to claim yet")) return "No tokens are available to claim yet.";
-  if (msg.includes("Contract error: 5") || msg.includes("Contract, #5") || msg.includes("AmountZero")) return "Amount must be greater than zero.";
-  if (msg.includes("Contract error: 6") || msg.includes("Contract, #6") || msg.includes("DurationZero")) return "Duration must be greater than zero.";
-  if (msg.includes("Contract error: 7") || msg.includes("Contract, #7") || msg.includes("Cliff exceeds duration")) return "The cliff duration cannot exceed the total duration.";
-  if (msg.includes("Contract error: 8") || msg.includes("Contract, #8") || msg.includes("Schedule has been revoked")) return "This schedule was revoked.";
-  if (msg.includes("Contract error: 15") || msg.includes("Contract, #15") || msg.includes("DurationTooShort")) return "Duration must be at least 60 seconds.";
-  if (msg.includes("Contract error: 29") || msg.includes("Contract, #29") || msg.includes("SlotAlreadyClaimed")) return "This beneficiary slot has already been claimed.";
-  if (msg.includes("Contract error: 30") || msg.includes("Contract, #30") || msg.includes("BatchExpired")) return "This batch's claim window has expired.";
-  if (msg.includes("Contract error: 31") || msg.includes("Contract, #31") || msg.includes("InvalidProof")) return "The Merkle proof did not verify against the batch's committed root.";
-  if (msg.includes("Contract error: 32") || msg.includes("Contract, #32") || msg.includes("NotExpired")) return "This batch cannot be reclaimed until its expiry ledger has passed.";
-  if (msg.includes("Contract error: 33") || msg.includes("Contract, #33") || msg.includes("ProofTooDeep")) return "The Merkle proof is too deep (max 20 levels).";
+  if (msg.includes("Contract error: 1") || msg.includes("Contract, #1"))
+    return "Schedule not found.";
+  if (
+    msg.includes("Contract error: 2") ||
+    msg.includes("Contract, #2") ||
+    msg.includes("Schedule is not revocable")
+  )
+    return "This schedule cannot be revoked.";
+  if (
+    msg.includes("Contract error: 3") ||
+    msg.includes("Contract, #3") ||
+    msg.includes("Already revoked")
+  )
+    return "This schedule has already been revoked.";
+  if (
+    msg.includes("Contract error: 4") ||
+    msg.includes("Contract, #4") ||
+    msg.includes("Nothing to claim yet")
+  )
+    return "No tokens are available to claim yet.";
+  if (
+    msg.includes("Contract error: 5") ||
+    msg.includes("Contract, #5") ||
+    msg.includes("AmountZero")
+  )
+    return "Amount must be greater than zero.";
+  if (
+    msg.includes("Contract error: 6") ||
+    msg.includes("Contract, #6") ||
+    msg.includes("DurationZero")
+  )
+    return "Duration must be greater than zero.";
+  if (
+    msg.includes("Contract error: 7") ||
+    msg.includes("Contract, #7") ||
+    msg.includes("Cliff exceeds duration")
+  )
+    return "The cliff duration cannot exceed the total duration.";
+  if (
+    msg.includes("Contract error: 8") ||
+    msg.includes("Contract, #8") ||
+    msg.includes("Schedule has been revoked")
+  )
+    return "This schedule was revoked.";
+  if (
+    msg.includes("Contract error: 15") ||
+    msg.includes("Contract, #15") ||
+    msg.includes("DurationTooShort")
+  )
+    return "Duration must be at least 60 seconds.";
+  if (
+    msg.includes("Contract error: 29") ||
+    msg.includes("Contract, #29") ||
+    msg.includes("SlotAlreadyClaimed")
+  )
+    return "This beneficiary slot has already been claimed.";
+  if (
+    msg.includes("Contract error: 30") ||
+    msg.includes("Contract, #30") ||
+    msg.includes("BatchExpired")
+  )
+    return "This batch's claim window has expired.";
+  if (
+    msg.includes("Contract error: 31") ||
+    msg.includes("Contract, #31") ||
+    msg.includes("InvalidProof")
+  )
+    return "The Merkle proof did not verify against the batch's committed root.";
+  if (
+    msg.includes("Contract error: 32") ||
+    msg.includes("Contract, #32") ||
+    msg.includes("NotExpired")
+  )
+    return "This batch cannot be reclaimed until its expiry ledger has passed.";
+  if (
+    msg.includes("Contract error: 33") ||
+    msg.includes("Contract, #33") ||
+    msg.includes("ProofTooDeep")
+  )
+    return "The Merkle proof is too deep (max 20 levels).";
 
   if (msg.includes("Schedule not found")) return "Schedule not found.";
-  if (msg.includes("Not authorized")) return "Not authorized to perform this action.";
-  if (msg.includes("Duration too short")) return "Duration must be at least 60 seconds.";
-  if (msg.includes("Not the grantor")) return "Only the grantor can perform this action.";
-  if (msg.includes("Not the beneficiary")) return "Only the beneficiary can claim tokens.";
-  if (msg.includes("Insufficient balance")) return "Insufficient balance to complete this action.";
-  if (msg.includes("Schedule has ended")) return "This vesting schedule has already ended.";
-  if (msg.includes("Start time in the past")) return "The start time must be in the future.";
-  if (msg.includes("Schedule already paused")) return "This schedule is already paused.";
-  if (msg.includes("Schedule not paused")) return "This schedule is not currently paused.";
-  if (msg.includes("Cannot pause revoked schedule")) return "Revoked schedules cannot be paused.";
-  if (msg.includes("Cannot resume revoked schedule")) return "Revoked schedules cannot be resumed.";
+  if (msg.includes("Not authorized"))
+    return "Not authorized to perform this action.";
+  if (msg.includes("Duration too short"))
+    return "Duration must be at least 60 seconds.";
+  if (msg.includes("Not the grantor"))
+    return "Only the grantor can perform this action.";
+  if (msg.includes("Not the beneficiary"))
+    return "Only the beneficiary can claim tokens.";
+  if (msg.includes("Insufficient balance"))
+    return "Insufficient balance to complete this action.";
+  if (msg.includes("Schedule has ended"))
+    return "This vesting schedule has already ended.";
+  if (msg.includes("Start time in the past"))
+    return "The start time must be in the future.";
+  if (msg.includes("Schedule already paused"))
+    return "This schedule is already paused.";
+  if (msg.includes("Schedule not paused"))
+    return "This schedule is not currently paused.";
+  if (msg.includes("Cannot pause revoked schedule"))
+    return "Revoked schedules cannot be paused.";
+  if (msg.includes("Cannot resume revoked schedule"))
+    return "Revoked schedules cannot be resumed.";
   return msg;
 }
 
@@ -872,7 +1108,7 @@ export interface TransactionStatusResult {
  * Fetch the current status of a transaction from the RPC server.
  */
 export async function getTransactionStatus(
-  hash: string
+  hash: string,
 ): Promise<TransactionStatusResult> {
   const result = await server.getTransaction(hash);
   return {
@@ -889,7 +1125,7 @@ export async function getTransactionStatus(
  */
 export async function waitForTransaction(
   hash: string,
-  opts: { timeoutMs?: number; intervalMs?: number } = {}
+  opts: { timeoutMs?: number; intervalMs?: number } = {},
 ): Promise<TransactionStatusResult> {
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const intervalMs = opts.intervalMs ?? 1_000;
@@ -899,7 +1135,7 @@ export async function waitForTransaction(
   while (status.status === "NOT_FOUND") {
     if (Date.now() >= deadline) {
       throw new Error(
-        `Timed out waiting for transaction ${hash} to confirm after ${timeoutMs}ms`
+        `Timed out waiting for transaction ${hash} to confirm after ${timeoutMs}ms`,
       );
     }
     await new Promise((r) => setTimeout(r, intervalMs));
@@ -907,7 +1143,9 @@ export async function waitForTransaction(
   }
 
   if (status.status === "FAILED" || status.status === "ERROR") {
-    throw new Error(`Transaction ${hash} ${status.status.toLowerCase()}: ${status.error ?? "unknown"}`);
+    throw new Error(
+      `Transaction ${hash} ${status.status.toLowerCase()}: ${status.error ?? "unknown"}`,
+    );
   }
 
   return status;

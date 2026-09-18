@@ -62,10 +62,7 @@ async function getSplitsFromContract(account: string): Promise<SplitsConfig> {
     networkPassphrase: NETWORK_PASSPHRASE,
   })
     .addOperation(
-      contract.call(
-        "get_splits",
-        nativeToScVal(account, { type: "address" })
-      )
+      contract.call("splits", nativeToScVal(account, { type: "address" })),
     )
     .setTimeout(30)
     .build();
@@ -88,20 +85,29 @@ async function getSplitsFromContract(account: string): Promise<SplitsConfig> {
     return { receivers: [], hash: ZERO_HASH };
   }
 
-  // The contract returns a map/struct with `receivers` (Vec of {receiver, weight_bps})
-  // and `hash` (Bytes32). Normalise defensively.
-  const receivers: SplitReceiver[] = Array.isArray(native.receivers)
-    ? (native.receivers as any[]).map((r: any) => ({
-        receiver: String(r.receiver ?? r.address ?? ""),
-        weight_bps: Number(r.weight_bps ?? r.bps ?? 0),
-      }))
-    : [];
+  // `splits` returns Vec<SplitReceiver>. Soroban enums decode as
+  // ["Address", { receiver, weight }] pairs; NFT receivers are not editable
+  // by this address-only UI and are omitted from the response.
+  const entries = Array.isArray(native)
+    ? native
+    : Array.isArray(native.receivers)
+      ? native.receivers
+      : [];
+  const receivers: SplitReceiver[] = entries.flatMap((entry: any) => {
+    const variant = Array.isArray(entry) ? entry[0] : entry?.variant;
+    const payload = Array.isArray(entry) ? entry[1] : entry?.value;
+    if (variant !== "Address" || !payload) return [];
+    return [
+      {
+        receiver: String(payload.receiver ?? payload.address ?? ""),
+        weight_bps: Number(
+          payload.weight ?? payload.weight_bps ?? payload.bps ?? 0,
+        ),
+      },
+    ];
+  });
 
-  const hash: string = native.hash
-    ? `0x${Buffer.from(native.hash).toString("hex")}`
-    : ZERO_HASH;
-
-  return { receivers, hash };
+  return { receivers, hash: ZERO_HASH };
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -113,14 +119,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   if (!account) {
     return NextResponse.json(
       { error: "Missing required query parameter: account" },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
   if (!STELLAR_ADDRESS_RE.test(account)) {
     return NextResponse.json(
       { error: "Invalid Stellar address format" },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
@@ -133,13 +139,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
         headers: {
           "Cache-Control": "public, max-age=30, stale-while-revalidate=120",
         },
-      }
+      },
     );
   } catch (error) {
     console.error("Error fetching splits config:", error);
     return NextResponse.json(
       { error: "Failed to fetch splits configuration" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
