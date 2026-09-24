@@ -50,6 +50,7 @@ function inferEventType(topics: unknown[]): EventType {
   if (tag === "created") return "schedule_created";
   if (tag === "claimed") return "claimed";
   if (tag === "revoked") return "revoked";
+  if (tag === "given") return "given";
   return "unknown";
 }
 
@@ -158,6 +159,19 @@ async function poll(): Promise<void> {
             grantor = toStr(topics[1]);
             token = toStr(topics[2]);
             scheduleId = valueArr[0] != null ? Number(valueArr[0]) : null;
+            break;
+          case "given":
+            // topics: ["given", sender, receiver, token]
+            // value: amount_stroops, or [amount_stroops, ...metadata]
+            grantor = toStr(topics[1]);
+            beneficiary = toStr(topics[2]);
+            token = toStr(topics[3]);
+            amount =
+              valueArr.length > 0 && valueArr[0] != null
+                ? String(valueArr[0])
+                : value != null && typeof value !== "object"
+                  ? String(value)
+                  : null;
             break;
         }
 

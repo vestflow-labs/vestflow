@@ -1,6 +1,6 @@
 import type { NetworkName } from "./config";
 
-export type EventType = "schedule_created" | "claimed" | "revoked" | "unknown";
+export type EventType = "schedule_created" | "claimed" | "revoked" | "given" | "unknown";
 
 /** A single indexed contract event row. */
 export interface IndexedEvent {

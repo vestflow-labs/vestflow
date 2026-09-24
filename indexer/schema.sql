@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS schedule_events (
   -- Stellar-assigned event ID: "<ledger>-<txIndex>-<eventIndex>"
   id TEXT PRIMARY KEY,
 
-  event_type TEXT NOT NULL CHECK (event_type IN ('schedule_created', 'claimed', 'revoked', 'unknown')),
+  event_type TEXT NOT NULL CHECK (event_type IN ('schedule_created', 'claimed', 'revoked', 'given', 'unknown')),
 
   ledger            INTEGER NOT NULL,
   ledger_closed_at  TEXT    NOT NULL, -- ISO 8601 (from Stellar RPC)
@@ -123,3 +123,21 @@ CREATE TABLE IF NOT EXISTS notification_milestones (
 );
 
 CREATE INDEX IF NOT EXISTS idx_milestone_schedule ON notification_milestones (schedule_id);
+
+-- Gives — direct transfers indexed from `given` contract events.
+-- Summary endpoint GET /gives/summary/:address aggregates from this table
+-- across all tokens.
+CREATE TABLE IF NOT EXISTS gives (
+  id TEXT PRIMARY KEY,
+  sender TEXT NOT NULL,
+  receiver TEXT NOT NULL,
+  token TEXT NOT NULL,
+  amount_stroops TEXT NOT NULL,
+  ledger INTEGER NOT NULL,
+  timestamp INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_gives_sender ON gives (sender);
+CREATE INDEX IF NOT EXISTS idx_gives_receiver ON gives (receiver);
+CREATE INDEX IF NOT EXISTS idx_gives_sender_timestamp ON gives (sender, timestamp DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_gives_receiver_timestamp ON gives (receiver, timestamp DESC, id DESC);

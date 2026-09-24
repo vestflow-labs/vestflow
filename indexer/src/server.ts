@@ -8,24 +8,30 @@
  * Endpoints:
  *   GET /health
  *   GET /events?address=G...&event_type=claimed&limit=50&offset=0
+ *   GET /gives/summary/:address
  */
 
 import http from "http";
 import { URL } from "url";
-import { getCheckpoint, queryEvents, queryHistory } from "./db";
+import { getCheckpoint, getGiveSummary, queryEvents, queryHistory } from "./db";
+import { parseNetwork } from "./config";
 import type { EventQueryParams } from "./types";
 
 const PORT = Number(process.env.INDEXER_PORT ?? "3001");
 
+const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
+
 function json(
   res: http.ServerResponse,
   status: number,
-  body: unknown
+  body: unknown,
+  headers?: Record<string, string>
 ): void {
   res.writeHead(status, {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
     "Cache-Control": "no-store",
+    ...(headers ?? {}),
   });
 
   res.end(JSON.stringify(body));
@@ -116,7 +122,48 @@ function handleHistory(
   }
 }
 
-function createServer(): http.Server {
+function handleGiveSummary(
+  res: http.ServerResponse,
+  address: string,
+  searchParams: URLSearchParams
+): void {
+  if (!STELLAR_ADDRESS_RE.test(address)) {
+    return json(res, 400, {
+      error: "Invalid Stellar address",
+    });
+  }
+
+  try {
+    const networkParam = searchParams.get("network");
+    const network =
+      networkParam == null || networkParam === ""
+        ? undefined
+        : parseNetwork(networkParam);
+    const summary = getGiveSummary(address, network);
+
+    json(
+      res,
+      200,
+      summary,
+      {
+        "Cache-Control": "public, max-age=30, stale-while-revalidate=300",
+      }
+    );
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Unsupported network")) {
+      return json(res, 400, {
+        error: "network must be either mainnet or testnet",
+      });
+    }
+    console.error("[server] Give summary query error:", error);
+
+    json(res, 500, {
+      error: "Query failed",
+    });
+  }
+}
+
+export function createServer(): http.Server {
   return http.createServer((req, res) => {
     if (req.method !== "GET") {
       return json(res, 405, {
@@ -137,6 +184,9 @@ function createServer(): http.Server {
     const historyMatch = url.pathname.match(
       /^\/schedules\/([A-Z0-9]{56})\/history$/
     );
+    const giveSummaryMatch = url.pathname.match(
+      /^\/gives\/summary\/([^/]+)$/
+    );
 
     switch (url.pathname) {
       case "/health":
@@ -148,6 +198,13 @@ function createServer(): http.Server {
       default:
         if (historyMatch) {
           return handleHistory(res, historyMatch[1], url.searchParams);
+        }
+        if (giveSummaryMatch) {
+          return handleGiveSummary(
+            res,
+            decodeURIComponent(giveSummaryMatch[1]),
+            url.searchParams
+          );
         }
         return json(res, 404, {
           error: "Not found",
@@ -164,4 +221,5 @@ server.listen(PORT, () => {
   console.log(
     "[server]   GET /events?address=G...&event_type=claimed&limit=50"
   );
+  console.log("[server]   GET /gives/summary/:address");
 });

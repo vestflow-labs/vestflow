@@ -28,6 +28,83 @@ function ensureColumn(db: Database.Database, table: string, column: string, ddl:
   }
 }
 
+function ensureGivesTable(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gives (
+      id TEXT PRIMARY KEY,
+      sender TEXT NOT NULL,
+      receiver TEXT NOT NULL,
+      token TEXT NOT NULL,
+      amount_stroops TEXT NOT NULL,
+      ledger INTEGER NOT NULL,
+      timestamp INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_gives_sender ON gives (sender);
+    CREATE INDEX IF NOT EXISTS idx_gives_receiver ON gives (receiver);
+    CREATE INDEX IF NOT EXISTS idx_gives_sender_timestamp ON gives (sender, timestamp DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_gives_receiver_timestamp ON gives (receiver, timestamp DESC, id DESC);
+  `);
+}
+
+function migrateGivenEventType(db: Database.Database): void {
+  const row = db
+    .prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'schedule_events'"
+    )
+    .get() as { sql: string } | undefined;
+  if (!row?.sql || row.sql.includes("'given'")) {
+    return;
+  }
+  db.exec("BEGIN");
+  try {
+    db.exec(`
+      CREATE TABLE schedule_events_new (
+        id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL CHECK (event_type IN ('schedule_created', 'claimed', 'revoked', 'given', 'unknown')),
+        ledger INTEGER NOT NULL,
+        ledger_closed_at TEXT NOT NULL,
+        schedule_id INTEGER,
+        grantor TEXT,
+        beneficiary TEXT,
+        amount TEXT,
+        token TEXT,
+        created_amount TEXT,
+        raw_topics TEXT NOT NULL,
+        raw_value TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      );
+    `);
+    db.exec(`
+      INSERT INTO schedule_events_new (
+        id, event_type, ledger, ledger_closed_at, schedule_id,
+        grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value, created_at
+      )
+      SELECT
+        id, event_type, ledger, ledger_closed_at, schedule_id,
+        grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value, created_at
+      FROM schedule_events;
+    `);
+    db.exec("DROP TABLE schedule_events;");
+    db.exec("ALTER TABLE schedule_events_new RENAME TO schedule_events;");
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_grantor ON schedule_events (grantor);
+      CREATE INDEX IF NOT EXISTS idx_beneficiary ON schedule_events (beneficiary);
+      CREATE INDEX IF NOT EXISTS idx_schedule_id ON schedule_events (schedule_id);
+      CREATE INDEX IF NOT EXISTS idx_event_type ON schedule_events (event_type);
+      CREATE INDEX IF NOT EXISTS idx_ledger ON schedule_events (ledger);
+      CREATE INDEX IF NOT EXISTS idx_token ON schedule_events (token);
+    `);
+    db.exec("COMMIT");
+  } catch {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // ignore rollback errors on a failed migration attempt
+    }
+    throw new Error("Failed to migrate schedule_events event_type check");
+  }
+}
+
 export function getDb(network = parseNetwork(undefined)): Database.Database {
   let db = dbs.get(network);
   if (!db) {
@@ -41,6 +118,8 @@ export function getDb(network = parseNetwork(undefined)): Database.Database {
     ensureColumn(db, "schedule_events", "token", "token TEXT");
     ensureColumn(db, "schedule_events", "created_amount", "created_amount TEXT");
     db.exec("CREATE INDEX IF NOT EXISTS idx_token ON schedule_events (token)");
+    migrateGivenEventType(db);
+    ensureGivesTable(db);
     dbs.set(network, db);
   }
   return db;
@@ -84,7 +163,8 @@ export interface InsertEventRow {
  * (idempotent — duplicate Stellar event IDs are silently ignored).
  */
 export function insertEvent(row: InsertEventRow, network?: NetworkName): boolean {
-  const result = getDb(network)
+  const db = getDb(network);
+  const result = db
     .prepare(
       `INSERT OR IGNORE INTO schedule_events
         (id, event_type, ledger, ledger_closed_at, schedule_id,
@@ -105,7 +185,133 @@ export function insertEvent(row: InsertEventRow, network?: NetworkName): boolean
       row.raw_topics,
       row.raw_value
     );
+
+  // Project `given` events into the gives table so the summary endpoint
+  // can aggregate across all tokens without scanning raw event payloads.
+  if (
+    row.event_type === "given" &&
+    row.grantor &&
+    row.beneficiary &&
+    row.token &&
+    row.amount
+  ) {
+    const parsed = Date.parse(row.ledger_closed_at);
+    const timestamp = Number.isFinite(parsed)
+      ? Math.floor(parsed / 1000)
+      : Math.floor(Date.now() / 1000);
+    db.prepare(
+      `INSERT OR IGNORE INTO gives
+        (id, sender, receiver, token, amount_stroops, ledger, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      row.id,
+      row.grantor,
+      row.beneficiary,
+      row.token,
+      row.amount,
+      row.ledger,
+      timestamp
+    );
+  }
+
   return result.changes > 0;
+}
+
+// ── Gives ─────────────────────────────────────────────────────────────
+
+export interface InsertGiveRow {
+  id: string;
+  sender: string;
+  receiver: string;
+  token: string;
+  amount: string;
+  ledger: number;
+  timestamp: number;
+}
+
+export function insertGive(row: InsertGiveRow, network?: NetworkName): boolean {
+  const result = getDb(network)
+    .prepare(
+      `INSERT OR IGNORE INTO gives
+        (id, sender, receiver, token, amount_stroops, ledger, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      row.id,
+      row.sender,
+      row.receiver,
+      row.token,
+      row.amount,
+      row.ledger,
+      row.timestamp
+    );
+  return result.changes > 0;
+}
+
+export interface GiveSummary {
+  total_given: string;
+  total_received: string;
+  unique_senders: number;
+  unique_receivers: number;
+  give_count: number;
+  receive_count: number;
+}
+
+export function getGiveSummary(
+  address: string,
+  network?: NetworkName
+): GiveSummary {
+  const db = getDb(network);
+  const givenRows = db
+    .prepare("SELECT amount_stroops AS value FROM gives WHERE sender = ?")
+    .all(address) as { value: string | null }[];
+  const receivedRows = db
+    .prepare("SELECT amount_stroops AS value FROM gives WHERE receiver = ?")
+    .all(address) as { value: string | null }[];
+
+  let totalGiven = 0n;
+  for (const row of givenRows) {
+    try {
+      totalGiven += BigInt(row.value ?? "0");
+    } catch {
+      // ignore malformed amounts rather than failing the whole summary
+    }
+  }
+
+  let totalReceived = 0n;
+  for (const row of receivedRows) {
+    try {
+      totalReceived += BigInt(row.value ?? "0");
+    } catch {
+      // ignore malformed amounts rather than failing the whole summary
+    }
+  }
+
+  const giveCount = db
+    .prepare("SELECT COUNT(*) AS count FROM gives WHERE sender = ?")
+    .get(address) as { count: number } | undefined;
+  const receiveCount = db
+    .prepare("SELECT COUNT(*) AS count FROM gives WHERE receiver = ?")
+    .get(address) as { count: number } | undefined;
+  const uniqueSenders = db
+    .prepare(
+      "SELECT COUNT(DISTINCT sender) AS count FROM gives WHERE receiver = ?"
+    )
+    .get(address) as { count: number } | undefined;
+  const uniqueReceivers = db
+    .prepare(
+      "SELECT COUNT(DISTINCT receiver) AS count FROM gives WHERE sender = ?"
+    )
+    .get(address) as { count: number } | undefined;
+
+  return {
+    total_given: totalGiven.toString(),
+    total_received: totalReceived.toString(),
+    unique_senders: uniqueSenders?.count ?? 0,
+    unique_receivers: uniqueReceivers?.count ?? 0,
+    give_count: giveCount?.count ?? 0,
+    receive_count: receiveCount?.count ?? 0,
+  };
 }
 
 // ── History ───────────────────────────────────────────────────────────
