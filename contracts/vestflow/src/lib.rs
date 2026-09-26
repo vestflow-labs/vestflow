@@ -47,7 +47,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, xdr::ToXdr,
-    Address, Bytes, BytesN, Env, IntoVal, String, Vec,
+    Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 
 /// Human-readable contract version, sourced from the `version` field in
@@ -105,6 +105,12 @@ pub enum VestFlowError {
     WeightZero = 34,
     /// SplitsReceiver `weight` exceeds TOTAL_SPLITS_WEIGHT.
     WeightTooLarge = 35,
+    /// `update_stream_rate` targeted a receiver that is not in the funder's
+    /// current stream configuration for that token.
+    ReceiverNotFound = 36,
+    /// `update_stream_rate` was called for a (funder, token) pair that has no
+    /// stream configuration.
+    StreamsNotConfigured = 37,
 }
 
 #[contracttype]
@@ -3924,6 +3930,100 @@ impl VestFlowContract {
         collectable.min(Self::total_balance(env, token))
     }
 
+    /// How much of `token` `receiver` is projected to be able to collect once
+    /// the current drips cycle ends, assuming no stream is opened or closed in
+    /// the meantime.
+    ///
+    /// The projection is everything the receiver already owns — drips swept
+    /// but not yet collected, plus what
+    /// [`VestFlowContract::collectable_amount`] reports for its drips-list
+    /// streams — plus, for every sender in `senders`, the drip it owes for the
+    /// part of the current stream run that has already elapsed and the drip it
+    /// will accrue over the seconds left in the cycle. Rates come from
+    /// [`VestFlowContract::stream_rate_for`], and every sender's contribution is
+    /// capped by the balance it can still stream, so a nearly exhausted funder
+    /// does not inflate the projection. Duplicate senders count once.
+    ///
+    /// Returns 0 when no sender currently streams `token` to `receiver`.
+    pub fn claimable_by_end_of_cycle(
+        env: Env,
+        receiver: Address,
+        token: Address,
+        senders: Vec<Address>,
+    ) -> i128 {
+        let now = env.ledger().timestamp();
+        let cycle_secs = CYCLE_SECS as u64;
+        let remaining_secs: i128 = (cycle_secs - now % cycle_secs) as i128;
+
+        // Already swept but not yet collected.
+        let mut projected: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Accrued(receiver.clone(), token.clone()))
+            .unwrap_or(0);
+        // Drips-list streams accrued so far.
+        projected = projected.saturating_add(Self::collectable_amount(
+            env.clone(),
+            receiver.clone(),
+            token.clone(),
+        ));
+
+        let mut seen: Vec<Address> = vec![&env];
+
+        for sender in senders.iter() {
+            if seen.iter().any(|s| s == sender) {
+                continue;
+            }
+            seen.push_back(sender.clone());
+
+            let rate =
+                Self::stream_rate_for(env.clone(), sender.clone(), receiver.clone(), token.clone());
+            if rate <= 0 {
+                continue;
+            }
+
+            let config: Option<AccountTokenStreams> = env
+                .storage()
+                .instance()
+                .get(&DataKey::AccountTokenStreams(sender.clone(), token.clone()));
+
+            // What this funder can still stream, across every stream it has
+            // open for the token.
+            let mut streamable =
+                Self::available_stream_balance(env.clone(), sender.clone(), token.clone());
+
+            // Drips owed for the part of the current run that has already
+            // elapsed are not collectable until they are swept, so they are not
+            // part of `collectable_amount` either.
+            let mut elapsed_drips: i128 = 0;
+            if let Some(config) = config {
+                streamable = streamable.min(config.balance);
+                let config_rate: i128 = config
+                    .receivers
+                    .iter()
+                    .filter(|entry| entry.receiver == receiver)
+                    .map(|entry| entry.amt_per_sec)
+                    .sum();
+                if config_rate > 0 {
+                    let elapsed_secs: i128 = now.saturating_sub(config.last_update) as i128;
+                    elapsed_drips = config_rate.saturating_mul(elapsed_secs).min(streamable);
+                }
+            }
+
+            // Everything the receiver drips before the cycle ends, at the rates
+            // currently in effect.
+            let projected_drips = rate
+                .saturating_mul(remaining_secs)
+                .min(streamable - elapsed_drips);
+
+            projected = projected
+                .saturating_add(elapsed_drips)
+                .saturating_add(projected_drips);
+        }
+
+        projected
+    }
+
     /// Return the current per-second drip rate from `sender` to `receiver` for `token`.
     ///
     /// Returns 0 for senders with no stream configured to `receiver` for `token`.
@@ -4086,6 +4186,102 @@ impl VestFlowContract {
             (symbol_short!("strm_set"), funder, token),
             env.ledger().timestamp(),
         );
+    }
+
+    /// Change the drip rate of a single receiver in `sender`'s stream
+    /// configuration for `token`, leaving every other receiver untouched.
+    ///
+    /// Cheaper than resubmitting the whole receiver list through
+    /// [`VestFlowContract::set_stream`]: only the targeted receiver's
+    /// `amt_per_sec` changes. Anything the receiver already earned under the
+    /// old rate is settled first, so the new rate applies from the current
+    /// ledger timestamp onwards and nothing accrued before the update is lost
+    /// or re-priced. A `new_rate_per_sec` of 0 closes that stream by removing
+    /// the receiver from the configuration; the pair's remaining balance stays
+    /// on record so it can still be streamed to other receivers or withdrawn.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StreamsNotConfigured` if `sender` has no stream configuration
+    /// for `token`, `ReceiverNotFound` if `receiver` is not part of it, and
+    /// `WeightZero` if `new_rate_per_sec` is negative.
+    pub fn update_stream_rate(
+        env: Env,
+        sender: Address,
+        token: Address,
+        receiver: Address,
+        new_rate_per_sec: i128,
+    ) -> Result<(), VestFlowError> {
+        sender.require_auth();
+        if new_rate_per_sec < 0 {
+            return Err(VestFlowError::WeightZero);
+        }
+
+        let key = DataKey::AccountTokenStreams(sender.clone(), token.clone());
+        let config: AccountTokenStreams = env
+            .storage()
+            .instance()
+            .get::<DataKey, AccountTokenStreams>(&key)
+            .ok_or(VestFlowError::StreamsNotConfigured)?;
+
+        let mut index: u32 = 0;
+        let mut found = false;
+        for entry in config.receivers.iter() {
+            if entry.receiver == receiver {
+                found = true;
+                break;
+            }
+            index += 1;
+        }
+        if !found {
+            return Err(VestFlowError::ReceiverNotFound);
+        }
+
+        // Settle the drips earned under the old rate before repricing.
+        Self::receive_streams(
+            env.clone(),
+            sender.clone(),
+            token.clone(),
+            config.receivers.clone(),
+            i128::MAX,
+        );
+
+        let mut config: AccountTokenStreams = env
+            .storage()
+            .instance()
+            .get::<DataKey, AccountTokenStreams>(&key)
+            .ok_or(VestFlowError::StreamsNotConfigured)?;
+
+        if new_rate_per_sec == 0 {
+            config
+                .receivers
+                .remove(index)
+                .expect("Stream receiver index in range");
+        } else {
+            let current = config
+                .receivers
+                .get(index)
+                .expect("Stream receiver index in range");
+            config.receivers.set(
+                index,
+                StreamReceiver {
+                    receiver: current.receiver,
+                    amt_per_sec: new_rate_per_sec,
+                },
+            );
+        }
+
+        env.storage().instance().set(&key, &config);
+        env.storage().instance().extend_ttl(
+            INSTANCE_TTL_THRESHOLD_LEDGERS,
+            INSTANCE_TTL_EXTEND_TO_LEDGERS,
+        );
+        env.events().publish(
+            (Symbol::new(&env, "stream_rate_changed"), sender, token),
+            (receiver, new_rate_per_sec),
+        );
+
+        Ok(())
     }
 
     /// Settle the accrued drips for a (funder, token) pair.
@@ -4407,6 +4603,36 @@ impl VestFlowContract {
             .instance()
             .get::<_, Vec<SplitReceiver>>(&DataKey::Splits(account.clone()))
             .unwrap_or_else(|| vec![&env])
+    }
+
+    /// Number of receivers in `account`'s current splits configuration.
+    ///
+    /// Returns 0 when the account has no splits configured. Useful for UIs
+    /// that only need the size of the configuration (badge counters, empty
+    /// states) without decoding and shipping the full receiver list.
+    pub fn splits_receivers_count(env: Env, account: Address) -> u32 {
+        env.storage()
+            .instance()
+            .get::<_, Vec<SplitReceiver>>(&DataKey::Splits(account))
+            .map(|receivers| receivers.len())
+            .unwrap_or(0)
+    }
+
+    /// Weight configured for `receiver` in `account`'s splits configuration.
+    ///
+    /// Returns `None` when the account has no splits configured, or when
+    /// `receiver` is not one of its receivers. NFT-gated receivers are keyed
+    /// by (contract, token_id) rather than a plain address, so they are never
+    /// matched here — use [`VestFlowContract::splits`] to inspect those.
+    pub fn get_splits_receiver(env: Env, account: Address, receiver: Address) -> Option<u32> {
+        let receivers: Vec<SplitReceiver> =
+            env.storage().instance().get(&DataKey::Splits(account))?;
+        receivers.iter().find_map(|entry| match entry {
+            SplitReceiver::Address(address_receiver) if address_receiver.receiver == receiver => {
+                Some(u32::try_from(address_receiver.weight).unwrap_or(u32::MAX))
+            }
+            _ => None,
+        })
     }
 
     /// Build an NFT-gated split receiver for `token_id` using the NFT
@@ -10542,5 +10768,662 @@ mod test {
 
         // If we got here, structs are properly exported and usable
         assert!(true);
+    }
+
+    #[test]
+    fn test_splits_receivers_count_zero_without_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, account, _, _, _) = setup(&env);
+
+        assert_eq!(client.splits_receivers_count(&account), 0);
+
+        // Another account's splits never leak into this one.
+        let other = Address::generate(&env);
+        client.set_splits(
+            &other,
+            &vec![
+                &env,
+                SplitReceiver::Address(AddressSplitsReceiver {
+                    receiver: other.clone(),
+                    weight: 1,
+                }),
+            ],
+        );
+        assert_eq!(client.splits_receivers_count(&account), 0);
+        assert_eq!(client.splits_receivers_count(&other), 1);
+    }
+
+    #[test]
+    fn test_splits_receivers_count_tracks_config_changes() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, account, _, _, _) = setup(&env);
+        let first = Address::generate(&env);
+        let second = Address::generate(&env);
+        let nft_contract = Address::generate(&env);
+
+        // Mixed address + NFT receivers all count.
+        client.set_splits(
+            &account,
+            &vec![
+                &env,
+                SplitReceiver::Address(AddressSplitsReceiver {
+                    receiver: first.clone(),
+                    weight: 1,
+                }),
+                SplitReceiver::Nft(NftSplitsReceiver {
+                    nft_contract,
+                    token_id: 3,
+                    weight: 2,
+                }),
+            ],
+        );
+        assert_eq!(client.splits_receivers_count(&account), 2);
+        assert_eq!(client.splits(&account).len(), 2);
+
+        // Replacing the config with a single receiver updates the count.
+        client.set_splits(
+            &account,
+            &vec![
+                &env,
+                SplitReceiver::Address(AddressSplitsReceiver {
+                    receiver: second.clone(),
+                    weight: 5,
+                }),
+            ],
+        );
+        assert_eq!(client.splits_receivers_count(&account), 1);
+
+        // Clearing the config returns the count to zero.
+        client.set_splits(&account, &vec![&env]);
+        assert_eq!(client.splits_receivers_count(&account), 0);
+    }
+
+    #[test]
+    fn test_get_splits_receiver_not_in_splits() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, account, _, _, _) = setup(&env);
+        let receiver = Address::generate(&env);
+        let stranger = Address::generate(&env);
+
+        // No configuration at all.
+        assert_eq!(client.get_splits_receiver(&account, &receiver), None);
+
+        client.set_splits(
+            &account,
+            &vec![
+                &env,
+                SplitReceiver::Address(AddressSplitsReceiver {
+                    receiver: receiver.clone(),
+                    weight: 250,
+                }),
+            ],
+        );
+
+        // Configured receiver resolves, an unrelated one does not.
+        assert_eq!(client.get_splits_receiver(&account, &receiver), Some(250));
+        assert_eq!(client.get_splits_receiver(&account, &stranger), None);
+
+        // NFT-gated receivers are not address-keyed, so never match.
+        assert_eq!(client.get_splits_receiver(&account, &account), None);
+
+        // Clearing the config clears every lookup.
+        client.set_splits(&account, &vec![&env]);
+        assert_eq!(client.get_splits_receiver(&account, &receiver), None);
+    }
+
+    #[test]
+    fn test_get_splits_receiver_reflects_weight_updates() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, account, _, _, _) = setup(&env);
+        let receiver = Address::generate(&env);
+        let nft_contract = Address::generate(&env);
+
+        client.set_splits(
+            &account,
+            &vec![
+                &env,
+                SplitReceiver::Address(AddressSplitsReceiver {
+                    receiver: receiver.clone(),
+                    weight: 10,
+                }),
+                SplitReceiver::Nft(NftSplitsReceiver {
+                    nft_contract: nft_contract.clone(),
+                    token_id: 9,
+                    weight: 20,
+                }),
+            ],
+        );
+        assert_eq!(client.get_splits_receiver(&account, &receiver), Some(10));
+
+        // Raising the weight is reflected immediately.
+        client.set_splits(
+            &account,
+            &vec![
+                &env,
+                SplitReceiver::Address(AddressSplitsReceiver {
+                    receiver: receiver.clone(),
+                    weight: TOTAL_SPLITS_WEIGHT,
+                }),
+                SplitReceiver::Nft(NftSplitsReceiver {
+                    nft_contract,
+                    token_id: 9,
+                    weight: 20,
+                }),
+            ],
+        );
+        assert_eq!(
+            client.get_splits_receiver(&account, &receiver),
+            Some(TOTAL_SPLITS_WEIGHT as u32)
+        );
+    }
+
+    #[test]
+    fn test_claimable_by_end_of_cycle_no_streams() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, sender, receiver, token_address, _) = setup(&env);
+        let stranger = Address::generate(&env);
+
+        // Aligned to a cycle boundary: the full cycle is still ahead.
+        set_time(&env, CYCLE_SECS as u64);
+        assert_eq!(
+            client.claimable_by_end_of_cycle(
+                &receiver,
+                &token_address,
+                &vec![&env, sender.clone()],
+            ),
+            0
+        );
+
+        // A sender that streams a different token projects nothing.
+        let list_id =
+            client.create_drips_list(&sender, &soroban_sdk::String::from_str(&env, "Other token"));
+        client.add_to_drips_list(&sender, &list_id, &receiver);
+        let other_admin = Address::generate(&env);
+        let other_token = create_token_contract(&env, &other_admin);
+        StellarAssetClient::new(&env, &other_token)
+            .mock_all_auths()
+            .mint(&sender, &10_000_000);
+        client.fund_drips_list(&sender, &list_id, &other_token, &10, &10_000_000);
+        assert_eq!(
+            client.claimable_by_end_of_cycle(
+                &receiver,
+                &token_address,
+                &vec![&env, sender.clone()],
+            ),
+            0
+        );
+        // The same stream does project for the token it is actually paid in.
+        assert_eq!(
+            client.claimable_by_end_of_cycle(&receiver, &other_token, &vec![&env, sender.clone()],),
+            10 * CYCLE_SECS as i128
+        );
+        assert_eq!(
+            client.claimable_by_end_of_cycle(&receiver, &token_address, &vec![&env, stranger]),
+            0
+        );
+    }
+
+    #[test]
+    fn test_claimable_by_end_of_cycle_single_stream() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, funder, receiver, token_address, _) = setup(&env);
+        StellarAssetClient::new(&env, &token_address)
+            .mock_all_auths()
+            .mint(&funder, &100_000_000);
+
+        // Cycle boundary: a full CYCLE_SECS of streaming is projected.
+        set_time(&env, CYCLE_SECS as u64);
+        client.set_stream(
+            &funder,
+            &token_address,
+            &vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver.clone(),
+                    amt_per_sec: 10,
+                },
+            ],
+            &100_000_000,
+        );
+
+        let senders = vec![&env, funder.clone()];
+        assert_eq!(
+            client.claimable_by_end_of_cycle(&receiver, &token_address, &senders),
+            10 * CYCLE_SECS as i128
+        );
+
+        // Time passing moves the horizon forward, not the total: the drips owed
+        // for the elapsed part of the run are added as the remaining seconds
+        // are taken off.
+        set_time(&env, CYCLE_SECS as u64 + 100);
+        assert_eq!(
+            client.claimable_by_end_of_cycle(&receiver, &token_address, &senders),
+            10 * CYCLE_SECS as i128
+        );
+
+        // Once the run is swept, the same total is owed but already collectable.
+        client.receive_streams(
+            &funder,
+            &token_address,
+            &vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver.clone(),
+                    amt_per_sec: 10,
+                },
+            ],
+            &i128::MAX,
+        );
+        assert_eq!(client.collect(&receiver, &token_address, &i128::MAX), 1_000);
+        assert_eq!(
+            client.claimable_by_end_of_cycle(&receiver, &token_address, &senders),
+            10 * (CYCLE_SECS as i128 - 100)
+        );
+
+        // A duplicate sender is only counted once.
+        set_time(&env, CYCLE_SECS as u64);
+        assert_eq!(
+            client.claimable_by_end_of_cycle(
+                &receiver,
+                &token_address,
+                &vec![&env, funder.clone(), funder.clone()],
+            ),
+            10 * CYCLE_SECS as i128
+        );
+
+        // Mid-cycle projections scale with the remaining seconds.
+        set_time(&env, CYCLE_SECS as u64 + 10);
+        assert_eq!(
+            client.claimable_by_end_of_cycle(&receiver, &token_address, &senders),
+            10 * (CYCLE_SECS as i128 - 10)
+        );
+    }
+
+    #[test]
+    fn test_claimable_by_end_of_cycle_multiple_streams() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, funder, receiver, token_address, _) = setup(&env);
+        let funder2 = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_address)
+            .mock_all_auths()
+            .mint(&funder, &100_000_000);
+        StellarAssetClient::new(&env, &token_address)
+            .mock_all_auths()
+            .mint(&funder2, &100_000_000);
+
+        set_time(&env, CYCLE_SECS as u64);
+
+        // One token-specific stream at 10/sec.
+        client.set_stream(
+            &funder,
+            &token_address,
+            &vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver.clone(),
+                    amt_per_sec: 10,
+                },
+            ],
+            &100_000_000,
+        );
+
+        // One drips-list stream at 5/sec from a second funder.
+        let list_id =
+            client.create_drips_list(&funder2, &soroban_sdk::String::from_str(&env, "Second"));
+        client.add_to_drips_list(&funder2, &list_id, &receiver);
+        client.fund_drips_list(&funder2, &list_id, &token_address, &5, &100_000_000);
+
+        // Both streams contribute to the projection.
+        assert_eq!(
+            client.claimable_by_end_of_cycle(
+                &receiver,
+                &token_address,
+                &vec![&env, funder.clone(), funder2.clone()],
+            ),
+            15 * CYCLE_SECS as i128
+        );
+
+        // A sender that is not streaming contributes nothing.
+        let stranger = Address::generate(&env);
+        assert_eq!(
+            client.claimable_by_end_of_cycle(
+                &receiver,
+                &token_address,
+                &vec![&env, funder.clone(), stranger.clone()],
+            ),
+            10 * CYCLE_SECS as i128
+        );
+
+        // Closing one stream drops only that sender from the projection, while
+        // everything already earned by the receiver stays counted.
+        set_time(&env, CYCLE_SECS as u64 + 10);
+        client.update_stream_rate(&funder, &token_address, &receiver, &0);
+        assert_eq!(
+            client.claimable_by_end_of_cycle(
+                &receiver,
+                &token_address,
+                &vec![&env, funder.clone(), funder2.clone()],
+            ),
+            // 100 owed by the closed stream, 50 from the drips list.
+            150 + 5 * (CYCLE_SECS as i128 - 10)
+        );
+    }
+
+    #[test]
+    fn test_claimable_by_end_of_cycle_caps_at_funder_balance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, funder, receiver, token_address, _) = setup(&env);
+
+        set_time(&env, CYCLE_SECS as u64);
+        // Funded for only 100s of streaming, far short of a full cycle.
+        client.set_stream(
+            &funder,
+            &token_address,
+            &vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver.clone(),
+                    amt_per_sec: 10,
+                },
+            ],
+            &1_000,
+        );
+
+        // The projection is bounded by what the funder can still stream.
+        assert_eq!(
+            client.claimable_by_end_of_cycle(
+                &receiver,
+                &token_address,
+                &vec![&env, funder.clone()],
+            ),
+            1_000
+        );
+
+        // Once the balance is drained, nothing more is projected.
+        set_time(&env, CYCLE_SECS as u64 + 100);
+        client.receive_streams(
+            &funder,
+            &token_address,
+            &vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver.clone(),
+                    amt_per_sec: 10,
+                },
+            ],
+            &i128::MAX,
+        );
+        assert_eq!(
+            client.claimable_by_end_of_cycle(
+                &receiver,
+                &token_address,
+                &vec![&env, funder.clone()],
+            ),
+            1_000
+        );
+    }
+
+    #[test]
+    fn test_update_stream_rate_changes_only_target_receiver() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, funder, receiver_a, token_address, _) = setup(&env);
+        let receiver_b = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_address)
+            .mock_all_auths()
+            .mint(&funder, &100_000);
+
+        set_time(&env, 1_000);
+        client.set_stream(
+            &funder,
+            &token_address,
+            &vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver_a.clone(),
+                    amt_per_sec: 10,
+                },
+                StreamReceiver {
+                    receiver: receiver_b.clone(),
+                    amt_per_sec: 20,
+                },
+            ],
+            &100_000,
+        );
+
+        client.update_stream_rate(&funder, &token_address, &receiver_a, &50);
+
+        assert_eq!(
+            client.stream_rate_for(&funder, &receiver_a, &token_address),
+            50
+        );
+        assert_eq!(
+            client.stream_rate_for(&funder, &receiver_b, &token_address),
+            20
+        );
+        assert!(client.is_stream_active(&funder, &receiver_a, &token_address));
+        assert!(client.is_stream_active(&funder, &receiver_b, &token_address));
+
+        // The stored configuration keeps both receivers, in order, with the
+        // new rate applied to the targeted one only.
+        let config = client
+            .get_account_token_streams(&funder, &token_address)
+            .unwrap();
+        assert_eq!(config.receivers.len(), 2);
+        assert_eq!(config.receivers.get(0).unwrap().receiver, receiver_a);
+        assert_eq!(config.receivers.get(0).unwrap().amt_per_sec, 50);
+        assert_eq!(config.receivers.get(1).unwrap().receiver, receiver_b);
+        assert_eq!(config.receivers.get(1).unwrap().amt_per_sec, 20);
+
+        // Drips accrue at the updated rates from now on.
+        set_time(&env, 1_010);
+        let swept = client.receive_streams(
+            &funder,
+            &token_address,
+            &vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver_a.clone(),
+                    amt_per_sec: 50,
+                },
+                StreamReceiver {
+                    receiver: receiver_b.clone(),
+                    amt_per_sec: 20,
+                },
+            ],
+            &i128::MAX,
+        );
+        assert_eq!(swept, 700);
+    }
+
+    #[test]
+    fn test_update_stream_rate_settles_at_previous_rate() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, funder, receiver, token_address, _) = setup(&env);
+        StellarAssetClient::new(&env, &token_address)
+            .mock_all_auths()
+            .mint(&funder, &100_000);
+
+        set_time(&env, 1_000);
+        client.set_stream(
+            &funder,
+            &token_address,
+            &vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver.clone(),
+                    amt_per_sec: 10,
+                },
+            ],
+            &100_000,
+        );
+
+        // 100s at 10/sec, then repriced to 20/sec from `now` onwards.
+        set_time(&env, 1_100);
+        client.update_stream_rate(&funder, &token_address, &receiver, &20);
+
+        set_time(&env, 1_200);
+        let swept = client.receive_streams(
+            &funder,
+            &token_address,
+            &vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver.clone(),
+                    amt_per_sec: 20,
+                },
+            ],
+            &i128::MAX,
+        );
+
+        // 100s at the old rate, already settled by the update.
+        assert_eq!(swept, 2_000);
+
+        // 100s * 10 + 100s * 20: nothing earned before the update is lost and
+        // nothing is repriced.
+        assert_eq!(client.collect(&receiver, &token_address, &i128::MAX), 3_000);
+    }
+
+    #[test]
+    fn test_update_stream_rate_zero_closes_stream() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, funder, receiver_a, token_address, _) = setup(&env);
+        let receiver_b = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_address)
+            .mock_all_auths()
+            .mint(&funder, &100_000);
+
+        set_time(&env, 1_000);
+        client.set_stream(
+            &funder,
+            &token_address,
+            &vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver_a.clone(),
+                    amt_per_sec: 10,
+                },
+                StreamReceiver {
+                    receiver: receiver_b.clone(),
+                    amt_per_sec: 20,
+                },
+            ],
+            &100_000,
+        );
+
+        client.update_stream_rate(&funder, &token_address, &receiver_a, &0);
+
+        // The closed receiver stops streaming, the other one is untouched.
+        assert_eq!(
+            client.stream_rate_for(&funder, &receiver_a, &token_address),
+            0
+        );
+        assert!(!client.is_stream_active(&funder, &receiver_a, &token_address));
+        assert_eq!(
+            client.stream_rate_for(&funder, &receiver_b, &token_address),
+            20
+        );
+
+        let config = client
+            .get_account_token_streams(&funder, &token_address)
+            .unwrap();
+        assert_eq!(config.receivers.len(), 1);
+        assert_eq!(config.receivers.get(0).unwrap().receiver, receiver_b);
+
+        // Closing the last stream leaves the funded balance intact.
+        client.update_stream_rate(&funder, &token_address, &receiver_b, &0);
+        let config = client
+            .get_account_token_streams(&funder, &token_address)
+            .unwrap();
+        assert!(config.receivers.is_empty());
+        assert_eq!(config.balance, 100_000);
+        assert_eq!(client.stream_balance(&funder, &token_address), 100_000);
+        assert_eq!(client.withdraw(&funder, &token_address, &100_000), ());
+    }
+
+    #[test]
+    fn test_update_stream_rate_receiver_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, funder, receiver, token_address, _) = setup(&env);
+        let stranger = Address::generate(&env);
+        StellarAssetClient::new(&env, &token_address)
+            .mock_all_auths()
+            .mint(&funder, &100_000);
+
+        set_time(&env, 1_000);
+        client.set_stream(
+            &funder,
+            &token_address,
+            &vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver.clone(),
+                    amt_per_sec: 10,
+                },
+            ],
+            &100_000,
+        );
+
+        let result = client.try_update_stream_rate(&funder, &token_address, &stranger, &20);
+        assert_eq!(result, Err(Ok(VestFlowError::ReceiverNotFound)));
+
+        // The configuration is left exactly as it was.
+        assert_eq!(
+            client.stream_rate_for(&funder, &receiver, &token_address),
+            10
+        );
+    }
+
+    #[test]
+    fn test_update_stream_rate_without_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, funder, receiver, token_address, _) = setup(&env);
+
+        set_time(&env, 1_000);
+        let result = client.try_update_stream_rate(&funder, &token_address, &receiver, &20);
+        assert_eq!(result, Err(Ok(VestFlowError::StreamsNotConfigured)));
+    }
+
+    #[test]
+    fn test_update_stream_rate_rejects_negative_rate() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, funder, receiver, token_address, _) = setup(&env);
+        StellarAssetClient::new(&env, &token_address)
+            .mock_all_auths()
+            .mint(&funder, &100_000);
+
+        set_time(&env, 1_000);
+        client.set_stream(
+            &funder,
+            &token_address,
+            &vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver.clone(),
+                    amt_per_sec: 10,
+                },
+            ],
+            &100_000,
+        );
+
+        let result = client.try_update_stream_rate(&funder, &token_address, &receiver, &-1);
+        assert_eq!(result, Err(Ok(VestFlowError::WeightZero)));
+        assert_eq!(
+            client.stream_rate_for(&funder, &receiver, &token_address),
+            10
+        );
     }
 }
