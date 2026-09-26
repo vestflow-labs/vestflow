@@ -1,0 +1,6 @@
+export { GET } from "./../../../bulk-create/merkle-root"
+export { POST } from "./../../../bulk-create/merkle-root"
+export { PUT } from "./../../../bulk-create/merkle-root"
+export { PATCH } from "./../../../bulk-create/merkle-root"
+export { DELETE } from "./../../../bulk-create/merkle-root"
+export { HEAD } from "./../../../bulk-create/merkle-root"

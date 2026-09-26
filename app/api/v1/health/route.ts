@@ -1,0 +1,6 @@
+export { GET } from "./../../health"
+export { POST } from "./../../health"
+export { PUT } from "./../../health"
+export { PATCH } from "./../../health"
+export { DELETE } from "./../../health"
+export { HEAD } from "./../../health"

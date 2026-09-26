@@ -1,0 +1,6 @@
+export { GET } from "./../../../streams/top-senders"
+export { POST } from "./../../../streams/top-senders"
+export { PUT } from "./../../../streams/top-senders"
+export { PATCH } from "./../../../streams/top-senders"
+export { DELETE } from "./../../../streams/top-senders"
+export { HEAD } from "./../../../streams/top-senders"

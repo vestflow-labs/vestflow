@@ -1,14 +1,49 @@
 import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
-import { parseNetwork, type NetworkName } from "./config";
-import type { EventQueryParams, IndexedEvent, TvlStats } from "./types";
+import { createHash } from "node:crypto";
+import { getDatabasePoolConfig, parseNetwork, type NetworkName } from "./config";
+import { invalidateBalanceCache } from "./balance-cache";
+import type {
+  EventQueryParams,
+  GiveQueryParams,
+  IndexedEvent,
+  StreamConfigDetails,
+  StreamCycleRow,
+  StreamHistoryRow,
+  SqueezeEventRow,
+  TopReceiverRow,
+  TopSenderRow,
+  TvlStats,
+} from "./types";
 
 const DB_PATH = process.env.INDEXER_DB_PATH;
 
 const SCHEMA_PATH = path.join(__dirname, "..", "schema.sql");
 
 const dbs = new Map<NetworkName, Database.Database>();
+
+/**
+ * Override the cached database connection for a given network.
+ * ONLY for use in tests — lets tests inject an in-memory database
+ * so all db functions (which call getDb internally) use the same
+ * test instance without any disk I/O.
+ */
+export function _setTestDb(network: NetworkName, db: Database.Database): void {
+  dbs.set(network, db);
+}
+
+/**
+ * Clear the cached database connection(s). Call after _setTestDb in
+ * afterEach so the next test starts fresh.
+ */
+export function _clearTestDb(network?: NetworkName): void {
+  if (network) {
+    dbs.delete(network);
+  } else {
+    dbs.clear();
+  }
+}
 
 function dbPathFor(network: NetworkName): string {
   const specific = process.env[`INDEXER_DB_PATH_${network.toUpperCase()}`];
@@ -21,54 +56,65 @@ function dbPathFor(network: NetworkName): string {
   return path.join(process.cwd(), `vestflow-events-${network}.db`);
 }
 
-function ensureColumn(db: Database.Database, table: string, column: string, ddl: string): void {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+function ensureColumn(
+  db: Database.Database,
+  table: string,
+  column: string,
+  ddl: string,
+): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as {
+    name: string;
+  }[];
   if (!columns.some((c) => c.name === column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
   }
 }
 
-function ensureGivesTable(db: Database.Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS gives (
-      id TEXT PRIMARY KEY,
-      sender TEXT NOT NULL,
-      receiver TEXT NOT NULL,
-      token TEXT NOT NULL,
-      amount_stroops TEXT NOT NULL,
-      ledger INTEGER NOT NULL,
-      timestamp INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_gives_sender ON gives (sender);
-    CREATE INDEX IF NOT EXISTS idx_gives_receiver ON gives (receiver);
-    CREATE INDEX IF NOT EXISTS idx_gives_sender_timestamp ON gives (sender, timestamp DESC, id DESC);
-    CREATE INDEX IF NOT EXISTS idx_gives_receiver_timestamp ON gives (receiver, timestamp DESC, id DESC);
-  `);
-}
-
-function migrateGivenEventType(db: Database.Database): void {
+/** Recreate schedule_events when the CHECK constraint predates proposal events. */
+function migrateEventTypeCheck(db: Database.Database): void {
   const row = db
     .prepare(
-      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'schedule_events'"
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'schedule_events'`,
     )
     .get() as { sql: string } | undefined;
-  if (!row?.sql || row.sql.includes("'given'")) {
+  if (!row?.sql || (row.sql.includes("stream_set") && row.sql.includes("stream_received") && row.sql.includes("squeezed"))) {
     return;
   }
+
   db.exec("BEGIN");
   try {
     db.exec(`
       CREATE TABLE schedule_events_new (
         id TEXT PRIMARY KEY,
-        event_type TEXT NOT NULL CHECK (event_type IN ('schedule_created', 'claimed', 'revoked', 'given', 'unknown')),
+        event_type TEXT NOT NULL CHECK (event_type IN (
+          'schedule_created',
+          'claimed',
+          'revoked',
+          'proposal_created',
+          'proposal_acknowledged',
+          'proposal_activated',
+          'proposal_expired',
+          'stream_set',
+          'given',
+          'collected',
+          'stream_received',
+          'squeezed',
+          'unknown'
+        )),
         ledger INTEGER NOT NULL,
         ledger_closed_at TEXT NOT NULL,
         schedule_id INTEGER,
+        proposal_id INTEGER,
         grantor TEXT,
         beneficiary TEXT,
         amount TEXT,
         token TEXT,
         created_amount TEXT,
+        start_time INTEGER,
+        duration INTEGER,
+        cliff_duration INTEGER,
+        vesting_kind TEXT,
+        materialized_at INTEGER,
         raw_topics TEXT NOT NULL,
         raw_value TEXT NOT NULL,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -76,36 +122,142 @@ function migrateGivenEventType(db: Database.Database): void {
     `);
     db.exec(`
       INSERT INTO schedule_events_new (
-        id, event_type, ledger, ledger_closed_at, schedule_id,
-        grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value, created_at
+        id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
+        grantor, beneficiary, amount, token, created_amount, start_time, duration,
+        cliff_duration, vesting_kind, materialized_at, raw_topics, raw_value, created_at
       )
       SELECT
-        id, event_type, ledger, ledger_closed_at, schedule_id,
-        grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value, created_at
+        id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
+        grantor, beneficiary, amount, token, created_amount, start_time, duration,
+        cliff_duration, vesting_kind, materialized_at, raw_topics, raw_value, created_at
       FROM schedule_events;
     `);
-    db.exec("DROP TABLE schedule_events;");
-    db.exec("ALTER TABLE schedule_events_new RENAME TO schedule_events;");
-    db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_grantor ON schedule_events (grantor);
-      CREATE INDEX IF NOT EXISTS idx_beneficiary ON schedule_events (beneficiary);
-      CREATE INDEX IF NOT EXISTS idx_schedule_id ON schedule_events (schedule_id);
-      CREATE INDEX IF NOT EXISTS idx_event_type ON schedule_events (event_type);
-      CREATE INDEX IF NOT EXISTS idx_ledger ON schedule_events (ledger);
-      CREATE INDEX IF NOT EXISTS idx_token ON schedule_events (token);
-    `);
+    db.exec("DROP TABLE schedule_events");
+    db.exec("ALTER TABLE schedule_events_new RENAME TO schedule_events");
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_grantor ON schedule_events (grantor)",
+    );
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_beneficiary ON schedule_events (beneficiary)",
+    );
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_schedule_id ON schedule_events (schedule_id)",
+    );
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_proposal_id ON schedule_events (proposal_id)",
+    );
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_event_type ON schedule_events (event_type)",
+    );
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_ledger ON schedule_events (ledger)",
+    );
+    db.exec("CREATE INDEX IF NOT EXISTS idx_token ON schedule_events (token)");
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_materialized_at ON schedule_events (materialized_at)",
+    );
     db.exec("COMMIT");
-  } catch {
-    try {
-      db.exec("ROLLBACK");
-    } catch {
-      // ignore rollback errors on a failed migration attempt
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+/** Ensure the event deduplication index exists for idempotency */
+function ensureEventDedupIndex(db: Database.Database): void {
+  try {
+    // Check if the deduplication index already exists
+    const existingIndex = db
+      .prepare(
+        `SELECT name, sql FROM sqlite_master
+         WHERE type = 'index' AND name = 'idx_event_dedup'`,
+      )
+      .get() as { name: string; sql: string | null } | undefined;
+
+    if (existingIndex?.sql?.includes("raw_value")) {
+      return;
     }
-    throw new Error("Failed to migrate schedule_events event_type check");
+    if (existingIndex) {
+      db.exec("DROP INDEX idx_event_dedup");
+    }
+
+    console.log(
+      "[db] Creating event deduplication index for enhanced idempotency...",
+    );
+
+    // Create the deduplication index
+    db.exec(`
+      CREATE UNIQUE INDEX idx_event_dedup ON schedule_events (
+        ledger,
+        event_type,
+        COALESCE(schedule_id, -1),
+        COALESCE(proposal_id, -1),
+        COALESCE(grantor, ''),
+        COALESCE(beneficiary, ''),
+        COALESCE(amount, ''),
+        COALESCE(token, ''),
+        raw_topics,
+        raw_value
+      )
+    `);
+
+    console.log("[db] Event deduplication index created successfully");
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes("UNIQUE constraint failed")
+    ) {
+      console.warn(
+        "[db] Duplicate events detected during index creation - removing duplicates...",
+      );
+
+      // If there are duplicates, we need to clean them up first
+      // Keep the first occurrence of each duplicate group
+      db.exec(`
+        DELETE FROM schedule_events 
+        WHERE rowid NOT IN (
+          SELECT MIN(rowid) 
+          FROM schedule_events 
+          GROUP BY ledger, event_type, 
+                   COALESCE(schedule_id, -1), 
+                   COALESCE(proposal_id, -1),
+                   COALESCE(grantor, ''), 
+                   COALESCE(beneficiary, ''), 
+                   COALESCE(amount, ''),
+                   COALESCE(token, ''),
+                   raw_topics,
+                   raw_value
+        )
+      `);
+
+      // Try creating the index again
+      db.exec(`
+        CREATE UNIQUE INDEX idx_event_dedup ON schedule_events (
+          ledger,
+          event_type,
+          COALESCE(schedule_id, -1),
+          COALESCE(proposal_id, -1),
+          COALESCE(grantor, ''),
+          COALESCE(beneficiary, ''),
+          COALESCE(amount, ''),
+          COALESCE(token, ''),
+          raw_topics,
+          raw_value
+        )
+      `);
+
+      console.log(
+        "[db] Duplicates removed and deduplication index created successfully",
+      );
+    } else {
+      console.error("[db] Failed to create event deduplication index:", error);
+      throw error;
+    }
   }
 }
 
 export function getDb(network = parseNetwork(undefined)): Database.Database {
+  getDatabasePoolConfig();
   let db = dbs.get(network);
   if (!db) {
     db = new Database(dbPathFor(network));
@@ -116,10 +268,112 @@ export function getDb(network = parseNetwork(undefined)): Database.Database {
     const schema = fs.readFileSync(SCHEMA_PATH, "utf8");
     db.exec(schema);
     ensureColumn(db, "schedule_events", "token", "token TEXT");
-    ensureColumn(db, "schedule_events", "created_amount", "created_amount TEXT");
+    ensureColumn(
+      db,
+      "schedule_events",
+      "created_amount",
+      "created_amount TEXT",
+    );
+    ensureColumn(db, "schedule_events", "proposal_id", "proposal_id INTEGER");
+    ensureColumn(db, "schedule_events", "start_time", "start_time INTEGER");
+    ensureColumn(db, "schedule_events", "duration", "duration INTEGER");
+    ensureColumn(
+      db,
+      "schedule_events",
+      "cliff_duration",
+      "cliff_duration INTEGER",
+    );
+    ensureColumn(db, "schedule_events", "vesting_kind", "vesting_kind TEXT");
+    ensureColumn(
+      db,
+      "schedule_events",
+      "materialized_at",
+      "materialized_at INTEGER",
+    );
+    ensureColumn(
+      db,
+      "drips_lists",
+      "target_rate_per_sec",
+      "target_rate_per_sec TEXT NOT NULL DEFAULT '0'",
+    );
     db.exec("CREATE INDEX IF NOT EXISTS idx_token ON schedule_events (token)");
-    migrateGivenEventType(db);
-    ensureGivesTable(db);
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_proposal_id ON schedule_events (proposal_id)",
+    );
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_materialized_at ON schedule_events (materialized_at)",
+    );
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS current_streams (
+        account TEXT NOT NULL,
+        token TEXT NOT NULL,
+        receivers_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (account, token)
+      );
+      CREATE TABLE IF NOT EXISTS stream_history (
+        id TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        receiver TEXT NOT NULL,
+        token TEXT NOT NULL,
+        ledger INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL,
+        old_rate TEXT NOT NULL,
+        new_rate TEXT NOT NULL,
+        action TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_stream_history_lookup
+        ON stream_history (sender, receiver, token, ledger, id);
+      CREATE TABLE IF NOT EXISTS gives (
+        id TEXT PRIMARY KEY,
+        sender TEXT NOT NULL,
+        receiver TEXT NOT NULL,
+        token TEXT NOT NULL,
+        amount_stroops TEXT NOT NULL,
+        ledger INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_gives_sender_timestamp
+        ON gives (sender, timestamp DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_gives_receiver_timestamp
+        ON gives (receiver, timestamp DESC, id DESC);
+      CREATE TABLE IF NOT EXISTS collected_totals (
+        account TEXT NOT NULL,
+        token TEXT NOT NULL,
+        total_collected_stroops TEXT NOT NULL DEFAULT '0',
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (account, token)
+      );
+      CREATE TABLE IF NOT EXISTS stream_cycles (
+        account TEXT NOT NULL,
+        token TEXT NOT NULL,
+        cycle_end_ledger INTEGER NOT NULL,
+        cycle_end_timestamp INTEGER NOT NULL,
+        amount_received TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        PRIMARY KEY (account, token, cycle_end_ledger)
+      );
+      CREATE INDEX IF NOT EXISTS idx_stream_cycles_account_token
+        ON stream_cycles (account, token, cycle_end_ledger DESC);
+
+      CREATE TABLE IF NOT EXISTS squeeze_events (
+        id TEXT PRIMARY KEY,
+        receiver TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        token TEXT NOT NULL,
+        amount_stroops TEXT NOT NULL,
+        cycle_id INTEGER NOT NULL,
+        ledger INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL,
+        history_hash TEXT,
+        is_duplicate INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_squeeze_events_receiver_sender_history
+        ON squeeze_events (receiver, sender, history_hash);
+    `);
+    migrateEventTypeCheck(db);
+    ensureEventDedupIndex(db);
     dbs.set(network, db);
   }
   return db;
@@ -148,46 +402,347 @@ export interface InsertEventRow {
   ledger: number;
   ledger_closed_at: string;
   schedule_id: number | null;
+  proposal_id?: number | null;
   grantor: string | null;
   beneficiary: string | null;
   amount: string | null;
   token: string | null;
   created_amount: string | null;
+  start_time?: number | null;
+  duration?: number | null;
+  cliff_duration?: number | null;
+  vesting_kind?: string | null;
   raw_topics: string;
   raw_value: string;
 }
 
-/**
- * Inserts an event row.
- * Returns true if a new row was written, false if it already existed
- * (idempotent — duplicate Stellar event IDs are silently ignored).
- */
-export function insertEvent(row: InsertEventRow, network?: NetworkName): boolean {
-  const db = getDb(network);
-  const result = db
-    .prepare(
-      `INSERT OR IGNORE INTO schedule_events
-        (id, event_type, ledger, ledger_closed_at, schedule_id,
-         grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      row.id,
-      row.event_type,
-      row.ledger,
-      row.ledger_closed_at,
-      row.schedule_id,
-      row.grantor,
-      row.beneficiary,
-      row.amount,
-      row.token,
-      row.created_amount,
-      row.raw_topics,
-      row.raw_value
-    );
+function eventTimestamp(row: InsertEventRow): number {
+  const parsed = Date.parse(row.ledger_closed_at);
+  return Number.isFinite(parsed)
+    ? Math.floor(parsed / 1000)
+    : Math.floor(Date.now() / 1000);
+}
 
-  // Project `given` events into the gives table so the summary endpoint
-  // can aggregate across all tokens without scanning raw event payloads.
+function ensureStreamHistoryTable(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS stream_history (
+      id TEXT PRIMARY KEY,
+      event_id TEXT NOT NULL,
+      sender TEXT NOT NULL,
+      receiver TEXT NOT NULL,
+      token TEXT NOT NULL,
+      ledger INTEGER NOT NULL,
+      timestamp INTEGER NOT NULL,
+      old_rate TEXT NOT NULL,
+      new_rate TEXT NOT NULL,
+      action TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_stream_history_lookup
+      ON stream_history (sender, receiver, token, ledger, id);
+    CREATE TABLE IF NOT EXISTS drips_streams (
+      id TEXT PRIMARY KEY,
+      account TEXT NOT NULL,
+      receiver TEXT NOT NULL,
+      token TEXT NOT NULL,
+      rate_per_second TEXT NOT NULL,
+      estimated_end_time INTEGER,
+      ended_at INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_drips_streams_active_account
+      ON drips_streams (account, ended_at, estimated_end_time, created_at DESC, id DESC);
+  `);
+}
+
+function parseStreamValue(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function streamString(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string" && value.trim() !== "") return value;
+  return null;
+}
+
+function streamRate(value: unknown): string | null {
+  const raw = streamString(value);
+  if (raw === null) return null;
+  try {
+    const rate = BigInt(raw);
+    return rate < 0n ? "0" : rate.toString();
+  } catch {
+    return null;
+  }
+}
+
+function streamEntry(
+  value: unknown,
+): { receiver: string; rate: string } | null {
+  if (Array.isArray(value)) {
+    const receiver = streamString(value[0]);
+    const rate = streamRate(value[1]);
+    return receiver && rate !== null ? { receiver, rate } : null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const entry = value as Record<string, unknown>;
+  const receiver = streamString(
+    entry.receiver ?? entry.address ?? entry.account,
+  );
+  const rate = streamRate(
+    entry.rate_per_second ??
+      entry.ratePerSec ??
+      entry.new_rate ??
+      entry.amt_per_sec ??
+      entry.amount_per_second ??
+      entry.rate,
+  );
+  return receiver && rate !== null ? { receiver, rate } : null;
+}
+
+function parseStreamConfiguration(
+  row: InsertEventRow,
+): { sender: string; token: string; entries: Map<string, string>; full: boolean } | null {
+  const topicsValue = parseStreamValue(row.raw_topics);
+  const topics = Array.isArray(topicsValue) ? topicsValue : [];
+  const parsed = parseStreamValue(row.raw_value);
+  const parsedObject =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  const sender =
+    row.grantor ??
+    streamString(topics[1]) ??
+    (parsedObject ? streamString(parsedObject.sender ?? parsedObject.funder) : null);
+  const topicToken =
+    topics.length >= 4 ? streamString(topics[3]) : streamString(topics[2]);
+  const token =
+    row.token ??
+    topicToken ??
+    (parsedObject ? streamString(parsedObject.token) : null);
+  if (!sender || !token) return null;
+
+  const entries = new Map<string, string>();
+  let full = false;
+
+  const addEntries = (values: unknown[], replace: boolean): void => {
+    for (const value of values) {
+      const entry = streamEntry(value);
+      if (entry) entries.set(entry.receiver, entry.rate);
+    }
+    if (replace) full = true;
+  };
+
+  if (Array.isArray(parsed)) {
+    if (parsed.length === 0) {
+      full = true;
+    } else if (parsed.every((value) => Array.isArray(value) || (value && typeof value === "object"))) {
+      addEntries(parsed, true);
+    }
+  } else if (parsed && typeof parsed === "object") {
+    const object = parsed as Record<string, unknown>;
+    const receiverList = object.receivers ?? object.stream_receivers ?? object.configuration;
+    if (Array.isArray(receiverList)) {
+      addEntries(receiverList, true);
+    } else {
+      const numericValues = Object.keys(object)
+        .filter((key) => /^\d+$/.test(key))
+        .sort((left, right) => Number(left) - Number(right))
+        .map((key) => object[key]);
+      if (numericValues.length > 0) {
+        addEntries(numericValues, true);
+      } else {
+        const entry = streamEntry(object);
+        if (entry) entries.set(entry.receiver, entry.rate);
+        else {
+          for (const [receiver, rate] of Object.entries(object)) {
+            const parsedRate = streamRate(rate);
+            if (parsedRate !== null) entries.set(receiver, parsedRate);
+          }
+          if (entries.size > 0) full = true;
+        }
+      }
+    }
+  }
+
+  if (entries.size === 0) {
+    const receiver = streamString(topics[2]);
+    const rate = Array.isArray(parsed)
+      ? streamRate(parsed[0])
+      : parsedObject
+        ? streamRate(
+            parsedObject.new_rate ??
+              parsedObject.rate_per_second ??
+              parsedObject.rate,
+          )
+        : streamRate(parsed);
+    if (receiver && topics.length >= 4 && rate !== null) {
+      entries.set(receiver, rate);
+    }
+  }
+
+  if (entries.size === 0 && !full) return null;
+  return { sender, token, entries, full };
+}
+
+function previousStreamRate(
+  db: Database.Database,
+  sender: string,
+  receiver: string,
+  token: string,
+  ledger: number,
+  eventId: string,
+): string {
+  const history = db
+    .prepare(
+      `SELECT new_rate FROM stream_history
+       WHERE sender = ? AND receiver = ? AND token = ?
+         AND (ledger < ? OR (ledger = ? AND id < ?))
+       ORDER BY ledger DESC, id DESC LIMIT 1`,
+    )
+    .get(sender, receiver, token, ledger, ledger, `${eventId}:${receiver}`) as
+    | { new_rate: string }
+    | undefined;
+  if (history?.new_rate != null) return history.new_rate;
+
+  const current = db
+    .prepare(
+      `SELECT rate_per_second FROM drips_streams
+       WHERE account = ? AND receiver = ? AND token = ?
+       ORDER BY created_at DESC, id DESC LIMIT 1`,
+    )
+    .get(sender, receiver, token) as { rate_per_second: string } | undefined;
+  return current?.rate_per_second ?? "0";
+}
+
+function applyStreamState(
+  db: Database.Database,
+  row: InsertEventRow,
+  timestamp: number,
+): void {
+  const parsed = parseStreamConfiguration(row);
+  if (!parsed) return;
+
+  ensureStreamHistoryTable(db);
+  const activeRows = parsed.full
+    ? (db
+        .prepare(
+          `SELECT receiver, rate_per_second FROM drips_streams
+           WHERE account = ? AND token = ? AND ended_at IS NULL
+             AND (estimated_end_time IS NULL OR estimated_end_time > ?)`,
+        )
+        .all(parsed.sender, parsed.token, timestamp) as {
+        receiver: string;
+        rate_per_second: string;
+      }[])
+    : [];
+
+  if (parsed.full) {
+    for (const active of activeRows) {
+      if (!parsed.entries.has(active.receiver)) {
+        parsed.entries.set(active.receiver, "0");
+      }
+    }
+  }
+
+  for (const [receiver, newRate] of parsed.entries) {
+    const oldRate = previousStreamRate(
+      db,
+      parsed.sender,
+      receiver,
+      parsed.token,
+      row.ledger,
+      row.id,
+    );
+    if (oldRate !== newRate) {
+      const action =
+        oldRate === "0" ? "open" : newRate === "0" ? "close" : "rate_change";
+      db.prepare(
+        `INSERT OR IGNORE INTO stream_history
+          (id, event_id, sender, receiver, token, ledger, timestamp, old_rate, new_rate, action)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        `${row.id}:${receiver}`,
+        row.id,
+        parsed.sender,
+        receiver,
+        parsed.token,
+        row.ledger,
+        timestamp,
+        oldRate,
+        newRate,
+        action,
+      );
+    }
+
+    const existing = db
+      .prepare(
+        `SELECT id FROM drips_streams
+         WHERE account = ? AND receiver = ? AND token = ? LIMIT 1`,
+      )
+      .get(parsed.sender, receiver, parsed.token) as { id: string } | undefined;
+    if (existing) {
+      db.prepare(
+        `UPDATE drips_streams
+         SET rate_per_second = ?, estimated_end_time = NULL,
+             ended_at = ?, created_at = CASE WHEN ? > 0 THEN ? ELSE created_at END
+         WHERE id = ?`,
+      ).run(
+        newRate,
+        newRate === "0" ? timestamp : null,
+        newRate === "0" ? 0 : 1,
+        timestamp,
+        existing.id,
+      );
+    } else {
+      db.prepare(
+        `INSERT INTO drips_streams
+          (id, account, receiver, token, rate_per_second, estimated_end_time, ended_at, created_at)
+         VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
+      ).run(
+        `${parsed.sender}:${receiver}:${parsed.token}`,
+        parsed.sender,
+        receiver,
+        parsed.token,
+        newRate,
+        newRate === "0" ? timestamp : null,
+        timestamp,
+      );
+    }
+  }
+}
+
+function applyEventProjection(
+  db: Database.Database,
+  row: InsertEventRow,
+  network?: NetworkName,
+): void {
+  const timestamp = eventTimestamp(row);
+
+  if (row.event_type === "squeezed" && row.beneficiary && row.token) {
+    invalidateBalanceCache(row.beneficiary, row.token, network);
+  }
+
+  if (row.event_type === "stream_set") {
+    applyStreamState(db, row, timestamp);
+    if (row.grantor && row.token) {
+      db.prepare(
+        `INSERT INTO current_streams (account, token, receivers_json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(account, token) DO UPDATE SET
+           receivers_json = excluded.receivers_json,
+           updated_at = excluded.updated_at`,
+      ).run(row.grantor, row.token, row.raw_value, timestamp);
+    }
+    return;
+  }
+
   if (
     row.event_type === "given" &&
     row.grantor &&
@@ -195,14 +750,10 @@ export function insertEvent(row: InsertEventRow, network?: NetworkName): boolean
     row.token &&
     row.amount
   ) {
-    const parsed = Date.parse(row.ledger_closed_at);
-    const timestamp = Number.isFinite(parsed)
-      ? Math.floor(parsed / 1000)
-      : Math.floor(Date.now() / 1000);
     db.prepare(
       `INSERT OR IGNORE INTO gives
         (id, sender, receiver, token, amount_stroops, ledger, timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       row.id,
       row.grantor,
@@ -210,107 +761,343 @@ export function insertEvent(row: InsertEventRow, network?: NetworkName): boolean
       row.token,
       row.amount,
       row.ledger,
-      timestamp
+      timestamp,
     );
+    return;
   }
 
-  return result.changes > 0;
-}
+  if (
+    row.event_type === "collected" &&
+    row.beneficiary &&
+    row.token &&
+    row.amount
+  ) {
+    const existing = db
+      .prepare(
+        "SELECT total_collected_stroops FROM collected_totals WHERE account = ? AND token = ?",
+      )
+      .get(row.beneficiary, row.token) as
+      { total_collected_stroops: string } | undefined;
+    const nextTotal = (
+      BigInt(existing?.total_collected_stroops ?? "0") + BigInt(row.amount)
+    ).toString();
+    db.prepare(
+      `INSERT INTO collected_totals (account, token, total_collected_stroops, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(account, token) DO UPDATE SET
+         total_collected_stroops = excluded.total_collected_stroops,
+         updated_at = excluded.updated_at`,
+    ).run(row.beneficiary, row.token, nextTotal, timestamp);
+    return;
+  }
 
-// ── Gives ─────────────────────────────────────────────────────────────
+  if (
+    row.event_type === "stream_received" &&
+    row.beneficiary &&
+    row.token &&
+    row.amount
+  ) {
+    db.prepare(
+      `INSERT INTO stream_cycles (account, token, cycle_end_ledger, cycle_end_timestamp, amount_received)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(account, token, cycle_end_ledger) DO UPDATE SET
+         cycle_end_timestamp = excluded.cycle_end_timestamp,
+         amount_received = excluded.amount_received`,
+    ).run(row.beneficiary, row.token, row.ledger, timestamp, row.amount);
+    return;
+  }
 
-export interface InsertGiveRow {
-  id: string;
-  sender: string;
-  receiver: string;
-  token: string;
-  amount: string;
-  ledger: number;
-  timestamp: number;
-}
+  if (
+    row.event_type === "squeezed" &&
+    row.beneficiary &&
+    row.grantor &&
+    row.token &&
+    row.amount
+  ) {
+    let cycleId = 0;
+    let historyHash: string | null = null;
+    try {
+      const val = JSON.parse(row.raw_value);
+      if (Array.isArray(val)) {
+        if (val[1] != null && !isNaN(Number(val[1]))) cycleId = Number(val[1]);
+        if (val[2] != null) historyHash = String(val[2]);
+      } else if (val && typeof val === "object") {
+        if (val.cycle_id != null) cycleId = Number(val.cycle_id);
+        if (val.history_hash != null) historyHash = String(val.history_hash);
+      }
+    } catch {
+      // ignore JSON parse error
+    }
 
-export function insertGive(row: InsertGiveRow, network?: NetworkName): boolean {
-  const result = getDb(network)
-    .prepare(
-      `INSERT OR IGNORE INTO gives
-        (id, sender, receiver, token, amount_stroops, ledger, timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
+    let isDuplicate = 0;
+    if (historyHash) {
+      const existing = db
+        .prepare(
+          `SELECT id FROM squeeze_events
+           WHERE receiver = ? AND sender = ? AND history_hash = ? AND is_duplicate = 0`,
+        )
+        .get(row.beneficiary, row.grantor, historyHash);
+      if (existing) {
+        isDuplicate = 1;
+      }
+    }
+
+    db.prepare(
+      `INSERT OR IGNORE INTO squeeze_events
+        (id, receiver, sender, token, amount_stroops, cycle_id, ledger, timestamp, history_hash, is_duplicate)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
       row.id,
-      row.sender,
-      row.receiver,
+      row.beneficiary,
+      row.grantor,
       row.token,
       row.amount,
+      cycleId,
       row.ledger,
-      row.timestamp
+      timestamp,
+      historyHash,
+      isDuplicate,
     );
-  return result.changes > 0;
+    return;
+  }
 }
 
-export interface GiveSummary {
-  total_given: string;
-  total_received: string;
-  unique_senders: number;
-  unique_receivers: number;
-  give_count: number;
-  receive_count: number;
+/**
+ * Inserts an event row with enhanced idempotency.
+ * Returns true if a new row was written, false if it already existed.
+ *
+ * Idempotency is enforced by:
+ * 1. Primary key constraint on Stellar event ID
+ * 2. Unique index on event signature (ledger + content) to catch duplicate events with different IDs
+ *
+ * This ensures that the same event cannot be inserted twice, even if delivered
+ * from different sources (RPC vs Horizon) or with different Stellar IDs.
+ */
+export function insertEvent(
+  row: InsertEventRow,
+  network?: NetworkName,
+): boolean {
+  const resolvedNetwork = network ?? "testnet";
+  const db = getDb(resolvedNetwork);
+
+  try {
+    // First try with INSERT OR IGNORE for the primary key constraint
+    const result = db
+      .prepare(
+        `INSERT OR IGNORE INTO schedule_events
+          (id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
+           grantor, beneficiary, amount, token, created_amount,
+           start_time, duration, cliff_duration, vesting_kind, raw_topics, raw_value)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        row.id,
+        row.event_type,
+        row.ledger,
+        row.ledger_closed_at,
+        row.schedule_id,
+        row.proposal_id ?? null,
+        row.grantor,
+        row.beneficiary,
+        row.amount,
+        row.token,
+        row.created_amount,
+        row.start_time ?? null,
+        row.duration ?? null,
+        row.cliff_duration ?? null,
+        row.vesting_kind ?? null,
+        row.raw_topics,
+        row.raw_value,
+      );
+
+    if (result.changes > 0) {
+          applyEventProjection(db, row, resolvedNetwork);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    // Handle unique constraint violations (from the dedup index)
+    if (
+      error instanceof Error &&
+      error.message.includes("UNIQUE constraint failed")
+    ) {
+      // This is expected for duplicate events - they should be silently ignored
+      console.debug(
+        `[db] Duplicate event detected and ignored: ${row.id} (ledger ${row.ledger})`,
+      );
+      return false;
+    }
+
+    // Re-throw unexpected errors
+    console.error(`[db] Failed to insert event ${row.id}:`, error);
+    throw error;
+  }
 }
 
-export function getGiveSummary(
-  address: string,
-  network?: NetworkName
-): GiveSummary {
-  const db = getDb(network);
-  const givenRows = db
-    .prepare("SELECT amount_stroops AS value FROM gives WHERE sender = ?")
-    .all(address) as { value: string | null }[];
-  const receivedRows = db
-    .prepare("SELECT amount_stroops AS value FROM gives WHERE receiver = ?")
-    .all(address) as { value: string | null }[];
+/**
+ * Batch insert events with enhanced error handling and transaction support.
+ * Returns the number of new events inserted (duplicates are silently skipped).
+ *
+ * This is more efficient for replay operations that process many events at once.
+ */
+export function insertEventsBatch(
+  events: InsertEventRow[],
+  network?: NetworkName,
+): number {
+  if (events.length === 0) return 0;
 
-  let totalGiven = 0n;
-  for (const row of givenRows) {
-    try {
-      totalGiven += BigInt(row.value ?? "0");
-    } catch {
-      // ignore malformed amounts rather than failing the whole summary
+  const resolvedNetwork = network ?? "testnet";
+  const db = getDb(resolvedNetwork);
+  let insertedCount = 0;
+
+  // Use a transaction for better performance and atomicity
+  const transaction = db.transaction((eventRows: InsertEventRow[]) => {
+    const stmt = db.prepare(
+      `INSERT OR IGNORE INTO schedule_events
+        (id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
+         grantor, beneficiary, amount, token, created_amount,
+         start_time, duration, cliff_duration, vesting_kind, raw_topics, raw_value)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+
+    for (const row of eventRows) {
+      try {
+        const result = stmt.run(
+          row.id,
+          row.event_type,
+          row.ledger,
+          row.ledger_closed_at,
+          row.schedule_id,
+          row.proposal_id ?? null,
+          row.grantor,
+          row.beneficiary,
+          row.amount,
+          row.token,
+          row.created_amount,
+          row.start_time ?? null,
+          row.duration ?? null,
+          row.cliff_duration ?? null,
+          row.vesting_kind ?? null,
+          row.raw_topics,
+          row.raw_value,
+        );
+
+        if (result.changes > 0) {
+      applyEventProjection(db, row, resolvedNetwork);
+          insertedCount++;
+        }
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.includes("UNIQUE constraint failed")
+        ) {
+          // Duplicate event - continue with next event
+          console.debug(`[db] Duplicate event in batch ignored: ${row.id}`);
+          continue;
+        }
+        // Re-throw unexpected errors to abort the transaction
+        throw error;
+      }
     }
+  });
+
+  try {
+    transaction(events);
+
+    if (insertedCount > 0) {
+      console.log(
+        `[db] Batch inserted ${insertedCount} new events (${events.length - insertedCount} duplicates skipped)`,
+      );
+    }
+
+    return insertedCount;
+  } catch (error) {
+    console.error(
+      `[db] Batch insert failed for ${events.length} events:`,
+      error,
+    );
+    throw error;
+  }
+}
+
+/**
+ * Check if an event already exists by its Stellar ID
+ */
+export function eventExists(eventId: string, network?: NetworkName): boolean {
+  const row = getDb(network)
+    .prepare("SELECT 1 FROM schedule_events WHERE id = ?")
+    .get(eventId) as { "1": number } | undefined;
+  return !!row;
+}
+
+/**
+ * Check for potential duplicate events by content signature
+ * This helps identify events that might be duplicates but have different IDs
+ */
+export function findSimilarEvents(
+  ledger: number,
+  eventType: string,
+  scheduleId: number | null,
+  network?: NetworkName,
+): { id: string; ledger: number }[] {
+  return getDb(network)
+    .prepare(
+      `SELECT id, ledger FROM schedule_events 
+       WHERE ledger = ? AND event_type = ? AND schedule_id = ?
+       ORDER BY id`,
+    )
+    .all(ledger, eventType, scheduleId) as { id: string; ledger: number }[];
+}
+
+/**
+ * Validate event data before insertion to catch potential issues early
+ */
+export function validateEventData(row: InsertEventRow): {
+  isValid: boolean;
+  errors: string[];
+} {
+  const errors: string[] = [];
+
+  if (!row.id || typeof row.id !== "string") {
+    errors.push("Event ID is required and must be a string");
   }
 
-  let totalReceived = 0n;
-  for (const row of receivedRows) {
-    try {
-      totalReceived += BigInt(row.value ?? "0");
-    } catch {
-      // ignore malformed amounts rather than failing the whole summary
-    }
+  if (!row.event_type || typeof row.event_type !== "string") {
+    errors.push("Event type is required and must be a string");
   }
 
-  const giveCount = db
-    .prepare("SELECT COUNT(*) AS count FROM gives WHERE sender = ?")
-    .get(address) as { count: number } | undefined;
-  const receiveCount = db
-    .prepare("SELECT COUNT(*) AS count FROM gives WHERE receiver = ?")
-    .get(address) as { count: number } | undefined;
-  const uniqueSenders = db
-    .prepare(
-      "SELECT COUNT(DISTINCT sender) AS count FROM gives WHERE receiver = ?"
-    )
-    .get(address) as { count: number } | undefined;
-  const uniqueReceivers = db
-    .prepare(
-      "SELECT COUNT(DISTINCT receiver) AS count FROM gives WHERE sender = ?"
-    )
-    .get(address) as { count: number } | undefined;
+  if (typeof row.ledger !== "number" || row.ledger <= 0) {
+    errors.push("Ledger must be a positive number");
+  }
+
+  if (!row.ledger_closed_at || typeof row.ledger_closed_at !== "string") {
+    errors.push("Ledger close time is required and must be a string");
+  }
+
+  if (!row.raw_topics || typeof row.raw_topics !== "string") {
+    errors.push("Raw topics is required and must be a JSON string");
+  }
+
+  if (!row.raw_value || typeof row.raw_value !== "string") {
+    errors.push("Raw value is required and must be a JSON string");
+  }
+
+  // Validate JSON format
+  try {
+    JSON.parse(row.raw_topics);
+  } catch {
+    errors.push("Raw topics must be valid JSON");
+  }
+
+  try {
+    JSON.parse(row.raw_value);
+  } catch {
+    errors.push("Raw value must be valid JSON");
+  }
 
   return {
-    total_given: totalGiven.toString(),
-    total_received: totalReceived.toString(),
-    unique_senders: uniqueSenders?.count ?? 0,
-    unique_receivers: uniqueReceivers?.count ?? 0,
-    give_count: giveCount?.count ?? 0,
-    receive_count: receiveCount?.count ?? 0,
+    isValid: errors.length === 0,
+    errors,
   };
 }
 
@@ -347,7 +1134,7 @@ export function queryHistory(params: HistoryQueryParams): IndexedEvent[] {
 
   return db
     .prepare(
-      `SELECT * FROM schedule_events WHERE ${conditions.join(" AND ")} ORDER BY ledger DESC LIMIT ? OFFSET ?`
+      `SELECT * FROM schedule_events WHERE ${conditions.join(" AND ")} ORDER BY ledger DESC LIMIT ? OFFSET ?`,
     )
     .all(...values, limit, offset) as IndexedEvent[];
 }
@@ -406,7 +1193,7 @@ export function queryEvents(params: EventQueryParams): IndexedEvent[] {
 
   return db
     .prepare(
-      `SELECT * FROM schedule_events ${where} ORDER BY ledger DESC LIMIT ? OFFSET ?`
+      `SELECT * FROM schedule_events ${where} ORDER BY ledger DESC LIMIT ? OFFSET ?`,
     )
     .all(...values, limit, offset) as IndexedEvent[];
 }
@@ -426,7 +1213,7 @@ export function computeTvlStats(network = parseNetwork(undefined)): TvlStats {
        WHERE event_type = 'schedule_created'
          AND token IS NOT NULL
          AND token != ''
-       ORDER BY token ASC`
+       ORDER BY token ASC`,
     )
     .all() as { asset: string }[];
 
@@ -436,21 +1223,21 @@ export function computeTvlStats(network = parseNetwork(undefined)): TvlStats {
       .prepare(
         `SELECT created_amount AS value
          FROM schedule_events
-         WHERE event_type = 'schedule_created' AND token = ?`
+         WHERE event_type = 'schedule_created' AND token = ?`,
       )
       .all(asset) as { value: string | null }[];
     const claimedRows = db
       .prepare(
         `SELECT amount AS value
          FROM schedule_events
-         WHERE event_type = 'claimed' AND token = ?`
+         WHERE event_type = 'claimed' AND token = ?`,
       )
       .all(asset) as { value: string | null }[];
     const revokedRows = db
       .prepare(
         `SELECT json_extract(raw_value, '$[1]') AS value
          FROM schedule_events
-         WHERE event_type = 'revoked' AND token = ?`
+         WHERE event_type = 'revoked' AND token = ?`,
       )
       .all(asset) as { value: string | null }[];
     const active = db
@@ -461,7 +1248,7 @@ export function computeTvlStats(network = parseNetwork(undefined)): TvlStats {
            AND created.token = ?
            AND created.schedule_id NOT IN (
              SELECT schedule_id FROM schedule_events WHERE event_type = 'revoked'
-           )`
+           )`,
       )
       .get(asset) as { count: number } | undefined;
 
@@ -482,7 +1269,7 @@ export function computeTvlStats(network = parseNetwork(undefined)): TvlStats {
       `INSERT OR REPLACE INTO tvl_stats
        (asset, total_created, total_claimed, total_revoked_unvested,
         total_value_locked, active_schedules, last_updated)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       stat.asset,
       stat.total_created,
@@ -490,14 +1277,14 @@ export function computeTvlStats(network = parseNetwork(undefined)): TvlStats {
       stat.total_revoked_unvested,
       stat.total_value_locked,
       stat.active_schedules,
-      lastUpdated
+      lastUpdated,
     );
     return stat;
   });
 
   const total = stats.reduce(
     (sum, asset) => sum + BigInt(asset.total_value_locked),
-    0n
+    0n,
   );
 
   return {
@@ -520,7 +1307,7 @@ export function getTvlStats(network = parseNetwork(undefined)): TvlStats {
 
   const total = rows.reduce(
     (sum, row) => sum + BigInt(row.total_value_locked),
-    0n
+    0n,
   );
 
   return {
@@ -531,14 +1318,589 @@ export function getTvlStats(network = parseNetwork(undefined)): TvlStats {
   };
 }
 
+// ── Drips indexed state queries ───────────────────────────────────────
+
+export interface CursorPage<T> {
+  items: T[];
+  nextCursor: string | null;
+}
+
+export interface DripsList {
+  id: string;
+  name: string;
+  owner: string;
+  member_count: number;
+  total_funding_rate_per_sec: string;
+  target_rate_per_sec: string;
+  token: string;
+}
+
+export interface DripsListMember {
+  address: string;
+  joined_at: number;
+}
+
+export interface DripsStream {
+  receiver: string;
+  token: string;
+  rate_per_second: string;
+  estimated_end_time: number | null;
+}
+
+interface DripsCursor {
+  createdAt?: number;
+  joinedAt?: number;
+  id?: string;
+  address?: string;
+}
+
+function encodeDripsCursor(cursor: DripsCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+function decodeDripsCursor(cursor?: string): DripsCursor | null {
+  if (!cursor) return {};
+  try {
+    const value = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    ) as DripsCursor;
+    if (!value || typeof value !== "object") return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function boundedPageSize(limit?: number): number {
+  return Math.min(Math.max(limit ?? 50, 1), 200);
+}
+
+export function queryDripsLists(params: {
+  owner?: string;
+  limit?: number;
+  cursor?: string;
+  network?: NetworkName;
+}): CursorPage<DripsList> | null {
+  const cursor = decodeDripsCursor(params.cursor);
+  if (
+    cursor === null ||
+    (params.cursor &&
+      (typeof cursor.createdAt !== "number" || typeof cursor.id !== "string"))
+  ) {
+    return null;
+  }
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  if (params.owner) {
+    conditions.push("l.owner = ?");
+    values.push(params.owner);
+  }
+  if (params.cursor) {
+    conditions.push("(l.created_at < ? OR (l.created_at = ? AND l.id < ?))");
+    values.push(cursor.createdAt, cursor.createdAt, cursor.id);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const limit = boundedPageSize(params.limit);
+  const rows = getDb(params.network)
+    .prepare(
+      `SELECT l.id, l.name, l.owner, l.token, l.total_funding_rate_per_sec,
+       COALESCE(l.target_rate_per_sec, '0') AS target_rate_per_sec, l.created_at,
+       COUNT(m.address) AS member_count
+     FROM drips_lists l
+     LEFT JOIN drips_list_members m ON m.list_id = l.id AND m.left_at IS NULL
+     ${where}
+     GROUP BY l.id
+     ORDER BY l.created_at DESC, l.id DESC
+     LIMIT ?`,
+    )
+    .all(...values, limit + 1) as (DripsList & { created_at: number })[];
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return {
+    items: page.map(({ created_at: _createdAt, ...list }) => list),
+    nextCursor:
+      hasMore && last
+        ? encodeDripsCursor({ createdAt: last.created_at, id: last.id })
+        : null,
+  };
+}
+
+export function queryDripsListMembers(params: {
+  listId: string;
+  limit?: number;
+  cursor?: string;
+  network?: NetworkName;
+}): CursorPage<DripsListMember> | "not_found" | null {
+  const db = getDb(params.network);
+  if (!db.prepare("SELECT 1 FROM drips_lists WHERE id = ?").get(params.listId))
+    return "not_found";
+  const cursor = decodeDripsCursor(params.cursor);
+  if (
+    cursor === null ||
+    (params.cursor &&
+      (typeof cursor.joinedAt !== "number" ||
+        typeof cursor.address !== "string"))
+  )
+    return null;
+  const values: unknown[] = [params.listId];
+  let after = "";
+  if (params.cursor) {
+    after = "AND (joined_at > ? OR (joined_at = ? AND address > ?))";
+    values.push(cursor.joinedAt, cursor.joinedAt, cursor.address);
+  }
+  const limit = boundedPageSize(params.limit);
+  const rows = db
+    .prepare(
+      `SELECT address, joined_at FROM drips_list_members
+     WHERE list_id = ? AND left_at IS NULL ${after}
+     ORDER BY joined_at ASC, address ASC LIMIT ?`,
+    )
+    .all(...values, limit + 1) as DripsListMember[];
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return {
+    items: page,
+    nextCursor:
+      hasMore && last
+        ? encodeDripsCursor({ joinedAt: last.joined_at, address: last.address })
+        : null,
+  };
+}
+
+export function queryDripsStreams(params: {
+  account: string;
+  limit?: number;
+  cursor?: string;
+  network?: NetworkName;
+}): CursorPage<DripsStream> | null {
+  const cursor = decodeDripsCursor(params.cursor);
+  if (
+    cursor === null ||
+    (params.cursor &&
+      (typeof cursor.createdAt !== "number" || typeof cursor.id !== "string"))
+  )
+    return null;
+  const now = Math.floor(Date.now() / 1000);
+  const values: unknown[] = [params.account, now];
+  let after = "";
+  if (params.cursor) {
+    after = "AND (created_at < ? OR (created_at = ? AND id < ?))";
+    values.push(cursor.createdAt, cursor.createdAt, cursor.id);
+  }
+  const limit = boundedPageSize(params.limit);
+  const rows = getDb(params.network)
+    .prepare(
+      `SELECT id, receiver, token, rate_per_second, estimated_end_time, created_at
+     FROM drips_streams
+     WHERE account = ? AND ended_at IS NULL
+       AND (estimated_end_time IS NULL OR estimated_end_time > ?) ${after}
+     ORDER BY created_at DESC, id DESC LIMIT ?`,
+    )
+    .all(...values, limit + 1) as (DripsStream & {
+    id: string;
+    created_at: number;
+  })[];
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return {
+    items: page.map(({ id: _id, created_at: _createdAt, ...stream }) => stream),
+    nextCursor:
+      hasMore && last
+        ? encodeDripsCursor({ createdAt: last.created_at, id: last.id })
+        : null,
+  };
+}
+
+/**
+ * Active incoming streams for a receiver — streams opened by other senders
+ * where `receiver = ?`, not closed, and not past their estimated end time.
+ * Keyset-paginated by (created_at DESC, id DESC), mirroring queryDripsStreams.
+ */
+export function queryIncomingStreams(params: {
+  receiver: string;
+  limit?: number;
+  cursor?: string;
+  network?: NetworkName;
+}): CursorPage<{
+  sender: string;
+  token: string;
+  rate_per_second: string;
+  estimated_end_time: number | null;
+  start_time: number;
+}> | null {
+  const cursor = decodeDripsCursor(params.cursor);
+  if (
+    cursor === null ||
+    (params.cursor &&
+      (typeof cursor.createdAt !== "number" || typeof cursor.id !== "string"))
+  )
+    return null;
+  const now = Math.floor(Date.now() / 1000);
+  const values: unknown[] = [params.receiver, now];
+  let after = "";
+  if (params.cursor) {
+    after = "AND (created_at < ? OR (created_at = ? AND id < ?))";
+    values.push(cursor.createdAt, cursor.createdAt, cursor.id);
+  }
+  const limit = boundedPageSize(params.limit);
+  const rows = getDb(params.network)
+    .prepare(
+      `SELECT id, account AS sender, token, rate_per_second, estimated_end_time, created_at AS start_time, created_at
+     FROM drips_streams
+     WHERE receiver = ? AND ended_at IS NULL
+       AND (estimated_end_time IS NULL OR estimated_end_time > ?) ${after}
+     ORDER BY created_at DESC, id DESC LIMIT ?`,
+    )
+    .all(...values, limit + 1) as ({
+    id: string;
+    sender: string;
+    token: string;
+    rate_per_second: string;
+    estimated_end_time: number | null;
+    start_time: number;
+    created_at: number;
+  })[];
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return {
+    items: page.map(
+      ({ id: _id, created_at: _createdAt, ...stream }) => stream,
+    ),
+    nextCursor:
+      hasMore && last
+        ? encodeDripsCursor({ createdAt: last.created_at, id: last.id })
+        : null,
+  };
+}
+
+/**
+ * The most recent last-updated timestamp across an account's active streams.
+ * Used to derive an `ETag` for `GET /streams` so the cache invalidates the
+ * instant new stream data lands.
+ */
+export function getDripsStreamsLastUpdated(account: string, network?: NetworkName): number {
+  const row = getDb(network)
+    .prepare(
+      `SELECT MAX(COALESCE(created_at, ended_at, 0)) AS last_updated
+       FROM drips_streams
+       WHERE account = ?`
+    )
+    .get(account) as { last_updated: number | null } | undefined;
+  return row?.last_updated ?? 0;
+}
+
+/**
+ * The most recent `updated_at` across an account's current stream (splits)
+ * configuration rows. Used to derive an `ETag` for `GET /splits`.
+ */
+export function getDripsSplitsLastUpdated(account: string, network?: NetworkName): number {
+  const row = getDb(network)
+    .prepare(
+      `SELECT MAX(updated_at) AS last_updated
+       FROM current_streams
+       WHERE account = ?`
+    )
+    .get(account) as { last_updated: number | null } | undefined;
+  return row?.last_updated ?? 0;
+}
+
+export function getDripsStreamingTvl(
+  token: string,
+  network?: NetworkName,
+): string {
+  const rows = getDb(network)
+    .prepare("SELECT balance FROM drips_streaming_balances WHERE token = ?")
+    .all(token) as { balance: string }[];
+  return rows.reduce((sum, row) => sum + BigInt(row.balance), 0n).toString();
+}
+
+export function getCurrentStream(
+  account: string,
+  token: string,
+  network?: NetworkName,
+): {
+  account: string;
+  token: string;
+  receivers_json: string;
+  updated_at: number;
+} | null {
+  const row = getDb(network)
+    .prepare(
+      "SELECT account, token, receivers_json, updated_at FROM current_streams WHERE account = ? AND token = ?",
+    )
+    .get(account, token) as
+    | {
+        account: string;
+        token: string;
+        receivers_json: string;
+        updated_at: number;
+      }
+    | undefined;
+  return row ?? null;
+}
+
+/**
+ * The current splits configuration for an account, aggregated across every
+ * token for which a `current_streams` row exists.
+ *
+ * `receivers_json` stores the raw `stream_set` value as an array of
+ * `{ receiver, rate_per_second }` entries. We surface the receivers verbatim
+ * and derive a stable `hash` from the joined configuration so clients can
+ * detect changes cheaply.
+ */
+export function queryDripsSplits(
+  account: string,
+  network?: NetworkName
+): { receivers: unknown[]; hash: string; last_updated: number } {
+  const rows = getDb(network)
+    .prepare(
+      `SELECT receivers_json, updated_at
+       FROM current_streams
+       WHERE account = ?
+       ORDER BY updated_at DESC`
+    )
+    .all(account) as { receivers_json: string; updated_at: number }[];
+
+  const receivers: unknown[] = [];
+  for (const row of rows) {
+    try {
+      const parsed = JSON.parse(row.receivers_json);
+      if (Array.isArray(parsed)) receivers.push(...parsed);
+    } catch {
+      // Defensive: ignore malformed config rows; they are not surfaced.
+    }
+  }
+
+  const last_updated = rows.reduce(
+    (max, row) => (row.updated_at > max ? row.updated_at : max),
+    0
+  );
+  const hash = createHash("sha256")
+    .update(JSON.stringify(receivers))
+    .digest("hex");
+
+  return { receivers, hash, last_updated };
+}
+
+export function queryGivesForAccount(
+  account: string,
+  network?: NetworkName,
+): Array<{
+  id: string;
+  sender: string;
+  receiver: string;
+  token: string;
+  amount_stroops: string;
+  ledger: number;
+  timestamp: number;
+}> {
+  return getDb(network)
+    .prepare(
+      `SELECT id, sender, receiver, token, amount_stroops, ledger, timestamp
+     FROM gives
+     WHERE sender = ? OR receiver = ?
+     ORDER BY timestamp DESC, id DESC`,
+    )
+    .all(account, account) as Array<{
+    id: string;
+    sender: string;
+    receiver: string;
+    token: string;
+    amount_stroops: string;
+    ledger: number;
+    timestamp: number;
+  }>;
+}
+
+export interface InsertGiveRow {
+  id: string;
+  sender: string;
+  receiver: string;
+  token: string;
+  amount: string;
+  timestamp: number;
+  ledger: number;
+  raw_topics?: string;
+  raw_value?: string;
+}
+
+export function insertGive(row: InsertGiveRow, network?: NetworkName): boolean {
+  const result = getDb(network)
+    .prepare(
+      `INSERT OR IGNORE INTO gives (id, sender, receiver, token, amount_stroops, ledger, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      row.id,
+      row.sender,
+      row.receiver,
+      row.token,
+      row.amount,
+      row.ledger,
+      row.timestamp,
+    );
+  return result.changes > 0;
+}
+
+export function queryGives(params: GiveQueryParams): Array<{
+  id: string;
+  sender: string;
+  receiver: string;
+  token: string;
+  amount: string;
+  ledger: number;
+  timestamp: number;
+}> {
+  const where: string[] = [];
+  const values: Array<string | number> = [];
+
+  if (params.sender) {
+    where.push("sender = ?");
+    values.push(params.sender);
+  }
+  if (params.receiver) {
+    where.push("receiver = ?");
+    values.push(params.receiver);
+  }
+  if (params.token) {
+    where.push("token = ?");
+    values.push(params.token);
+  }
+  if (params.from) {
+    where.push("timestamp >= ?");
+    values.push(Math.floor(new Date(params.from).getTime() / 1000));
+  }
+  if (params.to) {
+    where.push("timestamp <= ?");
+    values.push(Math.floor(new Date(params.to).getTime() / 1000));
+  }
+  if (params.cursor) {
+    const cursor = getDb(params.network)
+      .prepare("SELECT timestamp, id FROM gives WHERE id = ?")
+      .get(params.cursor) as { timestamp: number; id: string } | undefined;
+    if (!cursor) return [];
+    where.push("(timestamp < ? OR (timestamp = ? AND id < ?))");
+    values.push(cursor.timestamp, cursor.timestamp, cursor.id);
+  }
+
+  const limit = Math.min(params.limit ?? 20, 100);
+  const clause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+  return getDb(params.network)
+    .prepare(
+      `SELECT id, sender, receiver, token, amount_stroops AS amount, ledger, timestamp
+       FROM gives ${clause}
+       ORDER BY timestamp DESC, id DESC
+       LIMIT ?`,
+    )
+    .all(...values, limit) as Array<{
+    id: string;
+    sender: string;
+    receiver: string;
+    token: string;
+    amount: string;
+    ledger: number;
+    timestamp: number;
+  }>;
+}
+
+export function getCollectedTotal(
+  account: string,
+  token: string,
+  network?: NetworkName,
+): string {
+  const row = getDb(network)
+    .prepare(
+      "SELECT total_collected_stroops FROM collected_totals WHERE account = ? AND token = ?",
+    )
+    .get(account, token) as { total_collected_stroops: string } | undefined;
+  return row?.total_collected_stroops ?? "0";
+}
+
+export interface GiveSummary {
+  total_given: string;
+  total_received: string;
+  unique_senders: number;
+  unique_receivers: number;
+  give_count: number;
+  receive_count: number;
+}
+
+/**
+ * Aggregate give activity for an address across all tokens, computed from
+ * the indexed gives table. Returns zero values when the address has no
+ * activity (never null).
+ */
+export function getGiveSummary(
+  address: string,
+  network?: NetworkName,
+): GiveSummary {
+  const db = getDb(network);
+  const givenRows = db
+    .prepare("SELECT amount_stroops AS value FROM gives WHERE sender = ?")
+    .all(address) as { value: string | null }[];
+  const receivedRows = db
+    .prepare("SELECT amount_stroops AS value FROM gives WHERE receiver = ?")
+    .all(address) as { value: string | null }[];
+
+  let totalGiven = 0n;
+  for (const row of givenRows) {
+    try {
+      totalGiven += BigInt(row.value ?? "0");
+    } catch {
+      // ignore malformed amounts rather than failing the whole summary
+    }
+  }
+
+  let totalReceived = 0n;
+  for (const row of receivedRows) {
+    try {
+      totalReceived += BigInt(row.value ?? "0");
+    } catch {
+      // ignore malformed amounts rather than failing the whole summary
+    }
+  }
+
+  const giveCount = db
+    .prepare("SELECT COUNT(*) AS count FROM gives WHERE sender = ?")
+    .get(address) as { count: number } | undefined;
+  const receiveCount = db
+    .prepare("SELECT COUNT(*) AS count FROM gives WHERE receiver = ?")
+    .get(address) as { count: number } | undefined;
+  const uniqueSenders = db
+    .prepare(
+      "SELECT COUNT(DISTINCT sender) AS count FROM gives WHERE receiver = ?",
+    )
+    .get(address) as { count: number } | undefined;
+  const uniqueReceivers = db
+    .prepare(
+      "SELECT COUNT(DISTINCT receiver) AS count FROM gives WHERE sender = ?",
+    )
+    .get(address) as { count: number } | undefined;
+
+  return {
+    total_given: totalGiven.toString(),
+    total_received: totalReceived.toString(),
+    unique_senders: uniqueSenders?.count ?? 0,
+    unique_receivers: uniqueReceivers?.count ?? 0,
+    give_count: giveCount?.count ?? 0,
+    receive_count: receiveCount?.count ?? 0,
+  };
+}
+
 /**
  * Get all unique schedule IDs from events across all networks
  */
 export function getAllScheduleIds(): number[] {
   const rows = getDb()
-    .prepare("SELECT DISTINCT schedule_id FROM schedule_events WHERE schedule_id IS NOT NULL ORDER BY schedule_id")
+    .prepare(
+      "SELECT DISTINCT schedule_id FROM schedule_events WHERE schedule_id IS NOT NULL ORDER BY schedule_id",
+    )
     .all() as { schedule_id: number }[];
-  return rows.map(r => r.schedule_id);
+  return rows.map((r) => r.schedule_id);
 }
 
 // ── Analytics ──────────────────────────────────────────────────────────
@@ -570,16 +1932,18 @@ export function getAnalyticsStats(): AnalyticsStats {
   const row = getDb()
     .prepare("SELECT * FROM analytics_cache WHERE id = 1")
     .get() as AnalyticsStats | undefined;
-  
-  return row || {
-    total_value_locked: "0",
-    total_claimed: "0",
-    active_schedules: 0,
-    unique_beneficiaries: 0,
-    total_schedules_created: 0,
-    total_revoked: 0,
-    last_updated: 0,
-  };
+
+  return (
+    row || {
+      total_value_locked: "0",
+      total_claimed: "0",
+      active_schedules: 0,
+      unique_beneficiaries: 0,
+      total_schedules_created: 0,
+      total_revoked: 0,
+      last_updated: 0,
+    }
+  );
 }
 
 /**
@@ -587,25 +1951,33 @@ export function getAnalyticsStats(): AnalyticsStats {
  */
 export function computeAnalyticsStats(): AnalyticsStats {
   const db = getDb();
-  
+
   // Count unique schedule IDs from created events to get total schedules
   const totalCreated = db
-    .prepare("SELECT COUNT(DISTINCT schedule_id) as count FROM schedule_events WHERE event_type = 'schedule_created'")
+    .prepare(
+      "SELECT COUNT(DISTINCT schedule_id) as count FROM schedule_events WHERE event_type = 'schedule_created'",
+    )
     .get() as { count: number } | undefined;
-  
+
   // Count revoked schedules
   const totalRevoked = db
-    .prepare("SELECT COUNT(DISTINCT schedule_id) as count FROM schedule_events WHERE event_type = 'revoked'")
+    .prepare(
+      "SELECT COUNT(DISTINCT schedule_id) as count FROM schedule_events WHERE event_type = 'revoked'",
+    )
     .get() as { count: number } | undefined;
 
   // Total claimed across all events
   const totalClaimed = db
-    .prepare("SELECT COALESCE(SUM(CAST(amount AS INTEGER)), 0) as total FROM schedule_events WHERE event_type = 'claimed'")
+    .prepare(
+      "SELECT COALESCE(SUM(CAST(amount AS INTEGER)), 0) as total FROM schedule_events WHERE event_type = 'claimed'",
+    )
     .get() as { total: number } | undefined;
 
   // Count unique beneficiaries
   const uniqueBeneficiaries = db
-    .prepare("SELECT COUNT(DISTINCT beneficiary) as count FROM schedule_events WHERE event_type = 'claimed'")
+    .prepare(
+      "SELECT COUNT(DISTINCT beneficiary) as count FROM schedule_events WHERE event_type = 'claimed'",
+    )
     .get() as { count: number } | undefined;
 
   const stats: AnalyticsStats = {
@@ -626,13 +1998,13 @@ export function computeAnalyticsStats(): AnalyticsStats {
      total_schedules_created = ?,
      total_revoked = ?,
      last_updated = ?
-     WHERE id = 1`
+     WHERE id = 1`,
   ).run(
     stats.total_claimed,
     stats.unique_beneficiaries,
     stats.total_schedules_created,
     stats.total_revoked,
-    stats.last_updated
+    stats.last_updated,
   );
 
   return stats;
@@ -651,7 +2023,7 @@ export function getDailyStats(days: number = 30): DailySnapshot[] {
     .prepare(
       `SELECT * FROM daily_stats 
        WHERE date >= ? 
-       ORDER BY date ASC`
+       ORDER BY date ASC`,
     )
     .all(sinceDate) as DailySnapshot[];
 }
@@ -661,12 +2033,12 @@ export function getDailyStats(days: number = 30): DailySnapshot[] {
  */
 export function recordDailySnapshot(stats: AnalyticsStats): void {
   const today = new Date().toISOString().split("T")[0];
-  
+
   getDb()
     .prepare(
       `INSERT OR REPLACE INTO daily_stats 
        (date, total_value_locked, total_claimed, active_schedules, unique_beneficiaries, total_schedules_created, total_revoked)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       today,
@@ -675,7 +2047,415 @@ export function recordDailySnapshot(stats: AnalyticsStats): void {
       stats.active_schedules,
       stats.unique_beneficiaries,
       stats.total_schedules_created,
-      stats.total_revoked
+      stats.total_revoked,
+    );
+}
+
+// ── Materialized analytics snapshots ────────────────────────────────────
+//
+// Populated incrementally by analytics.ts after each processed ledger
+// batch. See indexer/schema.sql for the table shapes and the
+// `materialized_at` marker column that drives incremental pickup.
+
+export interface RawScheduleEventRow {
+  id: string;
+  event_type: string;
+  ledger: number;
+  ledger_closed_at: string;
+  schedule_id: number | null;
+  grantor: string | null;
+  beneficiary: string | null;
+  amount: string | null;
+  token: string | null;
+  created_amount: string | null;
+  start_time: number | null;
+  duration: number | null;
+  cliff_duration: number | null;
+  vesting_kind: string | null;
+  raw_value: string;
+}
+
+/**
+ * Fetches every schedule/claim/revoke event not yet folded into the
+ * snapshot tables. Ordering by ledger keeps replay-order processing
+ * deterministic, but is not relied upon for correctness — each affected
+ * (schedule, day) pair is recomputed from the full event history, not
+ * diffed, so out-of-order pickup is safe.
+ */
+export function getUnmaterializedEvents(
+  network?: NetworkName,
+  limit = 5000,
+): RawScheduleEventRow[] {
+  return getDb(network)
+    .prepare(
+      `SELECT id, event_type, ledger, ledger_closed_at, schedule_id, grantor,
+              beneficiary, amount, token, created_amount, start_time, duration,
+              cliff_duration, vesting_kind, raw_value
+       FROM schedule_events
+       WHERE materialized_at IS NULL
+         AND event_type IN ('schedule_created', 'claimed', 'revoked')
+       ORDER BY ledger ASC
+       LIMIT ?`,
+    )
+    .all(limit) as RawScheduleEventRow[];
+}
+
+export function markEventsMaterialized(
+  ids: string[],
+  network?: NetworkName,
+): void {
+  if (ids.length === 0) return;
+  const db = getDb(network);
+  const now = Math.floor(Date.now() / 1000);
+  const stmt = db.prepare(
+    "UPDATE schedule_events SET materialized_at = ? WHERE id = ?",
+  );
+  const tx = db.transaction((rows: string[]) => {
+    for (const id of rows) stmt.run(now, id);
+  });
+  tx(ids);
+}
+
+/** Every schedule_events row for a given schedule, oldest first. */
+export function getEventsForSchedule(
+  scheduleId: number,
+  network?: NetworkName,
+): RawScheduleEventRow[] {
+  return getDb(network)
+    .prepare(
+      `SELECT id, event_type, ledger, ledger_closed_at, schedule_id, grantor,
+              beneficiary, amount, token, created_amount, start_time, duration,
+              cliff_duration, vesting_kind, raw_value
+       FROM schedule_events
+       WHERE schedule_id = ?
+         AND event_type IN ('schedule_created', 'claimed', 'revoked')
+       ORDER BY ledger ASC`,
+    )
+    .all(scheduleId) as RawScheduleEventRow[];
+}
+
+/** Distinct schedule ids that had activity on the given day (grantor-scoped, for grantor summaries). */
+export function getScheduleIdsForGrantor(
+  grantorAddress: string,
+  network?: NetworkName,
+): number[] {
+  const rows = getDb(network)
+    .prepare(
+      `SELECT DISTINCT schedule_id FROM schedule_events
+       WHERE grantor = ? AND schedule_id IS NOT NULL`,
+    )
+    .all(grantorAddress) as { schedule_id: number }[];
+  return rows.map((r) => r.schedule_id);
+}
+
+export interface ScheduleDailySnapshotRow {
+  schedule_id: number;
+  day: string;
+  total_vested_stroops: string;
+  total_claimed_stroops: string;
+  claimable_stroops: string;
+  locked_stroops: string;
+}
+
+export function upsertScheduleDailySnapshot(
+  row: ScheduleDailySnapshotRow,
+  network?: NetworkName,
+): void {
+  getDb(network)
+    .prepare(
+      `INSERT INTO schedule_daily_snapshots
+        (schedule_id, day, total_vested_stroops, total_claimed_stroops, claimable_stroops, locked_stroops)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (schedule_id, day) DO UPDATE SET
+         total_vested_stroops = excluded.total_vested_stroops,
+         total_claimed_stroops = excluded.total_claimed_stroops,
+         claimable_stroops = excluded.claimable_stroops,
+         locked_stroops = excluded.locked_stroops`,
+    )
+    .run(
+      row.schedule_id,
+      row.day,
+      row.total_vested_stroops,
+      row.total_claimed_stroops,
+      row.claimable_stroops,
+      row.locked_stroops,
+    );
+}
+
+export interface TokenDailyTvlRow {
+  token_address: string;
+  day: string;
+  total_locked_stroops: string;
+  active_schedule_count: number;
+}
+
+export function upsertTokenDailyTvl(
+  row: TokenDailyTvlRow,
+  network?: NetworkName,
+): void {
+  getDb(network)
+    .prepare(
+      `INSERT INTO token_daily_tvl (token_address, day, total_locked_stroops, active_schedule_count)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (token_address, day) DO UPDATE SET
+         total_locked_stroops = excluded.total_locked_stroops,
+         active_schedule_count = excluded.active_schedule_count`,
+    )
+    .run(
+      row.token_address,
+      row.day,
+      row.total_locked_stroops,
+      row.active_schedule_count,
+    );
+}
+
+export interface GrantorDailyStatsRow {
+  grantor_address: string;
+  day: string;
+  active_schedule_count: number;
+  total_distributed_stroops: string;
+}
+
+export function upsertGrantorDailyStats(
+  row: GrantorDailyStatsRow,
+  network?: NetworkName,
+): void {
+  getDb(network)
+    .prepare(
+      `INSERT INTO grantor_daily_stats (grantor_address, day, active_schedule_count, total_distributed_stroops)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (grantor_address, day) DO UPDATE SET
+         active_schedule_count = excluded.active_schedule_count,
+         total_distributed_stroops = excluded.total_distributed_stroops`,
+    )
+    .run(
+      row.grantor_address,
+      row.day,
+      row.active_schedule_count,
+      row.total_distributed_stroops,
+    );
+}
+
+/** Every token that has at least one schedule_created event, for TVL re-aggregation. */
+export function getKnownTokens(network?: NetworkName): string[] {
+  const rows = getDb(network)
+    .prepare(
+      `SELECT DISTINCT token FROM schedule_events
+       WHERE event_type = 'schedule_created' AND token IS NOT NULL AND token != ''`,
+    )
+    .all() as { token: string }[];
+  return rows.map((r) => r.token);
+}
+
+/** Schedule ids for a token, for token-scoped TVL re-aggregation. */
+export function getScheduleIdsForToken(
+  token: string,
+  network?: NetworkName,
+): number[] {
+  const rows = getDb(network)
+    .prepare(
+      `SELECT DISTINCT schedule_id FROM schedule_events
+       WHERE event_type = 'schedule_created' AND token = ? AND schedule_id IS NOT NULL`,
+    )
+    .all(token) as { schedule_id: number }[];
+  return rows.map((r) => r.schedule_id);
+}
+
+export function runInTransaction<T>(fn: () => T, network?: NetworkName): T {
+  const db = getDb(network);
+  return db.transaction(fn)();
+}
+
+/** Raw daily rows for a schedule in [from, to], no gap-filling — callers gap-fill in JS. */
+export function queryScheduleDailySnapshots(
+  scheduleId: number,
+  from: string,
+  to: string,
+  network?: NetworkName,
+): ScheduleDailySnapshotRow[] {
+  return getDb(network)
+    .prepare(
+      `SELECT schedule_id, day, total_vested_stroops, total_claimed_stroops, claimable_stroops, locked_stroops
+       FROM schedule_daily_snapshots
+       WHERE schedule_id = ? AND day >= ? AND day <= ?
+       ORDER BY day ASC`,
+    )
+    .all(scheduleId, from, to) as ScheduleDailySnapshotRow[];
+}
+
+/** Most recent snapshot row at or before `day`, used to seed gap-fill before the requested range. */
+export function getScheduleSnapshotOnOrBefore(
+  scheduleId: number,
+  day: string,
+  network?: NetworkName,
+): ScheduleDailySnapshotRow | null {
+  const row = getDb(network)
+    .prepare(
+      `SELECT schedule_id, day, total_vested_stroops, total_claimed_stroops, claimable_stroops, locked_stroops
+       FROM schedule_daily_snapshots
+       WHERE schedule_id = ? AND day <= ?
+       ORDER BY day DESC LIMIT 1`,
+    )
+    .get(scheduleId, day) as ScheduleDailySnapshotRow | undefined;
+  return row ?? null;
+}
+
+export function queryTokenDailyTvl(
+  token: string,
+  from: string,
+  to: string,
+  network?: NetworkName,
+): TokenDailyTvlRow[] {
+  return getDb(network)
+    .prepare(
+      `SELECT token_address, day, total_locked_stroops, active_schedule_count
+       FROM token_daily_tvl
+       WHERE token_address = ? AND day >= ? AND day <= ?
+       ORDER BY day ASC`,
+    )
+    .all(token, from, to) as TokenDailyTvlRow[];
+}
+
+export function getGrantorDailyStatsRange(
+  grantorAddress: string,
+  network?: NetworkName,
+): GrantorDailyStatsRow[] {
+  return getDb(network)
+    .prepare(
+      `SELECT grantor_address, day, active_schedule_count, total_distributed_stroops
+       FROM grantor_daily_stats
+       WHERE grantor_address = ?
+       ORDER BY day ASC`,
+    )
+    .all(grantorAddress) as GrantorDailyStatsRow[];
+}
+
+export function getAnalyticsWatermark(network: NetworkName): number {
+  const row = getDb(network)
+    .prepare("SELECT last_ledger FROM analytics_watermark WHERE network = ?")
+    .get(network) as { last_ledger: number } | undefined;
+  return row?.last_ledger ?? 0;
+}
+
+export function setAnalyticsWatermark(
+  network: NetworkName,
+  ledger: number,
+): void {
+  getDb(network)
+    .prepare(
+      `INSERT INTO analytics_watermark (network, last_ledger, last_materialized_at)
+       VALUES (?, ?, unixepoch())
+       ON CONFLICT (network) DO UPDATE SET
+         last_ledger = excluded.last_ledger,
+         last_materialized_at = excluded.last_materialized_at`,
+    )
+    .run(network, ledger);
+}
+
+export interface StreamHourlySnapshotRow {
+  token: string;
+  hour: number;
+  active_stream_count: number;
+  total_rate_per_sec: string;
+  total_balance: string;
+}
+
+/**
+ * Current per-token totals across the Drips stream projections: streams
+ * still flowing at `nowSeconds` (same rule as GET /streams) and the streaming
+ * balances held in each token. A token whose streams have all ended is still
+ * returned, with zeros, so its hourly series drops to zero instead of
+ * stopping. Rates and balances are stored as strings, so they are summed as
+ * bigints here rather than with SQL SUM().
+ */
+export function getStreamTotalsByToken(
+  nowSeconds: number,
+  network?: NetworkName,
+): Omit<StreamHourlySnapshotRow, "hour">[] {
+  const db = getDb(network);
+  const totals = new Map<
+    string,
+    { active_stream_count: number; rate: bigint; balance: bigint }
+  >();
+  const totalFor = (token: string) => {
+    let total = totals.get(token);
+    if (!total) {
+      total = { active_stream_count: 0, rate: 0n, balance: 0n };
+      totals.set(token, total);
+    }
+    return total;
+  };
+
+  const tokens = db
+    .prepare("SELECT DISTINCT token FROM drips_streams")
+    .all() as { token: string }[];
+  for (const { token } of tokens) totalFor(token);
+
+  const active = db
+    .prepare(
+      `SELECT token, rate_per_second FROM drips_streams
+       WHERE ended_at IS NULL
+         AND (estimated_end_time IS NULL OR estimated_end_time > ?)`,
+    )
+    .all(nowSeconds) as { token: string; rate_per_second: string }[];
+  for (const stream of active) {
+    const total = totalFor(stream.token);
+    total.active_stream_count++;
+    total.rate += BigInt(stream.rate_per_second);
+  }
+
+  const balances = db
+    .prepare("SELECT token, balance FROM drips_streaming_balances")
+    .all() as { token: string; balance: string }[];
+  for (const row of balances) {
+    totalFor(row.token).balance += BigInt(row.balance);
+  }
+
+  return [...totals].map(([token, total]) => ({
+    token,
+    active_stream_count: total.active_stream_count,
+    total_rate_per_sec: total.rate.toString(),
+    total_balance: total.balance.toString(),
+  }));
+}
+
+/** Most recent hourly stream snapshot for `token` before `hour`, used to fill gaps. */
+export function getStreamHourlySnapshotBefore(
+  token: string,
+  hour: number,
+  network?: NetworkName,
+): StreamHourlySnapshotRow | null {
+  const row = getDb(network)
+    .prepare(
+      `SELECT token, hour, active_stream_count, total_rate_per_sec, total_balance
+       FROM stream_hourly_snapshots
+       WHERE token = ? AND hour < ?
+       ORDER BY hour DESC LIMIT 1`,
+    )
+    .get(token, hour) as StreamHourlySnapshotRow | undefined;
+  return row ?? null;
+}
+
+export function upsertStreamHourlySnapshot(
+  row: StreamHourlySnapshotRow,
+  network?: NetworkName,
+): void {
+  getDb(network)
+    .prepare(
+      `INSERT INTO stream_hourly_snapshots
+        (token, hour, active_stream_count, total_rate_per_sec, total_balance)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (token, hour) DO UPDATE SET
+         active_stream_count = excluded.active_stream_count,
+         total_rate_per_sec = excluded.total_rate_per_sec,
+         total_balance = excluded.total_balance`,
+    )
+    .run(
+      row.token,
+      row.hour,
+      row.active_stream_count,
+      row.total_rate_per_sec,
+      row.total_balance,
     );
 }
 
@@ -701,16 +2481,24 @@ export function createNotificationSubscription(
   email: string,
   scheduleId: number,
   beneficiaryAddress: string,
-  notificationType: string
+  notificationType: string,
 ): NotificationSubscription {
-  const verificationToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-  
+  const verificationToken =
+    Math.random().toString(36).substring(2, 15) +
+    Math.random().toString(36).substring(2, 15);
+
   const result = getDb()
     .prepare(
       `INSERT INTO notification_subscriptions (email, schedule_id, beneficiary_address, notification_type, verification_token)
-       VALUES (?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?)`,
     )
-    .run(email, scheduleId, beneficiaryAddress, notificationType, verificationToken);
+    .run(
+      email,
+      scheduleId,
+      beneficiaryAddress,
+      notificationType,
+      verificationToken,
+    );
 
   return {
     id: result.lastInsertRowid as number,
@@ -729,7 +2517,9 @@ export function createNotificationSubscription(
 /**
  * Get a subscription by ID
  */
-export function getNotificationSubscription(id: number): NotificationSubscription | null {
+export function getNotificationSubscription(
+  id: number,
+): NotificationSubscription | null {
   const row = getDb()
     .prepare("SELECT * FROM notification_subscriptions WHERE id = ?")
     .get(id) as NotificationSubscription | undefined;
@@ -739,30 +2529,40 @@ export function getNotificationSubscription(id: number): NotificationSubscriptio
 /**
  * Get subscriptions by email
  */
-export function getSubscriptionsByEmail(email: string): NotificationSubscription[] {
+export function getSubscriptionsByEmail(
+  email: string,
+): NotificationSubscription[] {
   return getDb()
-    .prepare("SELECT * FROM notification_subscriptions WHERE email = ? AND is_active = 1")
+    .prepare(
+      "SELECT * FROM notification_subscriptions WHERE email = ? AND is_active = 1",
+    )
     .all(email) as NotificationSubscription[];
 }
 
 /**
  * Get subscriptions for a schedule
  */
-export function getSubscriptionsBySchedule(scheduleId: number): NotificationSubscription[] {
+export function getSubscriptionsBySchedule(
+  scheduleId: number,
+): NotificationSubscription[] {
   return getDb()
-    .prepare("SELECT * FROM notification_subscriptions WHERE schedule_id = ? AND is_active = 1 AND verified = 1")
+    .prepare(
+      "SELECT * FROM notification_subscriptions WHERE schedule_id = ? AND is_active = 1 AND verified = 1",
+    )
     .all(scheduleId) as NotificationSubscription[];
 }
 
 /**
  * Verify an email subscription
  */
-export function verifyNotificationSubscription(verificationToken: string): boolean {
+export function verifyNotificationSubscription(
+  verificationToken: string,
+): boolean {
   const result = getDb()
     .prepare(
       `UPDATE notification_subscriptions 
        SET verified = 1, is_active = 1, updated_at = ? 
-       WHERE verification_token = ? AND verified = 0`
+       WHERE verification_token = ? AND verified = 0`,
     )
     .run(Math.floor(Date.now() / 1000), verificationToken);
   return result.changes > 0;
@@ -773,7 +2573,9 @@ export function verifyNotificationSubscription(verificationToken: string): boole
  */
 export function unsubscribeNotifications(id: number): boolean {
   const result = getDb()
-    .prepare("UPDATE notification_subscriptions SET is_active = 0, updated_at = ? WHERE id = ?")
+    .prepare(
+      "UPDATE notification_subscriptions SET is_active = 0, updated_at = ? WHERE id = ?",
+    )
     .run(Math.floor(Date.now() / 1000), id);
   return result.changes > 0;
 }
@@ -785,13 +2587,13 @@ export function recordNotificationEvent(
   subscriptionId: number,
   eventType: string,
   scheduleId: number,
-  status: string = 'sent',
-  errorMessage?: string
+  status: string = "sent",
+  errorMessage?: string,
 ): void {
   getDb()
     .prepare(
       `INSERT INTO notification_events (subscription_id, event_type, schedule_id, status, error_message)
-       VALUES (?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?)`,
     )
     .run(subscriptionId, eventType, scheduleId, status, errorMessage || null);
 }
@@ -799,9 +2601,14 @@ export function recordNotificationEvent(
 /**
  * Check if a milestone has been processed (to avoid duplicates)
  */
-export function hasMilestoneBeenProcessed(scheduleId: number, milestoneType: string): boolean {
+export function hasMilestoneBeenProcessed(
+  scheduleId: number,
+  milestoneType: string,
+): boolean {
   const row = getDb()
-    .prepare("SELECT id FROM notification_milestones WHERE schedule_id = ? AND milestone_type = ?")
+    .prepare(
+      "SELECT id FROM notification_milestones WHERE schedule_id = ? AND milestone_type = ?",
+    )
     .get(scheduleId, milestoneType) as { id: number } | undefined;
   return !!row;
 }
@@ -809,11 +2616,743 @@ export function hasMilestoneBeenProcessed(scheduleId: number, milestoneType: str
 /**
  * Mark a milestone as processed
  */
-export function markMilestoneProcessed(scheduleId: number, milestoneType: string): void {
+export function markMilestoneProcessed(
+  scheduleId: number,
+  milestoneType: string,
+): void {
   getDb()
     .prepare(
       `INSERT OR IGNORE INTO notification_milestones (schedule_id, milestone_type)
-       VALUES (?, ?)`
+       VALUES (?, ?)`,
     )
     .run(scheduleId, milestoneType);
 }
+
+// ── Beneficiary Index ─────────────────────────────────────────────────────
+
+/**
+ * Insert a beneficiary-schedule mapping into the index table.
+ * Called when a schedule_created event is processed.
+ */
+export function insertBeneficiarySchedule(
+  beneficiary: string,
+  scheduleId: number,
+  network?: NetworkName,
+): void {
+  getDb(network)
+    .prepare(
+      `INSERT OR IGNORE INTO beneficiary_schedules (beneficiary, schedule_id)
+       VALUES (?, ?)`,
+    )
+    .run(beneficiary, scheduleId);
+}
+
+/**
+ * Get all schedule IDs for a beneficiary address using the index.
+ * Provides O(1) lookup by leveraging the beneficiary_schedules table.
+ */
+export function getScheduleIdsByBeneficiary(
+  beneficiary: string,
+  network?: NetworkName,
+): number[] {
+  const rows = getDb(network)
+    .prepare(
+      "SELECT schedule_id FROM beneficiary_schedules WHERE beneficiary = ? ORDER BY created_at DESC",
+    )
+    .all(beneficiary) as { schedule_id: number }[];
+  return rows.map((r) => r.schedule_id);
+}
+
+// ── Replay Queue Management ───────────────────────────────────────────────
+
+export interface ReplayQueueItem {
+  id: number;
+  from_ledger: number;
+  to_ledger: number;
+  status: "pending" | "in_progress" | "completed" | "failed";
+  completed_ledger?: number;
+  started_at?: number;
+  completed_at?: number;
+  error_message?: string;
+  retry_count: number;
+  created_at: number;
+  updated_at: number;
+}
+
+/**
+ * Enqueue a ledger range for replay processing
+ */
+export function enqueueReplayRange(
+  fromLedger: number,
+  toLedger: number,
+  network?: NetworkName,
+): number {
+  const result = getDb(network)
+    .prepare(
+      `INSERT INTO replay_queue (from_ledger, to_ledger, status)
+       VALUES (?, ?, 'pending')`,
+    )
+    .run(fromLedger, toLedger);
+  return result.lastInsertRowid as number;
+}
+
+/**
+ * Get the next pending replay queue item
+ */
+export function getNextPendingReplay(
+  network?: NetworkName,
+): ReplayQueueItem | null {
+  const row = getDb(network)
+    .prepare(
+      `SELECT * FROM replay_queue 
+       WHERE status = 'pending' 
+       ORDER BY created_at ASC 
+       LIMIT 1`,
+    )
+    .get() as ReplayQueueItem | undefined;
+  return row || null;
+}
+
+/**
+ * Mark a replay range as in progress
+ */
+export function markReplayInProgress(id: number, network?: NetworkName): void {
+  getDb(network)
+    .prepare(
+      `UPDATE replay_queue 
+       SET status = 'in_progress', started_at = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000), id);
+}
+
+/**
+ * Update replay progress with the last successfully processed ledger
+ */
+export function updateReplayProgress(
+  id: number,
+  completedLedger: number,
+  network?: NetworkName,
+): void {
+  getDb(network)
+    .prepare(
+      `UPDATE replay_queue 
+       SET completed_ledger = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(completedLedger, Math.floor(Date.now() / 1000), id);
+}
+
+/**
+ * Mark a replay range as completed
+ */
+export function markReplayCompleted(id: number, network?: NetworkName): void {
+  getDb(network)
+    .prepare(
+      `UPDATE replay_queue 
+       SET status = 'completed', completed_at = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000), id);
+}
+
+/**
+ * Mark a replay range as failed
+ */
+export function markReplayFailed(
+  id: number,
+  errorMessage: string,
+  network?: NetworkName,
+): void {
+  getDb(network)
+    .prepare(
+      `UPDATE replay_queue 
+       SET status = 'failed', error_message = ?, completed_at = ?, retry_count = retry_count + 1, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(
+      errorMessage,
+      Math.floor(Date.now() / 1000),
+      Math.floor(Date.now() / 1000),
+      id,
+    );
+}
+
+/**
+ * Get all replay queue items (for monitoring/debugging)
+ */
+export function getReplayQueueItems(network?: NetworkName): ReplayQueueItem[] {
+  return getDb(network)
+    .prepare("SELECT * FROM replay_queue ORDER BY created_at DESC")
+    .all() as ReplayQueueItem[];
+}
+
+/**
+ * Get count of pending replay ranges
+ */
+export function getPendingReplayCount(network?: NetworkName): number {
+  const row = getDb(network)
+    .prepare(
+      "SELECT COUNT(*) as count FROM replay_queue WHERE status = 'pending'",
+    )
+    .get() as { count: number } | undefined;
+  return row?.count || 0;
+}
+
+/**
+ * Clean up completed and old failed replay entries (housekeeping)
+ */
+export function cleanupReplayQueue(
+  daysToKeep: number = 7,
+  network?: NetworkName,
+): void {
+  const cutoff = Math.floor(Date.now() / 1000) - daysToKeep * 24 * 60 * 60;
+  getDb(network)
+    .prepare(
+      `DELETE FROM replay_queue 
+       WHERE (status = 'completed' OR status = 'failed') 
+       AND completed_at < ?`,
+    )
+    .run(cutoff);
+}
+
+// ── Gap Detection Log ─────────────────────────────────────────────────────
+
+export interface GapDetectionLogEntry {
+  id: number;
+  last_checkpoint: number;
+  current_ledger: number;
+  gaps_detected: number;
+  checked_at: number;
+}
+
+/**
+ * Log a gap detection run
+ */
+export function logGapDetection(
+  lastCheckpoint: number,
+  currentLedger: number,
+  gapsDetected: number,
+  network?: NetworkName,
+): void {
+  getDb(network)
+    .prepare(
+      `INSERT INTO gap_detection_log (last_checkpoint, current_ledger, gaps_detected)
+       VALUES (?, ?, ?)`,
+    )
+    .run(lastCheckpoint, currentLedger, gapsDetected);
+}
+
+/**
+ * Get the most recent gap detection log entry
+ */
+export function getLastGapDetection(
+  network?: NetworkName,
+): GapDetectionLogEntry | null {
+  const row = getDb(network)
+    .prepare(
+      `SELECT * FROM gap_detection_log 
+       ORDER BY checked_at DESC 
+       LIMIT 1`,
+    )
+    .get() as GapDetectionLogEntry | undefined;
+  return row || null;
+}
+
+export function queryDripsList(params: {
+  listId: string;
+  network?: NetworkName;
+}): DripsList | "not_found" {
+  const db = getDb(params.network);
+  const row = db
+    .prepare(
+      `SELECT l.id, l.name, l.owner, l.token, l.total_funding_rate_per_sec,
+       COALESCE(l.target_rate_per_sec, '0') AS target_rate_per_sec,
+       COUNT(m.address) AS member_count
+     FROM drips_lists l
+     LEFT JOIN drips_list_members m ON m.list_id = l.id AND m.left_at IS NULL
+     WHERE l.id = ?
+     GROUP BY l.id`,
+    )
+    .get(params.listId) as DripsList | undefined;
+
+  if (!row) return "not_found";
+  return row;
+}
+
+export function updateDripsListTargetRate(params: {
+  listId: string;
+  owner?: string;
+  targetRatePerSec: string;
+  network?: NetworkName;
+}): { success: boolean; list?: DripsList; error?: string } {
+  const db = getDb(params.network);
+  const existing = queryDripsList({
+    listId: params.listId,
+    network: params.network,
+  });
+  if (existing === "not_found") {
+    return { success: false, error: "List not found" };
+  }
+  if (params.owner && existing.owner !== params.owner) {
+    return {
+      success: false,
+      error: "Only the list owner can update the target rate",
+    };
+  }
+
+  db.prepare("UPDATE drips_lists SET target_rate_per_sec = ? WHERE id = ?").run(
+    params.targetRatePerSec,
+    params.listId,
+  );
+
+  const updated = queryDripsList({
+    listId: params.listId,
+    network: params.network,
+  });
+  return {
+    success: true,
+    list: updated === "not_found" ? undefined : updated,
+  };
+}
+
+// ── Stream Cycles & Analytics ─────────────────────────────────────────
+
+export function upsertStreamCycle(
+  params: {
+    account: string;
+    token: string;
+    cycle_end_ledger: number;
+    cycle_end_timestamp: number;
+    amount_received: string;
+  },
+  network?: NetworkName,
+): void {
+  getDb(network)
+    .prepare(
+      `INSERT INTO stream_cycles (account, token, cycle_end_ledger, cycle_end_timestamp, amount_received)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(account, token, cycle_end_ledger) DO UPDATE SET
+         cycle_end_timestamp = excluded.cycle_end_timestamp,
+         amount_received = excluded.amount_received`,
+    )
+    .run(
+      params.account,
+      params.token,
+      params.cycle_end_ledger,
+      params.cycle_end_timestamp,
+      params.amount_received,
+    );
+}
+
+export function queryStreamCycles(params: {
+  account?: string;
+  token?: string;
+  limit?: number;
+  /** Filter to cycles ending at or after this unix timestamp. */
+  from?: number;
+  /** Filter to cycles ending at or before this unix timestamp. */
+  to?: number;
+  /** Opaque cursor for keyset pagination (base64url JSON). */
+  cursor?: string;
+  network?: NetworkName;
+}): StreamCycleRow[] {
+  const db = getDb(params.network);
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+
+  if (params.account) {
+    conditions.push("account = ?");
+    values.push(params.account);
+  }
+  if (params.token) {
+    conditions.push("token = ?");
+    values.push(params.token);
+  }
+  if (params.from != null && Number.isFinite(params.from)) {
+    conditions.push("cycle_end_timestamp >= ?");
+    values.push(Math.floor(params.from));
+  }
+  if (params.to != null && Number.isFinite(params.to)) {
+    conditions.push("cycle_end_timestamp <= ?");
+    values.push(Math.floor(params.to));
+  }
+  if (params.cursor) {
+    const decoded = decodeDripsCursor(params.cursor);
+    if (
+      decoded === null ||
+      typeof decoded.createdAt !== "number"
+    ) {
+      return [];
+    }
+    // Keyset on (cycle_end_timestamp DESC, cycle_end_ledger DESC).
+    conditions.push(
+      "(cycle_end_timestamp < ? OR (cycle_end_timestamp = ? AND cycle_end_ledger < ?))",
+    );
+    const ledger = typeof decoded.id === "string" ? Number(decoded.id) : 0;
+    values.push(
+      decoded.createdAt,
+      decoded.createdAt,
+      Number.isFinite(ledger) ? ledger : 0,
+    );
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const limit = Math.min(params.limit ?? 50, 200);
+
+  return db
+    .prepare(
+      `SELECT account, token, cycle_end_ledger, cycle_end_timestamp, amount_received, created_at
+       FROM stream_cycles
+       ${whereClause}
+       ORDER BY cycle_end_timestamp DESC, cycle_end_ledger DESC LIMIT ?`,
+    )
+    .all(...values, limit) as StreamCycleRow[];
+}
+
+/**
+ * Encode a keyset cursor for stream-cycle pagination.
+ * Exposed so API routes can build `next_cursor` without reaching into
+ * cursor internals.
+ */
+export function encodeStreamCycleCursor(cycle: {
+  cycle_end_timestamp: number;
+  cycle_end_ledger: number;
+}): string {
+  return encodeDripsCursor({
+    createdAt: cycle.cycle_end_timestamp,
+    id: String(cycle.cycle_end_ledger),
+  });
+}
+
+// ── Squeeze Events ────────────────────────────────────────────────────
+
+export function insertSqueezeEvent(
+  params: {
+    id: string;
+    receiver: string;
+    sender: string;
+    token: string;
+    amount_stroops: string;
+    cycle_id: number;
+    ledger: number;
+    timestamp: number;
+    history_hash?: string | null;
+  },
+  network?: NetworkName,
+): { isDuplicate: boolean } {
+  const resolvedNetwork = network ?? "testnet";
+  const db = getDb(resolvedNetwork);
+  let isDuplicate = false;
+
+  if (params.history_hash) {
+    const existing = db
+      .prepare(
+        `SELECT id FROM squeeze_events
+         WHERE receiver = ? AND sender = ? AND history_hash = ? AND is_duplicate = 0`,
+      )
+      .get(params.receiver, params.sender, params.history_hash);
+    if (existing) {
+      isDuplicate = true;
+    }
+  }
+
+  db.prepare(
+    `INSERT OR IGNORE INTO squeeze_events
+      (id, receiver, sender, token, amount_stroops, cycle_id, ledger, timestamp, history_hash, is_duplicate)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    params.id,
+    params.receiver,
+    params.sender,
+    params.token,
+    params.amount_stroops,
+    params.cycle_id,
+    params.ledger,
+    params.timestamp,
+    params.history_hash ?? null,
+    isDuplicate ? 1 : 0,
+  );
+  invalidateBalanceCache(params.receiver, params.token, resolvedNetwork);
+
+  return { isDuplicate };
+}
+
+export function querySqueezeEvents(params: {
+  receiver?: string;
+  sender?: string;
+  token?: string;
+  limit?: number;
+  network?: NetworkName;
+}): SqueezeEventRow[] {
+  const db = getDb(params.network);
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+
+  if (params.receiver) {
+    conditions.push("receiver = ?");
+    values.push(params.receiver);
+  }
+  if (params.sender) {
+    conditions.push("sender = ?");
+    values.push(params.sender);
+  }
+  if (params.token) {
+    conditions.push("token = ?");
+    values.push(params.token);
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const limit = Math.min(params.limit ?? 50, 200);
+
+  return db
+    .prepare(
+      `SELECT id, receiver, sender, token, amount_stroops, cycle_id, ledger, timestamp, history_hash, is_duplicate
+       FROM squeeze_events
+       ${whereClause}
+       ORDER BY timestamp DESC, id DESC LIMIT ?`,
+    )
+    .all(...values, limit) as SqueezeEventRow[];
+}
+
+// ── Stream Config Query ───────────────────────────────────────────────
+
+export function queryStreamConfig(
+  sender: string,
+  receiver: string,
+  token: string,
+  network?: NetworkName,
+): StreamConfigDetails | null {
+  const db = getDb(network);
+  const now = Math.floor(Date.now() / 1000);
+
+  const streamRow = db
+    .prepare(
+      `SELECT rate_per_second, estimated_end_time, created_at
+       FROM drips_streams
+       WHERE account = ? AND receiver = ? AND token = ? AND ended_at IS NULL
+         AND (estimated_end_time IS NULL OR estimated_end_time > ?)
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(sender, receiver, token, now) as
+    | { rate_per_second: string; estimated_end_time: number | null; created_at: number }
+    | undefined;
+
+  if (!streamRow) {
+    return null;
+  }
+
+  const balanceRow = db
+    .prepare(
+      `SELECT balance FROM drips_streaming_balances WHERE account = ? AND token = ?`,
+    )
+    .get(sender, token) as { balance: string } | undefined;
+
+  return {
+    sender,
+    receiver,
+    token,
+    rate: streamRow.rate_per_second,
+    start_time: streamRow.created_at,
+    balance: balanceRow?.balance ?? "0",
+    max_end_time: streamRow.estimated_end_time ?? null,
+  };
+}
+
+interface StreamHistoryCursor {
+  ledger: number;
+  id: string;
+}
+
+function encodeStreamHistoryCursor(cursor: StreamHistoryCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+function decodeStreamHistoryCursor(
+  cursor?: string,
+): StreamHistoryCursor | null {
+  if (!cursor) return { ledger: 0, id: "" };
+  try {
+    const value = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    ) as Partial<StreamHistoryCursor>;
+    if (
+      !value ||
+      typeof value !== "object" ||
+      !Number.isSafeInteger(value.ledger) ||
+      (value.ledger as number) < 0 ||
+      typeof value.id !== "string" ||
+      value.id === ""
+    ) {
+      return null;
+    }
+    return { ledger: value.ledger as number, id: value.id };
+  } catch {
+    return null;
+  }
+}
+
+export function queryStreamHistory(params: {
+  sender: string;
+  receiver: string;
+  token: string;
+  limit?: number;
+  cursor?: string;
+  network?: NetworkName;
+}): CursorPage<StreamHistoryRow> | "not_found" | null {
+  const db = getDb(params.network);
+  const cursor = decodeStreamHistoryCursor(params.cursor);
+  if (cursor === null) return null;
+
+  const values: unknown[] = [params.sender, params.receiver, params.token];
+  let after = "";
+  if (params.cursor) {
+    after = "AND (ledger > ? OR (ledger = ? AND id > ?))";
+    values.push(cursor.ledger, cursor.ledger, cursor.id);
+  }
+
+  const exists = db
+    .prepare(
+      `SELECT 1 FROM stream_history
+       WHERE sender = ? AND receiver = ? AND token = ? LIMIT 1`,
+    )
+    .get(params.sender, params.receiver, params.token);
+  if (!exists) return "not_found";
+
+  const limit = boundedPageSize(params.limit);
+  const rows = db
+    .prepare(
+      `SELECT id, ledger, timestamp, old_rate, new_rate, action
+       FROM stream_history
+       WHERE sender = ? AND receiver = ? AND token = ? ${after}
+       ORDER BY ledger ASC, id ASC LIMIT ?`,
+    )
+    .all(...values, limit + 1) as Array<
+    StreamHistoryRow & { id: string }
+  >;
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return {
+    items: page.map(({ id: _id, ...row }) => row),
+    nextCursor:
+      hasMore && last
+        ? encodeStreamHistoryCursor({ ledger: last.ledger, id: last.id })
+        : null,
+  };
+}
+
+export function getActiveStreamsCount(network?: NetworkName): number {
+  const now = Math.floor(Date.now() / 1000);
+  const row = getDb(network)
+    .prepare(
+      `SELECT COUNT(*) AS count FROM drips_streams
+       WHERE ended_at IS NULL
+         AND (estimated_end_time IS NULL OR estimated_end_time > ?)`,
+    )
+    .get(now) as { count: number } | undefined;
+  return row?.count ?? 0;
+}
+
+// ── Top Receivers Leaderboard ──────────────────────────────────────────
+
+export function queryTopReceivers(
+  token: string,
+  limit: number = 10,
+  network?: NetworkName,
+): TopReceiverRow[] {
+  const db = getDb(network);
+  const now = Math.floor(Date.now() / 1000);
+
+  const activeStreams = db
+    .prepare(
+      `SELECT account, receiver, rate_per_second
+       FROM drips_streams
+       WHERE token = ? AND ended_at IS NULL
+         AND (estimated_end_time IS NULL OR estimated_end_time > ?)`,
+    )
+    .all(token, now) as { account: string; receiver: string; rate_per_second: string }[];
+
+  const receiversMap = new Map<string, { totalRate: bigint; senders: Set<string> }>();
+
+  for (const stream of activeStreams) {
+    let entry = receiversMap.get(stream.receiver);
+    if (!entry) {
+      entry = { totalRate: 0n, senders: new Set() };
+      receiversMap.set(stream.receiver, entry);
+    }
+    entry.totalRate += BigInt(stream.rate_per_second);
+    entry.senders.add(stream.account);
+  }
+
+  const list: TopReceiverRow[] = [];
+  for (const [receiver, entry] of receiversMap.entries()) {
+    list.push({
+      account: receiver,
+      total_incoming_rate_per_sec: entry.totalRate.toString(),
+      sender_count: entry.senders.size,
+    });
+  }
+
+  list.sort((a, b) => {
+    const diff = BigInt(b.total_incoming_rate_per_sec) - BigInt(a.total_incoming_rate_per_sec);
+    if (diff > 0n) return 1;
+    if (diff < 0n) return -1;
+    return a.account.localeCompare(b.account);
+  });
+
+  const cappedLimit = Math.max(1, Math.min(limit, 50));
+  return list.slice(0, cappedLimit);
+}
+
+// ── Top Senders Leaderboard (#794) ────────────────────────────────────
+
+export function queryTopSenders(
+  token: string,
+  limit: number = 20,
+  network?: NetworkName,
+): TopSenderRow[] {
+  const db = getDb(network);
+  const now = Math.floor(Date.now() / 1000);
+
+  const activeStreams = db
+    .prepare(
+      `SELECT account, receiver, rate_per_second
+       FROM drips_streams
+       WHERE token = ? AND ended_at IS NULL
+         AND (estimated_end_time IS NULL OR estimated_end_time > ?)`,
+    )
+    .all(token, now) as { account: string; receiver: string; rate_per_second: string }[];
+
+  const sendersMap = new Map<string, { totalRate: bigint; receivers: Set<string> }>();
+
+  for (const stream of activeStreams) {
+    let entry = sendersMap.get(stream.account);
+    if (!entry) {
+      entry = { totalRate: 0n, receivers: new Set() };
+      sendersMap.set(stream.account, entry);
+    }
+    entry.totalRate += BigInt(stream.rate_per_second);
+    entry.receivers.add(stream.receiver);
+  }
+
+  const list: TopSenderRow[] = [];
+  for (const [account, entry] of sendersMap.entries()) {
+    list.push({
+      account,
+      total_rate_per_sec: entry.totalRate.toString(),
+      receiver_count: entry.receivers.size,
+    });
+  }
+
+  list.sort((a, b) => {
+    const diff = BigInt(b.total_rate_per_sec) - BigInt(a.total_rate_per_sec);
+    if (diff > 0n) return 1;
+    if (diff < 0n) return -1;
+    return a.account.localeCompare(b.account);
+  });
+
+  const cappedLimit = Math.max(1, Math.min(limit, 50));
+  return list.slice(0, cappedLimit);
+}
+

@@ -1,0 +1,6 @@
+export { GET } from "./../../../notifications/unsubscribe"
+export { POST } from "./../../../notifications/unsubscribe"
+export { PUT } from "./../../../notifications/unsubscribe"
+export { PATCH } from "./../../../notifications/unsubscribe"
+export { DELETE } from "./../../../notifications/unsubscribe"
+export { HEAD } from "./../../../notifications/unsubscribe"

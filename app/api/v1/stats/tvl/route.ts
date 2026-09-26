@@ -1,0 +1,6 @@
+export { GET } from "./../../../stats/tvl"
+export { POST } from "./../../../stats/tvl"
+export { PUT } from "./../../../stats/tvl"
+export { PATCH } from "./../../../stats/tvl"
+export { DELETE } from "./../../../stats/tvl"
+export { HEAD } from "./../../../stats/tvl"

@@ -53,3 +53,12 @@ contracts/target/
 # Generated contract binding build artifacts
 /lib/bindings/vestflow/dist/
 /lib/bindings/vestflow/package-lock.json
+
+# Bundled Web Worker output (built by `npm run worker:build`)
+/public/workers/
+
+# SDK package artifacts
+/sdk/node_modules/
+/sdk/dist/
+/sdk/package-lock.json
+

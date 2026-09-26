@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { withLogging } from "@/lib/requestLogger";
 
 const INDEXER_URL = process.env.INDEXER_URL ?? "http://localhost:3001";
 
@@ -15,7 +16,7 @@ function indexerUrlFor(network: "mainnet" | "testnet"): string {
   return process.env.INDEXER_TESTNET_URL ?? INDEXER_URL;
 }
 
-export async function GET(req: NextRequest): Promise<NextResponse> {
+export const GET = withLogging(async function GET(req: NextRequest): Promise<NextResponse> {
   const network = networkParam(req);
   if (network == null) {
     return NextResponse.json(
@@ -49,4 +50,4 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       { status: 503 }
     );
   }
-}
+});

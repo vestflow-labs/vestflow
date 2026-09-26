@@ -6,7 +6,15 @@ import {
   vestingProgress,
 } from "@/lib/stellar";
 import { createIpBasedRateLimiter } from "@/lib/rateLimit";
+import { getOrSetCache } from "@/lib/redisCache";
 import { NextRequest, NextResponse } from "next/server";
+import { withLogging } from "@/lib/requestLogger";
+
+// Short TTL read-through cache (#206) — schedule state changes slowly (once
+// per claim/revoke), so a repeat visitor within this window gets served
+// from Redis instead of re-hitting the RPC node. Falls open to a direct
+// call when REDIS_URL isn't configured.
+const CACHE_TTL_SECONDS = 20;
 
 const rateLimiter = createIpBasedRateLimiter(60000, 30);
 
@@ -39,7 +47,7 @@ function calculateNextUnlock(schedule: any, now: number): number | null {
   return endTime;
 }
 
-export async function GET(
+export const GET = withLogging(async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ): Promise<NextResponse> {
@@ -59,8 +67,12 @@ export async function GET(
       );
     }
 
-    const schedule = await getSchedule(scheduleId);
-    
+    const schedule = await getOrSetCache(
+      `schedule:${scheduleId}`,
+      CACHE_TTL_SECONDS,
+      () => getSchedule(scheduleId),
+    );
+
     if (!schedule) {
       return NextResponse.json(
         { error: "Schedule not found" },
@@ -124,4 +136,4 @@ export async function GET(
       { status: 500 }
     );
   }
-}
+});

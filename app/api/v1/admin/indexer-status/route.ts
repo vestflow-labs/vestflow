@@ -1,0 +1,6 @@
+export { GET } from "./../../../admin/indexer-status"
+export { POST } from "./../../../admin/indexer-status"
+export { PUT } from "./../../../admin/indexer-status"
+export { PATCH } from "./../../../admin/indexer-status"
+export { DELETE } from "./../../../admin/indexer-status"
+export { HEAD } from "./../../../admin/indexer-status"

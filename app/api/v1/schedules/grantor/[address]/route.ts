@@ -1,0 +1,6 @@
+export { GET } from "./../../../../schedules/grantor/[address]"
+export { POST } from "./../../../../schedules/grantor/[address]"
+export { PUT } from "./../../../../schedules/grantor/[address]"
+export { PATCH } from "./../../../../schedules/grantor/[address]"
+export { DELETE } from "./../../../../schedules/grantor/[address]"
+export { HEAD } from "./../../../../schedules/grantor/[address]"

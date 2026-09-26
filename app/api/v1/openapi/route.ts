@@ -1,0 +1,6 @@
+export { GET } from "./../../openapi"
+export { POST } from "./../../openapi"
+export { PUT } from "./../../openapi"
+export { PATCH } from "./../../openapi"
+export { DELETE } from "./../../openapi"
+export { HEAD } from "./../../openapi"

@@ -11,4 +11,7 @@ export default defineConfig({
   treeshake: true,
   outDir: "dist",
   external: ["@stellar/freighter-api"],
+  outExtension({ format }) {
+    return { js: format === "cjs" ? ".cjs" : ".mjs" };
+  },
 });

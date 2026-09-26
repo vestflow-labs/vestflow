@@ -1,0 +1,6 @@
+export { GET } from "./../../ready"
+export { POST } from "./../../ready"
+export { PUT } from "./../../ready"
+export { PATCH } from "./../../ready"
+export { DELETE } from "./../../ready"
+export { HEAD } from "./../../ready"

@@ -1,0 +1,6 @@
+export { GET } from "./../../../notifications/read-all"
+export { POST } from "./../../../notifications/read-all"
+export { PUT } from "./../../../notifications/read-all"
+export { PATCH } from "./../../../notifications/read-all"
+export { DELETE } from "./../../../notifications/read-all"
+export { HEAD } from "./../../../notifications/read-all"

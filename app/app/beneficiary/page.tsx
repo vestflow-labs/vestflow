@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import Navbar from "@/components/Navbar";
 import ScheduleCard from "@/components/ScheduleCard";
 import { ScheduleListSkeleton } from "@/components/ScheduleCardSkeleton";
+import SearchFilterBar from "@/components/SearchFilterBar";
+import { matchesAddressOrToken } from "@/lib/tokens";
 import {
   NoBeneficiarySchedulesEmptyState,
   NoSearchResultsEmptyState,
@@ -11,6 +13,8 @@ import {
 import {
   getAllSchedules,
   getClaimableBulk,
+  getBeneficiaryScheduleIds,
+  getScheduleBatch,
   ScheduleData,
   stroopsToXlm,
   vestingProgress,
@@ -49,10 +53,12 @@ export default function BeneficiaryDashboardPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const all = await getAllSchedules(publicKey ?? undefined);
       if (publicKey) {
-        // Filter to only schedules where user is beneficiary
-        const beneficiarySchedules = all.filter(s => s.beneficiary === publicKey);
+        // Use the on-chain beneficiary index instead of fetching all schedules.
+        const beneficiaryIds = await getBeneficiaryScheduleIds(publicKey);
+        const beneficiarySchedules = beneficiaryIds.length > 0
+          ? (await getScheduleBatch(beneficiaryIds, publicKey)).filter(Boolean) as ScheduleData[]
+          : [];
         setSchedules(beneficiarySchedules);
 
         // Compute aggregate stats
@@ -146,14 +152,17 @@ export default function BeneficiaryDashboardPage() {
     return list;
   }, [multiFiltered, sortBy]);
 
-  // Apply address search on top of sorted list
+  // Apply address prefix and token search on top of sorted list (Issue #647)
   const q = query.trim().toLowerCase();
   const searchFiltered = useMemo(() => {
     if (!q) return sortedSchedules;
-    return sortedSchedules.filter(
-      s =>
-        s.grantor.toLowerCase().includes(q) ||
-        (getLabel(s.grantor) ?? "").toLowerCase().includes(q)
+    return sortedSchedules.filter(s =>
+      matchesAddressOrToken(
+        q,
+        [s.grantor],
+        [s.token],
+        [getLabel(s.grantor)]
+      )
     );
   }, [sortedSchedules, q, getLabel]);
 
@@ -340,25 +349,15 @@ export default function BeneficiaryDashboardPage() {
           </div>
         )}
 
-        {/* Address search input */}
-        <div className="relative mb-6">
-          <input
-            type="text"
+        {/* Search / filter bar (Issue #647) */}
+        <div className="mb-6">
+          <SearchFilterBar
             value={query}
-            onChange={e => setQuery(e.target.value)}
-            placeholder="Search by grantor address or label…"
-            className="input pr-8"
-            aria-label="Search schedules by grantor address or label"
+            onChange={setQuery}
+            placeholder="Filter incoming streams by address prefix or token symbol…"
+            resultCount={searchFiltered.length}
+            totalCount={multiFiltered.length}
           />
-          {query && (
-            <button
-              onClick={() => setQuery("")}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white transition-colors"
-              aria-label="Clear search"
-            >
-              ×
-            </button>
-          )}
         </div>
 
         {/* Schedule grid */}

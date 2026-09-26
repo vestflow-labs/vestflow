@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { WalletProvider } from "@/lib/WalletContext";
 import { ToastProvider } from "@/components/Toast";
+import { NotificationProvider } from "@/lib/notifications-context";
+import NotificationToasts from "@/components/NotificationToasts";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -26,9 +28,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
       <body className="min-h-screen antialiased" style={{ fontFamily: "system-ui, sans-serif" }}>
-        <WalletProvider>
-          <ToastProvider>{children}</ToastProvider>
-        </WalletProvider>
+        <ToastProvider>
+          <WalletProvider>
+            <NotificationProvider>
+              {children}
+              <NotificationToasts />
+            </NotificationProvider>
+          </WalletProvider>
+        </ToastProvider>
       </body>
     </html>
   );

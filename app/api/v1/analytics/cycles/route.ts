@@ -1,0 +1,6 @@
+export { GET } from "./../../../analytics/cycles"
+export { POST } from "./../../../analytics/cycles"
+export { PUT } from "./../../../analytics/cycles"
+export { PATCH } from "./../../../analytics/cycles"
+export { DELETE } from "./../../../analytics/cycles"
+export { HEAD } from "./../../../analytics/cycles"

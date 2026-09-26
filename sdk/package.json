@@ -1,7 +1,7 @@
 {
-  "name": "@vestflow/sdk",
+  "name": "@drips/stellar-sdk",
   "version": "0.1.0",
-  "description": "TypeScript SDK for interacting with the VestFlow vesting contract on Stellar/Soroban.",
+  "description": "TypeScript SDK for interacting with the Drips/VestFlow streaming and vesting contracts on Stellar/Soroban.",
   "license": "MIT",
   "author": "VestFlow Labs",
   "homepage": "https://github.com/vestflow-labs/vestflow",
@@ -10,14 +10,19 @@
     "url": "https://github.com/vestflow-labs/vestflow.git",
     "directory": "sdk"
   },
-  "main": "./dist/index.cjs",
-  "module": "./dist/index.mjs",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.mts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/esm/index.d.mts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
     }
   },
   "files": [
@@ -29,8 +34,8 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsup",
-    "dev": "tsup --watch",
+    "build": "tsup --config tsup.esm.config.ts && tsup --config tsup.cjs.config.ts && node scripts/finalize-dist.mjs",
+    "dev": "tsup --config tsup.esm.config.ts --watch",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -51,9 +56,14 @@
   "keywords": [
     "stellar",
     "soroban",
+    "drips",
     "vesting",
+    "streaming",
     "blockchain",
-    "sdk",
-    "vestflow"
-  ]
+    "sdk"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
 }

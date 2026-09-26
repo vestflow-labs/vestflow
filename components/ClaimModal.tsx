@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect } from "react";
+import confetti from "canvas-confetti";
 import {
   ScheduleData,
   stroopsToXlm,
@@ -69,6 +70,17 @@ export default function ClaimModal({
         txHash: hash,
         network: NETWORK,
       });
+      
+      const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (!prefersReducedMotion) {
+        confetti({
+          particleCount: 100,
+          spread: 70,
+          origin: { y: 0.6 },
+          zIndex: 9999,
+        });
+      }
+      
       onSuccess();
     } catch (e: any) {
       const msg = parseContractError(e);
@@ -207,10 +219,19 @@ export default function ClaimModal({
               onClick={handleClaim}
               disabled={loading}
               className="flex-1 btn-primary rounded-xl py-2.5 font-semibold text-white text-sm disabled:opacity-60"
+              aria-busy={loading}
             >
-              {loading
-                ? "Confirming…"
-                : `Claim ${stroopsToXlm(displayAmt)} ${tokenSymbol}`}
+              {loading ? (
+                <span className="flex items-center justify-center gap-2">
+                  <span
+                    className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"
+                    aria-hidden="true"
+                  />
+                  Confirming…
+                </span>
+              ) : (
+                `Claim ${stroopsToXlm(displayAmt)} ${tokenSymbol}`
+              )}
             </button>
           )}
         </div>

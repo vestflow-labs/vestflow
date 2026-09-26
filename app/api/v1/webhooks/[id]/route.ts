@@ -1,0 +1,6 @@
+export { GET } from "./../../../webhooks/[id]"
+export { POST } from "./../../../webhooks/[id]"
+export { PUT } from "./../../../webhooks/[id]"
+export { PATCH } from "./../../../webhooks/[id]"
+export { DELETE } from "./../../../webhooks/[id]"
+export { HEAD } from "./../../../webhooks/[id]"

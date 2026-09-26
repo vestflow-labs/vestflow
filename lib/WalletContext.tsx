@@ -10,6 +10,7 @@ import {
 } from "react";
 import { getAddress, isConnected } from "@stellar/freighter-api";
 import { connectWallet } from "./stellar";
+import { useToast } from "@/components/Toast";
 
 interface WalletCtx {
   publicKey: string | null;
@@ -40,6 +41,7 @@ const LS_KEY = "vestflow-wallet";
 const HEARTBEAT_INTERVAL_MS = 60_000;
 
 export function WalletProvider({ children }: { children: ReactNode }) {
+  const { addToast } = useToast();
   const [publicKey, setPublicKeyState] = useState<string | null>(null);
   const [sessionExpired, setSessionExpired] = useState(false);
   // Track whether we intentionally disconnected so the heartbeat doesn't
@@ -128,6 +130,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
           setPublicKeyState(null);
           localStorage.removeItem(LS_KEY);
           setSessionExpired(true);
+          addToast({
+            status: "error",
+            title: "Wallet disconnected",
+            message: "Freighter was locked or the session expired. Reconnect to continue.",
+            duration: 8000,
+          });
         } else if (liveAddress !== currentKey) {
           // Account switched inside Freighter — sync the new address.
           setPublicKeyState(liveAddress);
@@ -139,12 +147,18 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         setPublicKeyState(null);
         localStorage.removeItem(LS_KEY);
         setSessionExpired(true);
+        addToast({
+          status: "error",
+          title: "Wallet disconnected",
+          message: "Freighter was locked or the session expired. Reconnect to continue.",
+          duration: 8000,
+        });
       }
     };
 
     const id = setInterval(check, HEARTBEAT_INTERVAL_MS);
     return () => clearInterval(id);
-  }, []);
+  }, [addToast]);
 
   return (
     <WalletContext.Provider

@@ -9,17 +9,26 @@
     "dev:server": "ts-node src/server.ts",
     "dev:all": "concurrently \"npm run dev\" \"npm run dev:server\"",
     "test:pagination": "ts-node test/pagination_test.ts",
+    "test:drips-api": "ts-node test/drips-api.test.ts",
+    "test:drips-events": "ts-node test/drips-events-projection.test.ts",
+    "test:webhook-load": "ts-node test/webhook_load_test.ts",
+    "test:streams-load": "ts-node --files scripts/load-test-streams.ts",
+    "benchmark:analytics": "ts-node --files scripts/benchmark-analytics.ts",
     "build": "tsc",
     "start": "node dist/poller.js",
     "start:server": "node dist/server.js"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^15.1.0",
-    "better-sqlite3": "^12.11.1"
+    "better-sqlite3": "^12.11.1",
+    "ioredis": "^6.0.0",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^20",
+    "@types/pg": "^8.23.1",
+    "autocannon": "^8.0.0",
     "concurrently": "^9.0.0",
     "ts-node": "^10.9.2",
     "typescript": "^5"

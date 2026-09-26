@@ -1,56 +1,137 @@
 # Contributing to VestFlow
 
-Thank you for your interest in contributing! VestFlow is a Stellar/Soroban token vesting protocol — contributions to the smart contract, frontend, tests, and documentation are all welcome.
+Thank you for your interest in contributing! This guide covers everything you need to get started.
 
-## Getting started
+## Table of Contents
 
-1. Fork the repository and clone your fork.
-2. Install prerequisites: Node.js ≥ 18, Rust, `wasm32v1-none` target, Stellar CLI, Freighter wallet.
-3. Run `npm install` in the project root.
-4. Run `cargo test` inside `contracts/vestflow/` to verify the contract tests pass.
-5. Run `npm run dev` and open `http://localhost:3000` to verify the frontend builds.
+- [Branch Naming](#branch-naming)
+- [Commit Message Convention](#commit-message-convention)
+- [Running Tests](#running-tests)
+- [Pull Request Process](#pull-request-process)
+- [Issue Guidelines](#issue-guidelines)
+- [Review Process](#review-process)
 
-## Ways to contribute
+---
 
-- **Bug reports** — open an issue describing the behaviour, what you expected, and steps to reproduce.
-- **Feature requests** — open an issue with the `enhancement` label. Discuss before implementing.
-- **Good first issues** — issues labelled [`good first issue`](https://github.com/libby-coder/vestflow/issues?q=label%3A%22good+first+issue%22) are scoped and well-described — a great place to start.
-- **Documentation** — typo fixes, clarifications, and new examples are always appreciated.
-- **Tests** — additional test cases for edge cases in the contract are valuable.
+## Branch Naming
 
-## Pull request guidelines
+Use the following patterns depending on the type of change:
 
-- Keep each PR focused on one thing.
-- For contract changes: add or update tests in `contracts/vestflow/src/lib.rs`. All tests must pass (`cargo test`).
-- For frontend changes: make sure `npm run build` succeeds without TypeScript errors.
-- Write a clear PR description explaining what changed and why.
-- Reference any related issue with `Closes #<number>`.
+| Type | Pattern | Example |
+|------|---------|---------|
+| Feature | `feat/<short-description>` | `feat/add-revoke-schedule` |
+| Bug fix | `fix/<short-description>` | `fix/claimable-amount-overflow` |
+| Documentation | `docs/<short-description>` | `docs/add-contributing-guide` |
+| Chore / tooling | `chore/<short-description>` | `chore/upgrade-stellar-sdk` |
+| Multiple issues | `issues/<issue-numbers>` | `issues/100-104-115-117` |
 
-## Contract development notes
+Keep branch names lowercase and hyphenated. Avoid generic names like `patch` or `update`.
 
-The Soroban contract targets `wasm32v1-none` and uses `soroban-sdk` v22.
+---
 
-```bash
-# Run tests
-cd contracts/vestflow
-cargo test
+## Commit Message Convention
 
-# Build WASM
-cargo build --target wasm32v1-none --release
+We follow the [Conventional Commits](https://www.conventionalcommits.org/) specification.
 
-# Deploy to testnet (requires stellar CLI + funded key)
-stellar contract deploy \
-  --wasm target/wasm32v1-none/release/vestflow.wasm \
-  --source your-key \
-  --network testnet
+```
+<type>(<scope>): <short summary>
+
+[optional body]
+
+[optional footer — closes issues]
 ```
 
-## Code style
+**Types:** `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `ci`
 
-- Rust: follow standard `rustfmt` formatting (`cargo fmt`).
-- TypeScript: no explicit linter configured — match the surrounding style.
-- Comments: only when the *why* is non-obvious.
+**Examples:**
 
-## Reporting security issues
+```
+feat(contract): add revoke schedule entry point
 
-Please do **not** open a public issue for security vulnerabilities. Email the maintainer directly so the issue can be addressed before public disclosure.
+fix(sdk): correct claimable amount calculation for cliff schedules
+
+docs: add local dev quickstart with soroban-cli
+
+Closes #100
+```
+
+To close a GitHub issue automatically on merge, add `Closes #<issue-number>` in the commit footer or PR description.
+
+---
+
+## Running Tests
+
+Install dependencies first:
+
+```bash
+npm install
+```
+
+Run the full test suite:
+
+```bash
+npm test
+```
+
+Run tests in watch mode during development:
+
+```bash
+npm run test:watch
+```
+
+Lint the codebase:
+
+```bash
+npm run lint
+```
+
+Type-check without emitting:
+
+```bash
+npm run type-check
+```
+
+All tests and lint checks must pass before a PR can be merged.
+
+---
+
+## Pull Request Process
+
+1. Fork the repository and create your branch off `main` following the [branch naming](#branch-naming) convention.
+2. Make your changes with clear, focused commits.
+3. Ensure `npm test` and `npm run lint` pass locally.
+4. Open a PR against `main` and fill in the pull request template completely.
+5. Reference the related issue(s) in the PR description using `Closes #<issue-number>`.
+6. Keep PRs focused — one concern per PR makes review faster.
+7. Do not include AI-generated artifact files (e.g. `agent.md`, `claude.md`, `.kiro/`) in your commits.
+
+---
+
+## Issue Guidelines
+
+Before opening a new issue:
+
+- Search existing issues to avoid duplicates.
+- Use the provided issue templates where available.
+
+When writing an issue:
+
+- **Title:** concise and specific — describe the problem or feature, not the solution.
+- **Body:** include context, reproduction steps (for bugs), or acceptance criteria (for features).
+- **Labels:** apply relevant labels (`bug`, `enhancement`, `documentation`, etc.).
+
+---
+
+## Review Process
+
+- At least **one maintainer approval** is required before merging.
+- Reviewers will look at correctness, test coverage, code style, and documentation.
+- Address review comments with new commits — do not force-push during an open review unless asked.
+- Once approved, the PR author merges (squash merge preferred for feature branches).
+- The branch is deleted after merge.
+
+---
+
+## Questions?
+
+Open a [discussion](../../discussions) or reach out in the project's community channels.

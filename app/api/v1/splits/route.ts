@@ -1,0 +1,6 @@
+export { GET } from "./../../splits"
+export { POST } from "./../../splits"
+export { PUT } from "./../../splits"
+export { PATCH } from "./../../splits"
+export { DELETE } from "./../../splits"
+export { HEAD } from "./../../splits"

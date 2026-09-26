@@ -1,0 +1,6 @@
+export { GET } from "./../../../profile/[address]"
+export { POST } from "./../../../profile/[address]"
+export { PUT } from "./../../../profile/[address]"
+export { PATCH } from "./../../../profile/[address]"
+export { DELETE } from "./../../../profile/[address]"
+export { HEAD } from "./../../../profile/[address]"

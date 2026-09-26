@@ -1,6 +1,8 @@
 "use client";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useToast } from "@/components/Toast";
+import InfoTooltip from "@/components/InfoTooltip";
+import TokenSelector from "@/components/TokenSelector";
 import {
   createSchedule,
   CONTRACT_ID,
@@ -12,6 +14,7 @@ import {
   getWalletXlmBalance,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
+import { useXlmPrice } from "@/lib/price";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -42,6 +45,18 @@ function isValidStellarAddress(addr: string): boolean {
 /** Minimal Stellar contract or account address check: starts with C or G, length 56, alphanumeric. */
 function isValidTokenAddress(addr: string): boolean {
   return /^[CG][A-Z2-7]{55}$/.test(addr.trim());
+}
+
+/**
+ * Seed value for the beneficiary field (#812).
+ *
+ * Only a well-formed Stellar address is accepted: a receiver arriving from a
+ * query parameter is untrusted input and must never be seeded into a field
+ * that gets submitted on-chain.
+ */
+export function prefillBeneficiary(value: string | undefined): string {
+  const candidate = (value ?? "").trim();
+  return isValidStellarAddress(candidate) ? candidate : "";
 }
 
 function validateForm(form: FormState): FormErrors {
@@ -121,19 +136,24 @@ function Field({
   htmlFor,
   error,
   hint,
+  info,
   children,
 }: {
   label: string;
   htmlFor?: string;
   error?: string;
   hint?: string;
+  info?: string;
   children: ReactNode;
 }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <label htmlFor={htmlFor} className="text-sm text-zinc-400">
-        {label}
-      </label>
+      <div className="flex items-center gap-1.5">
+        <label htmlFor={htmlFor} className="text-sm text-zinc-400">
+          {label}
+        </label>
+        {info && <InfoTooltip text={info} />}
+      </div>
       {children}
       {hint && !error && <p className="text-xs text-zinc-500">{hint}</p>}
       {error && (
@@ -164,6 +184,96 @@ function SummaryItem({
       >
         {value}
       </span>
+    </div>
+  );
+}
+
+// ─── Stream Rate Calculator (#633) ────────────────────────────────────────────
+
+function StreamRateCalculator({
+  amountXlm,
+  durationDays,
+  onApplyDailyRate,
+}: {
+  amountXlm: string;
+  durationDays: string;
+  onApplyDailyRate: (dailyRate: number) => void;
+}) {
+  const xlmPrice = useXlmPrice();
+
+  const amt = parseFloat(amountXlm);
+  const dur = parseInt(durationDays);
+  const hasValidDuration = !isNaN(dur) && dur >= 1;
+  const presets = [0.01, 0.1, 1];
+  const presetButtons = (
+    <div className="flex flex-wrap gap-2" aria-label="Daily rate presets">
+      {presets.map((dailyRate) => (
+        <button
+          key={dailyRate}
+          type="button"
+          disabled={!hasValidDuration}
+          onClick={() => onApplyDailyRate(dailyRate)}
+          className="rounded-lg border border-violet-500/30 bg-violet-500/10 px-2.5 py-1 text-xs font-medium text-violet-200 transition-colors hover:bg-violet-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {dailyRate} XLM/day
+        </button>
+      ))}
+    </div>
+  );
+
+  if (!amountXlm || !hasValidDuration || isNaN(amt) || amt <= 0) {
+    return (
+      <div className="rounded-xl border border-white/8 bg-white/[0.02] p-4">
+        <p className="text-xs uppercase tracking-wider text-zinc-500 mb-3 font-semibold">
+          Stream Rate Breakdown
+        </p>
+        <p className="mb-3 text-sm text-zinc-600">
+          Set a duration, then choose a daily rate or enter a total amount to see the breakdown.
+        </p>
+        {presetButtons}
+      </div>
+    );
+  }
+
+  const perDay = amt / dur;
+  const perWeek = perDay * 7;
+  const perMonth = perDay * 30;
+
+  const fmtXlm = (v: number) =>
+    v.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 7 });
+
+  const fmtUsd = (xlm: number) =>
+    xlmPrice !== null
+      ? ` ≈ $${(xlm * xlmPrice).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      : "";
+
+  return (
+    <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <p className="text-xs uppercase tracking-wider text-violet-400 font-semibold">
+          Stream Rate Breakdown
+        </p>
+        {presetButtons}
+      </div>
+      <div className="grid grid-cols-3 gap-3 text-sm">
+        {[
+          { label: "Per Day", value: perDay },
+          { label: "Per Week", value: perWeek },
+          { label: "Per Month (30d)", value: perMonth },
+        ].map(({ label, value }) => (
+          <div key={label} className="flex flex-col gap-0.5">
+            <span className="text-[11px] text-zinc-500">{label}</span>
+            <span className="font-semibold tabular-nums text-zinc-200">
+              {fmtXlm(value)} XLM
+            </span>
+            {xlmPrice !== null && (
+              <span className="text-[11px] text-zinc-500 tabular-nums">
+                {fmtUsd(value)}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -222,12 +332,19 @@ function estimateClaimable(
   return (totalStroops * BigInt(elapsed)) / BigInt(durationSecs);
 }
 
-export default function CreateForm() {
+interface CreateFormProps {
+  /**
+   * Receiver to open with, set by the profile "Fund this project" button (#812).
+   */
+  initialBeneficiary?: string;
+}
+
+export default function CreateForm({ initialBeneficiary }: CreateFormProps = {}) {
   const { publicKey } = useWallet();
   const { addToast, updateToast } = useToast();
   const [step, setStep] = useState<"form" | "confirm">("form");
   const [form, setForm] = useState<FormState>({
-    beneficiary: "",
+    beneficiary: prefillBeneficiary(initialBeneficiary),
     tokenAddress: NATIVE_TOKEN,
     amount: "",
     startDate: "",
@@ -251,8 +368,26 @@ export default function CreateForm() {
   const [previewDate, setPreviewDate] = useState("");
   const [balanceError, setBalanceError] = useState("");
 
+  // Adopt a receiver that arrives after mount (client-side navigation from
+  // one profile to another), without ever overwriting what the user typed.
+  useEffect(() => {
+    const prefilled = prefillBeneficiary(initialBeneficiary);
+    if (!prefilled) return;
+    setForm((f) => (f.beneficiary.trim() ? f : { ...f, beneficiary: prefilled }));
+  }, [initialBeneficiary]);
+
   const set = (k: keyof FormState, v: string | boolean) =>
     setForm((f) => ({ ...f, [k]: v }) as FormState);
+
+  const applyDailyRate = (dailyRate: number) => {
+    const days = parseInt(form.durationDays);
+    if (isNaN(days) || days < 1) return;
+
+    const amount = (dailyRate * days).toFixed(7).replace(/\.?0+$/, "");
+    set("amount", amount);
+    setBalanceError("");
+    touch("amount");
+  };
 
   const touch = (k: keyof FormState) =>
     setTouched(
@@ -368,11 +503,12 @@ export default function CreateForm() {
     setStep("form");
     setTxHash("");
     setErrMsg("");
+    setBalanceError("");
     setSubmitAttempted(false);
     setTouched({});
     setLockupEdited(false);
     setForm({
-      beneficiary: "",
+      beneficiary: prefillBeneficiary(initialBeneficiary),
       tokenAddress: NATIVE_TOKEN,
       amount: "",
       startDate: "",
@@ -459,14 +595,14 @@ export default function CreateForm() {
             value={form.tokenAddress.trim()}
             full
           />
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <SummaryItem
               label="Total Amount"
               value={`${form.amount} ${tokenLabel}`}
             />
             <SummaryItem label="Vesting Type" value={kindDisplay} />
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <SummaryItem
               label="Start Date & Time"
               value={`${form.startDate} ${form.startTime}`}
@@ -476,7 +612,7 @@ export default function CreateForm() {
               value={`${form.durationDays} days`}
             />
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <SummaryItem label="Cliff Duration" value={cliffDisplay} />
             <SummaryItem
               label="Revocable"
@@ -488,7 +624,7 @@ export default function CreateForm() {
             />
           </div>
           <div className="pt-1 border-t border-white/5">
-            <p className="text-xs text-zinc-500">
+            <p className="text-xs text-zinc-500 break-all">
               Contract: <span className="font-mono text-zinc-400">{CONTRACT_ID}</span>
             </p>
           </div>
@@ -501,7 +637,7 @@ export default function CreateForm() {
               type="date"
               value={previewDate}
               onChange={(e) => setPreviewDate(e.target.value)}
-              className="input text-sm px-3 py-1.5 rounded-lg bg-zinc-800/60 border border-zinc-700 text-zinc-200 focus:outline-none focus:border-violet-500 w-full"
+              className="input text-sm px-3 py-1.5 rounded-lg bg-zinc-800/60 border border-zinc-700 text-zinc-200 focus:outline-none focus:border-violet-500 w-full min-w-0"
             />
             {previewDate &&
               form.amount &&
@@ -618,26 +754,14 @@ export default function CreateForm() {
         />
       </Field>
 
-      <Field
-        label="Token Address (SEP-41)"
-        htmlFor="tokenAddress"
+      <TokenSelector
+        value={form.tokenAddress}
+        onChange={(address, symbol) => {
+          set("tokenAddress", address);
+          touch("tokenAddress");
+        }}
         error={visibleErrors.tokenAddress}
-        hint="The contract address of the token to vest. Defaults to native XLM."
-      >
-        <input
-          id="tokenAddress"
-          type="text"
-          placeholder="CDLZ…"
-          value={form.tokenAddress}
-          onChange={(e) => set("tokenAddress", e.target.value)}
-          onBlur={() => touch("tokenAddress")}
-          required
-          autoComplete="off"
-          spellCheck={false}
-          aria-invalid={!!visibleErrors.tokenAddress}
-          className={`input ${visibleErrors.tokenAddress ? "border-red-500/60 focus:border-red-500" : ""}`}
-        />
-      </Field>
+      />
 
       <Field
         label={`Total Amount (${tokenLabel})`}
@@ -660,7 +784,7 @@ export default function CreateForm() {
         />
       </Field>
 
-      <fieldset className="grid grid-cols-1 sm:grid-cols-2 gap-4 border-0 p-0 m-0">
+      <fieldset className="grid grid-cols-1 md:grid-cols-2 gap-4 border-0 p-0 m-0">
         <legend className="sr-only">Schedule start date and time</legend>
         <Field
           label="Start Date"
@@ -675,7 +799,7 @@ export default function CreateForm() {
             onBlur={() => touch("startDate")}
             required
             aria-invalid={!!visibleErrors.startDate}
-            className={`input ${visibleErrors.startDate ? "border-red-500/60 focus:border-red-500" : ""}`}
+            className={`input w-full min-w-0 ${visibleErrors.startDate ? "border-red-500/60 focus:border-red-500" : ""}`}
           />
         </Field>
         <Field label="Start Time" htmlFor="startTime">
@@ -686,7 +810,7 @@ export default function CreateForm() {
             onChange={(e) => set("startTime", e.target.value)}
             onBlur={() => touch("startTime")}
             required
-            className="input"
+            className="input w-full min-w-0"
           />
         </Field>
       </fieldset>
@@ -696,6 +820,7 @@ export default function CreateForm() {
         htmlFor="durationDays"
         error={visibleErrors.durationDays}
         hint="How many days from start until all tokens are fully vested."
+        info="Token vesting is the process of gradually releasing tokens over time. The total duration is the complete time period during which tokens become available to claim."
       >
         <input
           id="durationDays"
@@ -712,19 +837,21 @@ export default function CreateForm() {
         />
       </Field>
 
+      <StreamRateCalculator amountXlm={form.amount} durationDays={form.durationDays} onApplyDailyRate={applyDailyRate} />
+
       <fieldset className="flex flex-col gap-3 border-0 p-0 m-0">
         <legend className="text-sm text-zinc-400">Vesting Type</legend>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 sm:gap-3">
           {KIND_OPTIONS.map(({ value, label, description }) => (
             <label
               key={value}
-              className={`flex flex-col gap-1.5 p-3 rounded-xl border cursor-pointer transition-colors ${
+              className={`flex flex-col gap-1.5 p-2 sm:p-3 rounded-xl border cursor-pointer transition-colors ${
                 form.kind === value
                   ? "border-violet-500/60 bg-violet-500/10"
                   : "border-white/8 hover:border-white/20"
               }`}
             >
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 min-w-0">
                 <input
                   type="radio"
                   name="kind"
@@ -734,14 +861,14 @@ export default function CreateForm() {
                     set("kind", value);
                     if (value === "Linear") set("cliffDays", "0");
                   }}
-                  className="accent-violet-500"
+                  className="accent-violet-500 shrink-0"
                   aria-label={label}
                 />
-                <span className="text-sm font-medium text-zinc-200">
+                <span className="text-xs sm:text-sm font-medium text-zinc-200 leading-tight">
                   {label}
                 </span>
               </div>
-              <p className="text-xs text-zinc-500 leading-relaxed">
+              <p className="text-[11px] sm:text-xs text-zinc-500 leading-relaxed">
                 {description}
               </p>
             </label>
@@ -759,6 +886,7 @@ export default function CreateForm() {
               ? "Tokens unlock all at once after this many days."
               : "No tokens are claimable before this point. Linear vesting begins after the cliff."
           }
+          info="A cliff is a period during which no tokens are claimable at all. After the cliff period ends, tokens become available according to the vesting schedule."
         >
           <input
             id="cliffDays"
@@ -781,6 +909,7 @@ export default function CreateForm() {
         htmlFor="lockupDays"
         error={visibleErrors.lockupDays}
         hint="Tokens vest on schedule but stay non-transferable until the lockup ends. Must be ≥ the cliff; defaults to the cliff value."
+        info="Lockup prevents vested tokens from being transferred until the lockup period ends. This is useful for ensuring tokens remain with the intended recipient during the vesting period."
       >
         <input
           id="lockupDays"

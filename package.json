@@ -9,32 +9,50 @@
     "contracts:metrics": "bash scripts/contract-metrics.sh",
     "bindings:generate": "bash scripts/generate-bindings.sh",
     "bindings:build": "npm --prefix lib/bindings/vestflow install && npm --prefix lib/bindings/vestflow run build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "worker:build": "tsup --config workers/tsup.config.ts",
+    "prebuild": "npm run worker:build",
+    "predev": "npm run worker:build",
+    "dev:reset": "bash scripts/dev-reset.sh",
+    "lint": "eslint .",
+    "doctor": "node scripts/doctor.js"
   },
   "dependencies": {
     "@stellar/freighter-api": "^6.0.1",
     "@stellar/stellar-sdk": "^15.1.0",
     "better-sqlite3": "^12.11.1",
     "express-rate-limit": "^7.1.5",
-    "next": "16.2.6",
-    "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "ioredis": "^5.11.1",
+    "next": "16.3.1",
+    "canvas-confetti": "^1.9.3",
+    "qrcode.react": "^4.2.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.10.2",
+    "@eslint/eslintrc": "^3",
+    "@playwright/test": "^1.62.0",
     "@tailwindcss/postcss": "^4",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^14.6.1",
+    "@testing-library/user-event": "^14.6.5",
+    "@types/canvas-confetti": "^1.9.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/express-rate-limit": "^6.0.0",
     "@types/node": "^20",
-    "@types/react": "^19.2.16",
-    "@types/react-dom": "^19.2.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@types/web-push": "^3.6.4",
+    "autocannon": "^8.0.0",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.1",
     "jsdom": "^29.1.1",
     "lefthook": "^2.1.9",
     "tailwindcss": "^4",
     "tsup": "^8.5.1",
     "typescript": "^5",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.11"
   }
 }

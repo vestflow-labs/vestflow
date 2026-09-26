@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { withLogging } from "@/lib/requestLogger";
 
 function getDb() {
   try {
@@ -11,7 +12,7 @@ function getDb() {
   }
 }
 
-export async function POST(request: NextRequest): Promise<NextResponse> {
+export const POST = withLogging(async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const body = await request.json();
     const { subscriptionId } = body;
@@ -63,4 +64,4 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 500 }
     );
   }
-}
+});

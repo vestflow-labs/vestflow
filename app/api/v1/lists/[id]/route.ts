@@ -1,0 +1,6 @@
+export { GET } from "./../../../lists/[id]"
+export { POST } from "./../../../lists/[id]"
+export { PUT } from "./../../../lists/[id]"
+export { PATCH } from "./../../../lists/[id]"
+export { DELETE } from "./../../../lists/[id]"
+export { HEAD } from "./../../../lists/[id]"

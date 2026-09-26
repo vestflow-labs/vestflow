@@ -86,8 +86,8 @@ pub fn revoke(env: Env, schedule_id: u64)
 **Authorization:** Must be called by the grantor
 **Behavior:** 
 - Calculates vested amount at revocation time
-- Returns unvested tokens to grantor
-- Leaves vested tokens claimable by beneficiary
+- Releases already-vested tokens to beneficiary
+- Returns unvested remainder to grantor
 
 **Events Emitted:**
 - `ScheduleRevoked { schedule_id, grantor, unvested_amount }`

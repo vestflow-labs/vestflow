@@ -10,7 +10,7 @@ import {
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type ToastStatus = "pending" | "success" | "error";
+export type ToastStatus = "pending" | "success" | "error" | "info";
 
 export interface Toast {
   id: string;
@@ -81,24 +81,28 @@ function ToastItem({
     pending: "⏳",
     success: "✅",
     error: "❌",
+    info: "ℹ️",
   };
 
   const borderColors: Record<ToastStatus, string> = {
     pending: "border-yellow-500/40",
     success: "border-green-500/40",
     error: "border-red-500/40",
+    info: "border-blue-500/40",
   };
 
   const bgColors: Record<ToastStatus, string> = {
     pending: "bg-yellow-500/5",
     success: "bg-green-500/5",
     error: "bg-red-500/5",
+    info: "bg-blue-500/5",
   };
 
   const textColors: Record<ToastStatus, string> = {
     pending: "text-yellow-300",
     success: "text-green-300",
     error: "text-red-300",
+    info: "text-blue-300",
   };
 
   const network = toast.network ?? "testnet";

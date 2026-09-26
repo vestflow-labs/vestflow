@@ -1,0 +1,6 @@
+export { GET } from "./../../../auth/verify"
+export { POST } from "./../../../auth/verify"
+export { PUT } from "./../../../auth/verify"
+export { PATCH } from "./../../../auth/verify"
+export { DELETE } from "./../../../auth/verify"
+export { HEAD } from "./../../../auth/verify"

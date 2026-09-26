@@ -91,11 +91,43 @@ Set `INDEXER_URL` in your Next.js deployment environment to point at the
 running query server, or set `INDEXER_TESTNET_URL` and `INDEXER_MAINNET_URL`
 when the networks are served by separate indexer deployments.
 
+### Database pool configuration
+
+The indexer validates these variables at startup and fails with the variable
+name and accepted range when a value is invalid:
+
+| Variable | Default | Accepted values |
+|----------|---------|-----------------|
+| `DB_POOL_MIN` | `0` | Non-negative safe integer, no greater than `DB_POOL_MAX` |
+| `DB_POOL_MAX` | `20` | Positive safe integer |
+| `DB_IDLE_TIMEOUT_MS` | `30000` | Integer from `0` through `2147483647` milliseconds |
+
+PostgreSQL applies the values as `min`, `max`, and `idleTimeoutMillis` on its
+connection pool. SQLite uses one shared WAL connection per network and does
+not create a native connection pool.
+
 ---
 
 ## Query API
 
 Base URL: `http://localhost:3001` (local) or your deployed service URL.
+
+### `GET /metrics`
+
+Prometheus text format is available at the root path, not under `/v1/`.
+Set `METRICS_TOKEN` and send `Authorization: Bearer <token>`.
+
+The response exposes `http_requests_total`, `http_request_duration_seconds`,
+`active_streams_count`, `indexer_lag_ledgers`, and
+`db_pool_connections_active`.
+
+### `GET /streams/history/:sender/:receiver/:token`
+
+Returns chronological stream changes for one sender/receiver/token pair. Each
+history row contains `ledger`, Unix `timestamp`, `old_rate`, `new_rate`, and
+`action` (`open`, `rate_change`, or `close`). Use `limit` (default 50, max 200)
+and the returned `next_cursor` for pagination. The endpoint returns 404 when
+no history exists.
 
 ### `GET /health`
 
@@ -176,6 +208,219 @@ GET /stats/tvl?network=testnet
   "last_updated": 1766534400
 }
 ```
+
+---
+
+## Analytics API
+
+Materialized daily snapshots, folded in incrementally by `analytics.ts`
+after each processed ledger batch (see `materialize()` in that file). These
+endpoints read only from `schedule_daily_snapshots`, `token_daily_tvl` and
+`grantor_daily_stats` — never from raw `schedule_events` — so they stay fast
+regardless of total event volume.
+
+### `GET /analytics/tvl`
+
+Daily TVL for a single token. Query params: `token` (required, asset
+contract address), `from`, `to` (ISO 8601, default: last 30 days),
+`cumulative` (`true` for a running total instead of the per-day balance),
+`network` (`testnet` | `mainnet`, default `testnet`). Responses are served
+from a 60s in-memory LRU cache (100 entries), invalidated for "today" only
+whenever a new ledger changes that day's numbers.
+
+```
+GET /analytics/tvl?token=CDLZ...&from=2026-07-01&to=2026-08-01&cumulative=true
+```
+
+```json
+{
+  "token": "CDLZ...",
+  "from": "2026-07-01",
+  "to": "2026-08-01",
+  "cumulative": true,
+  "decimals": 7,
+  "points": [
+    { "day": "2026-07-01", "total_locked_stroops": "7500000", "active_schedule_count": 3, "total_locked_display": "0.75" }
+  ],
+  "cached": false
+}
+```
+
+### `GET /analytics/schedules/:id/history`
+
+Daily `{ vested, claimed, claimable, locked }` for one schedule, gap-filled:
+a day with no activity repeats the last known values instead of a hole.
+Query params: `from`, `to` (default: last 30 days).
+
+### `GET /analytics/grantors/:address/summary`
+
+`{ total_schedules_created, total_distributed, active_schedules,
+revoked_schedules, avg_duration_days }` for every schedule the address has
+created.
+
+---
+
+## Webhooks
+
+Every indexed event is fanned out to registered HTTP endpoints with signed
+requests, exponential-backoff retries and a dead-letter queue.
+
+```
+poller ─insert event─▶ fan-out (writes rows only, never blocks indexing)
+                            │
+                    webhook_deliveries          ┌── 2xx ──▶ delivered
+                            │                   │
+                    delivery worker pool ───────┼── 5xx/timeout ──▶ pending (retry)
+                    (10 concurrent, polls 1s)   │
+                                                └── attempt 10 ──▶ dead_lettered
+```
+
+### Registering an endpoint
+
+All management routes require `Authorization: Bearer <wallet JWT>` — the
+token minted by the app's `POST /api/auth/verify`. The indexer and the app
+must therefore share `JWT_SECRET`.
+
+```bash
+curl -X POST http://localhost:3001/webhooks \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"endpoint_url":"https://hooks.example.com/vestflow","event_types":["claimed","revoked"]}'
+```
+
+```json
+{
+  "registration_id": "0f1c…",
+  "challenge": "9c2e…",
+  "secret": "3b91…",            // returned exactly once
+  "verified": false,
+  "next_step": "POST /webhooks/0f1c…/verify once your endpoint can echo the handshake signature"
+}
+```
+
+`event_types` accepts any of `schedule_created`, `claimed`, `revoked`,
+`proposal_created`, `proposal_acknowledged`, `proposal_activated`,
+`proposal_expired`, or `["*"]` for everything.
+
+### Handshake (required before any event is sent)
+
+1. Store the returned `secret` on your endpoint.
+2. Call `POST /webhooks/:id/verify`. VestFlow POSTs
+   `{"type":"webhook.handshake","registration_id":…,"challenge":…}` with an
+   `X-VestFlow-Signature` header.
+3. Answer `200` within 10 seconds, echoing the **identical** signature —
+   either in the `X-VestFlow-Signature` response header or as
+   `{"signature":"t=…,v1=…"}` in the body.
+4. On success `verified_at` is set and events start flowing. On failure the
+   registration is deleted.
+
+If you already share a secret out of band, pass it as `secret` in the
+registration body and the handshake runs immediately as part of `POST
+/webhooks`.
+
+The handshake is what prevents an attacker from pointing VestFlow at
+`http://internal-service/admin`: only someone holding the secret can produce
+the echo. Endpoint URLs must additionally be `https://` and must not resolve
+to loopback, link-local or private ranges (set
+`WEBHOOK_ALLOW_INSECURE_URLS=true` for local development).
+
+### Delivery requests
+
+| Header                    | Value                                             |
+|---------------------------|---------------------------------------------------|
+| `X-VestFlow-Delivery-ID`  | UUID, **stable across every retry** — deduplicate on it |
+| `X-VestFlow-Event`        | event type, e.g. `claimed`                        |
+| `X-VestFlow-Event-ID`     | Stellar event ID `<ledger>-<txIndex>-<eventIndex>`|
+| `X-VestFlow-Attempt`      | 1-based attempt number                            |
+| `X-VestFlow-Signature`    | `t=<unix>,v1=<hmac-sha256>`                       |
+
+The signature is `HMAC-SHA256(secret, "<t>.<raw body>")`. Verify it over the
+**raw** body, and reject timestamps older than 5 minutes so a captured
+request cannot be replayed:
+
+```js
+import crypto from "crypto";
+
+function verify(rawBody, header, secret) {
+  const { t, v1 } = Object.fromEntries(
+    header.split(",").map((part) => part.split("=").map((s) => s.trim()))
+  );
+  if (Math.abs(Date.now() / 1000 - Number(t)) > 300) return false;
+
+  const expected = Buffer.from(
+    crypto.createHmac("sha256", secret).update(`${t}.${rawBody}`).digest("hex"),
+    "hex"
+  );
+  const provided = Buffer.from(v1, "hex");
+  // Constant time — a `===` comparison leaks the digest byte by byte.
+  return (
+    expected.length === provided.length &&
+    crypto.timingSafeEqual(expected, provided)
+  );
+}
+```
+
+Answer `2xx` to acknowledge. Anything else (or no answer within 10s) is
+retried; `410 Gone` tells VestFlow to stop permanently.
+
+### Retries and the dead-letter queue
+
+Delays double after each failed attempt — `2^(n-1)` seconds:
+
+| Failed attempt | 1 | 2 | 3 | 4  | 5  | 6  | 7  | 8   | 9   | 10            |
+|----------------|---|---|---|----|----|----|----|-----|-----|---------------|
+| Next retry in  | 1s| 2s| 4s| 8s | 16s| 32s| 64s| 128s| 256s| dead-lettered |
+
+Every transition is committed to the database before the request is made, so
+a restart resumes pending retries; deliveries stranded `in_flight` by a
+crashed process are reclaimed after `WEBHOOK_LEASE_SECONDS`.
+
+### Management API
+
+| Route                                                | Purpose                        |
+|------------------------------------------------------|--------------------------------|
+| `POST /webhooks`                                      | Register an endpoint           |
+| `GET /webhooks`                                       | List your registrations        |
+| `POST /webhooks/test`                                 | Send a test event to a registered endpoint |
+| `GET /webhooks/:id`                                   | Registration detail            |
+| `POST /webhooks/:id/verify`                           | Run the handshake              |
+| `DELETE /webhooks/:id`                                | Disable a registration         |
+| `GET /webhooks/:id/deliveries?status=&limit=&offset=` | Delivery history               |
+| `POST /webhooks/:id/deliveries/:delivery_id/retry`    | Requeue a dead-lettered delivery |
+
+### Configuration
+
+| Variable                      | Default | Purpose                                        |
+|-------------------------------|---------|------------------------------------------------|
+| `WEBHOOK_ENCRYPTION_KEY`      | —       | 32-byte hex AES key; **required** to enable webhooks |
+| `JWT_SECRET`                  | —       | Shared with the app; authenticates management calls |
+| `WEBHOOK_CONCURRENCY`         | `10`    | Concurrent delivery requests                   |
+| `WEBHOOK_POLL_INTERVAL_MS`    | `1000`  | Queue poll interval                            |
+| `WEBHOOK_LEASE_SECONDS`       | `120`   | When to reclaim a stranded `in_flight` delivery |
+| `WEBHOOK_DELIVERY_ENABLED`    | `true`  | Set `false` to queue without delivering        |
+| `WEBHOOK_ALLOW_INSECURE_URLS` | `false` | Allow `http://` and private hosts (dev only)   |
+
+Secrets are never stored in plaintext: `webhook_registrations.secret_hash`
+holds a scrypt hash, and `secret_encrypted` holds AES-256-GCM ciphertext
+that the worker decrypts in memory only to sign a request. Rotating
+`WEBHOOK_ENCRYPTION_KEY` invalidates existing registrations.
+
+A `WEBHOOK_ENCRYPTION_KEY` that is not 64 hex characters is stretched to 32
+bytes with SHA-256 and logs a warning once at startup: the derived key is
+well-formed but carries only the entropy of the value you supplied, so
+prefer a generated key.
+
+### Load test
+
+```bash
+npm run test:webhook-load     # 10,000 events × 10 endpoints = 100,000 deliveries
+```
+
+The mock receiver fails a fixed 10% of events, so the run asserts 90,000
+`delivered`, 10,000 `dead_lettered` (each after exactly 10 attempts), zero
+left `pending`/`in_flight`, and one stable delivery ID per delivery. Scale it
+with `WEBHOOK_LOAD_EVENTS`, `WEBHOOK_LOAD_ENDPOINTS` and
+`WEBHOOK_LOAD_CONCURRENCY`.
 
 ---
 

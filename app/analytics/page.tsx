@@ -48,8 +48,10 @@ export default function AnalyticsDashboard() {
 
   const formatAmount = (amount: string) => {
     try {
-      const num = Number(amount) / 10_000_000; // Convert stroops to XLM
-      return num.toLocaleString("en-US", {
+      const whole = BigInt(amount) / 10_000_000n;
+      const frac = BigInt(amount) % 10_000_000n;
+      const xlm = Number(`${whole}.${frac.toString().padStart(7, "0")}`);
+      return xlm.toLocaleString("en-US", {
         maximumFractionDigits: 2,
         minimumFractionDigits: 2,
       });

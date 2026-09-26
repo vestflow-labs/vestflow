@@ -1,0 +1,6 @@
+export { GET } from "./../../../../analytics/splits/distribution"
+export { POST } from "./../../../../analytics/splits/distribution"
+export { PUT } from "./../../../../analytics/splits/distribution"
+export { PATCH } from "./../../../../analytics/splits/distribution"
+export { DELETE } from "./../../../../analytics/splits/distribution"
+export { HEAD } from "./../../../../analytics/splits/distribution"

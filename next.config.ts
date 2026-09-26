@@ -6,19 +6,26 @@ const rpcOrigin = isMainnet
   ? "https://mainnet.sorobanrpc.com"
   : "https://soroban-testnet.stellar.org";
 
+// The indexer query server the browser connects to for the real-time
+// notification SSE stream (SharedWorker). Defaults to the local dev indexer.
+const indexerOrigin = process.env.NEXT_PUBLIC_INDEXER_URL ?? "http://localhost:3001";
+
 const cspHeader = [
   `default-src 'self'`,
   `script-src 'self' 'unsafe-inline' 'unsafe-eval'`,
   `style-src 'self' 'unsafe-inline'`,
   `img-src 'self' data: blob:`,
   `font-src 'self'`,
-  `connect-src 'self' ${rpcOrigin} https://horizon.stellar.org https://horizon-testnet.stellar.org`,
+  `connect-src 'self' ${rpcOrigin} ${indexerOrigin} https://horizon.stellar.org https://horizon-testnet.stellar.org`,
   `frame-ancestors 'none'`,
 ].join("; ");
 
 const nextConfig: NextConfig = {
   output: process.env.DOCKER_BUILD ? "standalone" : undefined,
   serverExternalPackages: ["better-sqlite3"],
+  experimental: {
+    instrumentationHook: true,
+  },
   turbopack: {
     root: process.cwd(),
   },

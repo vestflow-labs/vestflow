@@ -1,11 +1,12 @@
 import {
   getClaimableBulk,
   getScheduleBatch,
-  getSchedulesByGrantor,
+  getGrantorScheduleIds,
   NETWORK,
 } from "@/lib/stellar";
 import { createIpBasedRateLimiter } from "@/lib/rateLimit";
 import { NextRequest, NextResponse } from "next/server";
+import { withLogging } from "@/lib/requestLogger";
 
 const rateLimiter = createIpBasedRateLimiter(60000, 30);
 
@@ -38,7 +39,7 @@ function vestedAmount(schedule: {
   }
 }
 
-export async function GET(
+export const GET = withLogging(async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ address: string }> }
 ): Promise<NextResponse> {
@@ -57,7 +58,7 @@ export async function GET(
     const page = pageParam ? Math.max(1, parseInt(pageParam, 10)) : 1;
     const limit = limitParam ? Math.max(1, parseInt(limitParam, 10)) : 20;
 
-    const ids = await getSchedulesByGrantor(address);
+    const ids = await getGrantorScheduleIds(address);
     const total = ids.length;
     const totalPages = Math.ceil(total / limit);
     const start = (page - 1) * limit;
@@ -106,4 +107,4 @@ export async function GET(
     console.error("Error fetching grantor schedules:", error);
     return NextResponse.json({ error: "Failed to fetch schedules" }, { status: 500 });
   }
-}
+});

@@ -6,6 +6,7 @@ import {
 } from "@/lib/stellar";
 import { createIpBasedRateLimiter } from "@/lib/rateLimit";
 import { NextRequest, NextResponse } from "next/server";
+import { withLogging } from "@/lib/requestLogger";
 
 const rateLimiter = createIpBasedRateLimiter(60000, 30);
 
@@ -38,7 +39,7 @@ function vestedAmount(schedule: {
   }
 }
 
-export async function GET(
+export const GET = withLogging(async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ address: string }> }
 ): Promise<NextResponse> {
@@ -106,4 +107,4 @@ export async function GET(
     console.error("Error fetching beneficiary schedules:", error);
     return NextResponse.json({ error: "Failed to fetch schedules" }, { status: 500 });
   }
-}
+});

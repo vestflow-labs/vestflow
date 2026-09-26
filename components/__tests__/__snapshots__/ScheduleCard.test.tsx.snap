@@ -1,0 +1,1680 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ScheduleCard snapshots > renders a cliff schedule in cliff period > schedule-cliff-period 1`] = `
+<div
+  class="card p-5 flex flex-col gap-3"
+>
+  <div
+    class="flex items-start justify-between"
+  >
+    <div>
+      <div
+        class="flex items-center gap-2"
+      >
+        <a
+          class="text-sm font-semibold text-white hover:text-violet-300 transition-colors"
+          href="/app/schedule/1"
+        >
+          Schedule #
+          1
+        </a>
+        <button
+          aria-label="Copy schedule 1"
+          class="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors border-white/10 bg-white/5 text-zinc-400 hover:border-white/20 hover:text-white "
+          title="Copy schedule 1"
+          type="button"
+        >
+          <svg
+            aria-hidden="true"
+            fill="none"
+            height="12"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            viewBox="0 0 24 24"
+            width="12"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <rect
+              height="13"
+              rx="2"
+              width="13"
+              x="9"
+              y="9"
+            />
+            <path
+              d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+            />
+          </svg>
+          <span>
+            Copy
+          </span>
+        </button>
+      </div>
+      <div
+        class="flex items-center gap-1.5 mt-0.5 flex-wrap"
+      >
+        <span
+          class="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20"
+        >
+          Cliff
+        </span>
+        <span
+          class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-zinc-700/40 text-zinc-400 border border-zinc-700/60"
+        >
+          revocable
+        </span>
+      </div>
+    </div>
+    <span
+      class="text-xs font-medium px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-400"
+    >
+      Vesting
+    </span>
+  </div>
+  <div
+    class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-zinc-400"
+  >
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Grantor
+      </span>
+      <div
+        class="flex flex-col gap-1 mt-0.5"
+      >
+        <div
+          class="flex items-center gap-2 flex-wrap"
+        >
+          <span
+            class="text-sm font-mono text-zinc-300 break-all"
+            title="GGRANTORAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANHTGK"
+          >
+            GGRA...TGK
+          </span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Beneficiary
+      </span>
+      <div
+        class="flex flex-col gap-1 mt-0.5"
+      >
+        <div
+          class="flex items-center gap-2 flex-wrap"
+        >
+          <span
+            class="text-sm font-mono text-zinc-300 break-all"
+            title="GMOCKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHQF"
+          >
+            GMOC...HQF
+          </span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Total
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        10.0
+         XLM
+      </p>
+      <p
+        class="text-zinc-500 text-xs"
+      >
+        $1.20
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Claimed
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        0.0
+         XLM
+      </p>
+      <p
+        class="text-zinc-500 text-xs"
+      >
+        $0.00
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Starts
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        Jun 27, 2026
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Ends
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        Jun 27, 2027
+      </p>
+    </div>
+    <div
+      class="col-span-2"
+    >
+      <span
+        class="text-zinc-600"
+      >
+        Token Contract
+      </span>
+      <p
+        class="font-mono text-zinc-300 mt-0.5 break-all"
+      >
+        native
+      </p>
+    </div>
+  </div>
+  <div>
+    <div
+      class="flex justify-between items-center text-xs text-zinc-500 mb-1.5"
+    >
+      <div
+        class="flex items-center gap-3"
+      >
+        <span
+          class="flex items-center gap-1"
+        >
+          <span
+            aria-hidden="true"
+            class="inline-block w-2 h-2 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500"
+          />
+          Vested 
+          8
+          %
+        </span>
+        <span
+          class="flex items-center gap-1"
+        >
+          <span
+            aria-hidden="true"
+            class="inline-block w-2 h-2 rounded-full bg-emerald-500"
+          />
+          Claimed 
+          0
+          %
+        </span>
+      </div>
+      <span
+        class="text-zinc-600"
+      >
+        10.0
+         
+        Token (native)
+      </span>
+    </div>
+    <div
+      aria-label="Vesting progress: 8% vested, 0% claimed"
+      aria-valuemax="100"
+      aria-valuemin="0"
+      aria-valuenow="8"
+      class="relative h-2.5 rounded-full bg-white/5 overflow-hidden"
+      role="progressbar"
+    >
+      <div
+        class="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500 transition-all duration-700"
+        style="width: 8%;"
+      />
+    </div>
+    <p
+      class="text-xs text-zinc-500 mt-1.5"
+    >
+      Unlocks on
+       
+      <span
+        class="text-zinc-300"
+      >
+        Sep 25, 2026
+      </span>
+       
+      <span
+        class="text-violet-400"
+      >
+        (
+        0d 0h 0m
+        )
+      </span>
+    </p>
+  </div>
+  <div>
+    <button
+      class="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+    >
+      Show chart ▼
+    </button>
+  </div>
+  <div
+    class="flex flex-col sm:flex-row gap-2 mt-1"
+  >
+    <button
+      class="btn-primary text-xs rounded-lg px-3 py-1.5 font-semibold text-white flex-1 sm:flex-auto truncate"
+    >
+      <span
+        class="sm:hidden"
+      >
+        Claim 
+        0.8
+         XLM
+      </span>
+      <span
+        class="hidden sm:inline"
+      >
+        Claim 
+        0.8
+         XLM
+         ($0.10)
+      </span>
+    </button>
+  </div>
+</div>
+`;
+
+exports[`ScheduleCard snapshots > renders a graded schedule with milestones > schedule-graded 1`] = `
+<div
+  class="card p-5 flex flex-col gap-3"
+>
+  <div
+    class="flex items-start justify-between"
+  >
+    <div>
+      <div
+        class="flex items-center gap-2"
+      >
+        <a
+          class="text-sm font-semibold text-white hover:text-violet-300 transition-colors"
+          href="/app/schedule/1"
+        >
+          Schedule #
+          1
+        </a>
+        <button
+          aria-label="Copy schedule 1"
+          class="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors border-white/10 bg-white/5 text-zinc-400 hover:border-white/20 hover:text-white "
+          title="Copy schedule 1"
+          type="button"
+        >
+          <svg
+            aria-hidden="true"
+            fill="none"
+            height="12"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            viewBox="0 0 24 24"
+            width="12"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <rect
+              height="13"
+              rx="2"
+              width="13"
+              x="9"
+              y="9"
+            />
+            <path
+              d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+            />
+          </svg>
+          <span>
+            Copy
+          </span>
+        </button>
+      </div>
+      <div
+        class="flex items-center gap-1.5 mt-0.5 flex-wrap"
+      >
+        <span
+          class="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20"
+        >
+          Graded
+        </span>
+        <span
+          class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-zinc-700/40 text-zinc-400 border border-zinc-700/60"
+        >
+          revocable
+        </span>
+      </div>
+    </div>
+    <span
+      class="text-xs font-medium px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-400"
+    >
+      Vesting
+    </span>
+  </div>
+  <div
+    class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-zinc-400"
+  >
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Grantor
+      </span>
+      <div
+        class="flex flex-col gap-1 mt-0.5"
+      >
+        <div
+          class="flex items-center gap-2 flex-wrap"
+        >
+          <span
+            class="text-sm font-mono text-zinc-300 break-all"
+            title="GGRANTORAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANHTGK"
+          >
+            GGRA...TGK
+          </span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Beneficiary
+      </span>
+      <div
+        class="flex flex-col gap-1 mt-0.5"
+      >
+        <div
+          class="flex items-center gap-2 flex-wrap"
+        >
+          <span
+            class="text-sm font-mono text-zinc-300 break-all"
+            title="GMOCKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHQF"
+          >
+            GMOC...HQF
+          </span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Total
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        10.0
+         XLM
+      </p>
+      <p
+        class="text-zinc-500 text-xs"
+      >
+        $1.20
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Claimed
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        0.0
+         XLM
+      </p>
+      <p
+        class="text-zinc-500 text-xs"
+      >
+        $0.00
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Starts
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        Jun 27, 2026
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Ends
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        Jun 27, 2027
+      </p>
+    </div>
+    <div
+      class="col-span-2"
+    >
+      <span
+        class="text-zinc-600"
+      >
+        Token Contract
+      </span>
+      <p
+        class="font-mono text-zinc-300 mt-0.5 break-all"
+      >
+        native
+      </p>
+    </div>
+  </div>
+  <div>
+    <div
+      class="flex flex-col gap-1.5"
+    >
+      <p
+        class="text-xs text-zinc-600 uppercase tracking-wider mb-0.5"
+      >
+        Milestones
+      </p>
+      <div
+        class="flex items-center gap-2 text-xs"
+      >
+        <span
+          aria-hidden="true"
+          class="text-emerald-400"
+        >
+          ✓
+        </span>
+        <span
+          class="text-zinc-300"
+        >
+          25
+          % — 
+          Apr 2026
+        </span>
+      </div>
+      <div
+        class="flex items-center gap-2 text-xs"
+      >
+        <span
+          aria-hidden="true"
+          class="text-emerald-400"
+        >
+          ✓
+        </span>
+        <span
+          class="text-zinc-300"
+        >
+          50
+          % — 
+          Jun 2026
+        </span>
+      </div>
+      <div
+        class="flex items-center gap-2 text-xs"
+      >
+        <span
+          aria-hidden="true"
+          class="text-zinc-600"
+        >
+          ○
+        </span>
+        <span
+          class="text-zinc-500"
+        >
+          75
+          % — 
+          Sep 2026
+        </span>
+      </div>
+      <div
+        class="flex items-center gap-2 text-xs"
+      >
+        <span
+          aria-hidden="true"
+          class="text-zinc-600"
+        >
+          ○
+        </span>
+        <span
+          class="text-zinc-500"
+        >
+          100
+          % — 
+          Nov 2026
+        </span>
+      </div>
+    </div>
+  </div>
+  <div>
+    <button
+      class="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+    >
+      Show chart ▼
+    </button>
+  </div>
+  <div
+    class="flex flex-col sm:flex-row gap-2 mt-1"
+  >
+    <button
+      class="btn-primary text-xs rounded-lg px-3 py-1.5 font-semibold text-white flex-1 sm:flex-auto truncate"
+    >
+      <span
+        class="sm:hidden"
+      >
+        Claim 
+        7.5
+         XLM
+      </span>
+      <span
+        class="hidden sm:inline"
+      >
+        Claim 
+        7.5
+         XLM
+         ($0.90)
+      </span>
+    </button>
+  </div>
+</div>
+`;
+
+exports[`ScheduleCard snapshots > renders the fully vested state > schedule-fully-vested 1`] = `
+<div
+  class="card p-5 flex flex-col gap-3"
+>
+  <div
+    class="flex items-start justify-between"
+  >
+    <div>
+      <div
+        class="flex items-center gap-2"
+      >
+        <a
+          class="text-sm font-semibold text-white hover:text-violet-300 transition-colors"
+          href="/app/schedule/1"
+        >
+          Schedule #
+          1
+        </a>
+        <button
+          aria-label="Copy schedule 1"
+          class="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors border-white/10 bg-white/5 text-zinc-400 hover:border-white/20 hover:text-white "
+          title="Copy schedule 1"
+          type="button"
+        >
+          <svg
+            aria-hidden="true"
+            fill="none"
+            height="12"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            viewBox="0 0 24 24"
+            width="12"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <rect
+              height="13"
+              rx="2"
+              width="13"
+              x="9"
+              y="9"
+            />
+            <path
+              d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+            />
+          </svg>
+          <span>
+            Copy
+          </span>
+        </button>
+      </div>
+      <div
+        class="flex items-center gap-1.5 mt-0.5 flex-wrap"
+      >
+        <span
+          class="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20"
+        >
+          Linear
+        </span>
+        <span
+          class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-zinc-700/40 text-zinc-400 border border-zinc-700/60"
+        >
+          revocable
+        </span>
+      </div>
+    </div>
+    <span
+      class="text-xs font-medium px-2 py-0.5 rounded-full bg-green-500/10 text-green-400"
+    >
+      Fully Vested
+    </span>
+  </div>
+  <div
+    class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-zinc-400"
+  >
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Grantor
+      </span>
+      <div
+        class="flex flex-col gap-1 mt-0.5"
+      >
+        <div
+          class="flex items-center gap-2 flex-wrap"
+        >
+          <span
+            class="text-sm font-mono text-zinc-300 break-all"
+            title="GGRANTORAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANHTGK"
+          >
+            GGRA...TGK
+          </span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Beneficiary
+      </span>
+      <div
+        class="flex flex-col gap-1 mt-0.5"
+      >
+        <div
+          class="flex items-center gap-2 flex-wrap"
+        >
+          <span
+            class="text-sm font-mono text-zinc-300 break-all"
+            title="GMOCKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHQF"
+          >
+            GMOC...HQF
+          </span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Total
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        10.0
+         XLM
+      </p>
+      <p
+        class="text-zinc-500 text-xs"
+      >
+        $1.20
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Claimed
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        10.0
+         XLM
+      </p>
+      <p
+        class="text-zinc-500 text-xs"
+      >
+        $1.20
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Starts
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        Jun 22, 2025
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Ends
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        Jun 22, 2026
+      </p>
+    </div>
+    <div
+      class="col-span-2"
+    >
+      <span
+        class="text-zinc-600"
+      >
+        Token Contract
+      </span>
+      <p
+        class="font-mono text-zinc-300 mt-0.5 break-all"
+      >
+        native
+      </p>
+    </div>
+  </div>
+  <div>
+    <div
+      class="flex justify-between items-center text-xs text-zinc-500 mb-1.5"
+    >
+      <div
+        class="flex items-center gap-3"
+      >
+        <span
+          class="flex items-center gap-1"
+        >
+          <span
+            aria-hidden="true"
+            class="inline-block w-2 h-2 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500"
+          />
+          Vested 
+          100
+          %
+        </span>
+        <span
+          class="flex items-center gap-1"
+        >
+          <span
+            aria-hidden="true"
+            class="inline-block w-2 h-2 rounded-full bg-emerald-500"
+          />
+          Claimed 
+          100
+          %
+        </span>
+      </div>
+      <span
+        class="text-zinc-600"
+      >
+        10.0
+         
+        Token (native)
+      </span>
+    </div>
+    <div
+      aria-label="Vesting progress: 100% vested, 100% claimed"
+      aria-valuemax="100"
+      aria-valuemin="0"
+      aria-valuenow="100"
+      class="relative h-2.5 rounded-full bg-white/5 overflow-hidden"
+      role="progressbar"
+    >
+      <div
+        class="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500 transition-all duration-700"
+        style="width: 100%;"
+      />
+      <div
+        class="absolute inset-y-0 left-0 rounded-full bg-emerald-500/80 transition-all duration-700"
+        style="width: 100%;"
+      />
+    </div>
+  </div>
+  <div>
+    <button
+      class="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+    >
+      Show chart ▼
+    </button>
+  </div>
+  <div
+    class="flex flex-col sm:flex-row gap-2 mt-1"
+  />
+</div>
+`;
+
+exports[`ScheduleCard snapshots > renders the paused state > schedule-paused 1`] = `
+<div
+  class="card p-5 flex flex-col gap-3"
+>
+  <div
+    class="flex items-start justify-between"
+  >
+    <div>
+      <div
+        class="flex items-center gap-2"
+      >
+        <a
+          class="text-sm font-semibold text-white hover:text-violet-300 transition-colors"
+          href="/app/schedule/1"
+        >
+          Schedule #
+          1
+        </a>
+        <button
+          aria-label="Copy schedule 1"
+          class="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors border-white/10 bg-white/5 text-zinc-400 hover:border-white/20 hover:text-white "
+          title="Copy schedule 1"
+          type="button"
+        >
+          <svg
+            aria-hidden="true"
+            fill="none"
+            height="12"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            viewBox="0 0 24 24"
+            width="12"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <rect
+              height="13"
+              rx="2"
+              width="13"
+              x="9"
+              y="9"
+            />
+            <path
+              d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+            />
+          </svg>
+          <span>
+            Copy
+          </span>
+        </button>
+      </div>
+      <div
+        class="flex items-center gap-1.5 mt-0.5 flex-wrap"
+      >
+        <span
+          class="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20"
+        >
+          Linear
+        </span>
+        <span
+          class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-zinc-700/40 text-zinc-400 border border-zinc-700/60"
+        >
+          revocable
+        </span>
+      </div>
+    </div>
+    <span
+      class="text-xs font-medium px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-400"
+    >
+      Vesting
+    </span>
+  </div>
+  <div
+    class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-zinc-400"
+  >
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Grantor
+      </span>
+      <div
+        class="flex flex-col gap-1 mt-0.5"
+      >
+        <div
+          class="flex items-center gap-2 flex-wrap"
+        >
+          <span
+            class="text-sm font-mono text-zinc-300 break-all"
+            title="GGRANTORAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANHTGK"
+          >
+            GGRA...TGK
+          </span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Beneficiary
+      </span>
+      <div
+        class="flex flex-col gap-1 mt-0.5"
+      >
+        <div
+          class="flex items-center gap-2 flex-wrap"
+        >
+          <span
+            class="text-sm font-mono text-zinc-300 break-all"
+            title="GMOCKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHQF"
+          >
+            GMOC...HQF
+          </span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Total
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        10.0
+         XLM
+      </p>
+      <p
+        class="text-zinc-500 text-xs"
+      >
+        $1.20
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Claimed
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        0.0
+         XLM
+      </p>
+      <p
+        class="text-zinc-500 text-xs"
+      >
+        $0.00
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Starts
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        Jun 27, 2026
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Ends
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        Jun 27, 2027
+      </p>
+    </div>
+    <div
+      class="col-span-2"
+    >
+      <span
+        class="text-zinc-600"
+      >
+        Token Contract
+      </span>
+      <p
+        class="font-mono text-zinc-300 mt-0.5 break-all"
+      >
+        native
+      </p>
+    </div>
+  </div>
+  <div>
+    <div
+      class="flex justify-between items-center text-xs text-zinc-500 mb-1.5"
+    >
+      <div
+        class="flex items-center gap-3"
+      >
+        <span
+          class="flex items-center gap-1"
+        >
+          <span
+            aria-hidden="true"
+            class="inline-block w-2 h-2 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500"
+          />
+          Vested 
+          8
+          %
+        </span>
+        <span
+          class="flex items-center gap-1"
+        >
+          <span
+            aria-hidden="true"
+            class="inline-block w-2 h-2 rounded-full bg-emerald-500"
+          />
+          Claimed 
+          0
+          %
+        </span>
+      </div>
+      <span
+        class="text-zinc-600"
+      >
+        10.0
+         
+        Token (native)
+      </span>
+    </div>
+    <div
+      aria-label="Vesting progress: 8% vested, 0% claimed"
+      aria-valuemax="100"
+      aria-valuemin="0"
+      aria-valuenow="8"
+      class="relative h-2.5 rounded-full bg-white/5 overflow-hidden"
+      role="progressbar"
+    >
+      <div
+        class="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500 transition-all duration-700"
+        style="width: 8%;"
+      />
+    </div>
+  </div>
+  <div>
+    <button
+      class="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+    >
+      Show chart ▼
+    </button>
+  </div>
+  <div
+    class="flex flex-col sm:flex-row gap-2 mt-1"
+  >
+    <button
+      class="btn-primary text-xs rounded-lg px-3 py-1.5 font-semibold text-white flex-1 sm:flex-auto truncate"
+    >
+      <span
+        class="sm:hidden"
+      >
+        Claim 
+        0.8
+         XLM
+      </span>
+      <span
+        class="hidden sm:inline"
+      >
+        Claim 
+        0.8
+         XLM
+         ($0.10)
+      </span>
+    </button>
+  </div>
+</div>
+`;
+
+exports[`ScheduleCard snapshots > renders the revoked state > schedule-revoked 1`] = `
+<div
+  class="card p-5 flex flex-col gap-3"
+>
+  <div
+    class="flex items-start justify-between"
+  >
+    <div>
+      <div
+        class="flex items-center gap-2"
+      >
+        <a
+          class="text-sm font-semibold text-white hover:text-violet-300 transition-colors"
+          href="/app/schedule/1"
+        >
+          Schedule #
+          1
+        </a>
+        <button
+          aria-label="Copy schedule 1"
+          class="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors border-white/10 bg-white/5 text-zinc-400 hover:border-white/20 hover:text-white "
+          title="Copy schedule 1"
+          type="button"
+        >
+          <svg
+            aria-hidden="true"
+            fill="none"
+            height="12"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            viewBox="0 0 24 24"
+            width="12"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <rect
+              height="13"
+              rx="2"
+              width="13"
+              x="9"
+              y="9"
+            />
+            <path
+              d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+            />
+          </svg>
+          <span>
+            Copy
+          </span>
+        </button>
+      </div>
+      <div
+        class="flex items-center gap-1.5 mt-0.5 flex-wrap"
+      >
+        <span
+          class="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20"
+        >
+          Linear
+        </span>
+        <span
+          class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-zinc-700/40 text-zinc-400 border border-zinc-700/60"
+        >
+          revocable
+        </span>
+      </div>
+    </div>
+    <span
+      class="text-xs font-medium px-2 py-0.5 rounded-full bg-red-500/10 text-red-400"
+    >
+      Revoked
+    </span>
+  </div>
+  <div
+    class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-zinc-400"
+  >
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Grantor
+      </span>
+      <div
+        class="flex flex-col gap-1 mt-0.5"
+      >
+        <div
+          class="flex items-center gap-2 flex-wrap"
+        >
+          <span
+            class="text-sm font-mono text-zinc-300 break-all"
+            title="GGRANTORAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANHTGK"
+          >
+            GGRA...TGK
+          </span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Beneficiary
+      </span>
+      <div
+        class="flex flex-col gap-1 mt-0.5"
+      >
+        <div
+          class="flex items-center gap-2 flex-wrap"
+        >
+          <span
+            class="text-sm font-mono text-zinc-300 break-all"
+            title="GMOCKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHQF"
+          >
+            GMOC...HQF
+          </span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Total
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        10.0
+         XLM
+      </p>
+      <p
+        class="text-zinc-500 text-xs"
+      >
+        $1.20
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Claimed
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        3.0
+         XLM
+      </p>
+      <p
+        class="text-zinc-500 text-xs"
+      >
+        $0.36
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Starts
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        Jun 27, 2026
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Ends
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        Jun 27, 2027
+      </p>
+    </div>
+    <div
+      class="col-span-2"
+    >
+      <span
+        class="text-zinc-600"
+      >
+        Token Contract
+      </span>
+      <p
+        class="font-mono text-zinc-300 mt-0.5 break-all"
+      >
+        native
+      </p>
+    </div>
+  </div>
+  <div>
+    <div
+      class="flex justify-between items-center text-xs text-zinc-500 mb-1.5"
+    >
+      <div
+        class="flex items-center gap-3"
+      >
+        <span
+          class="flex items-center gap-1"
+        >
+          <span
+            aria-hidden="true"
+            class="inline-block w-2 h-2 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500"
+          />
+          Vested 
+          50
+          %
+        </span>
+        <span
+          class="flex items-center gap-1"
+        >
+          <span
+            aria-hidden="true"
+            class="inline-block w-2 h-2 rounded-full bg-emerald-500"
+          />
+          Claimed 
+          30
+          %
+        </span>
+      </div>
+      <span
+        class="text-zinc-600"
+      >
+        10.0
+         
+        Token (native)
+      </span>
+    </div>
+    <div
+      aria-label="Vesting progress: 50% vested, 30% claimed"
+      aria-valuemax="100"
+      aria-valuemin="0"
+      aria-valuenow="50"
+      class="relative h-2.5 rounded-full bg-white/5 overflow-hidden"
+      role="progressbar"
+    >
+      <div
+        class="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500 transition-all duration-700"
+        style="width: 50%;"
+      />
+      <div
+        class="absolute inset-y-0 left-0 rounded-full bg-emerald-500/80 transition-all duration-700"
+        style="width: 30%;"
+      />
+    </div>
+  </div>
+  <div>
+    <button
+      class="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+    >
+      Show chart ▼
+    </button>
+  </div>
+</div>
+`;
+
+exports[`ScheduleCard snapshots > renders the vesting (active) state > schedule-vesting 1`] = `
+<div
+  class="card p-5 flex flex-col gap-3"
+>
+  <div
+    class="flex items-start justify-between"
+  >
+    <div>
+      <div
+        class="flex items-center gap-2"
+      >
+        <a
+          class="text-sm font-semibold text-white hover:text-violet-300 transition-colors"
+          href="/app/schedule/1"
+        >
+          Schedule #
+          1
+        </a>
+        <button
+          aria-label="Copy schedule 1"
+          class="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors border-white/10 bg-white/5 text-zinc-400 hover:border-white/20 hover:text-white "
+          title="Copy schedule 1"
+          type="button"
+        >
+          <svg
+            aria-hidden="true"
+            fill="none"
+            height="12"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            viewBox="0 0 24 24"
+            width="12"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <rect
+              height="13"
+              rx="2"
+              width="13"
+              x="9"
+              y="9"
+            />
+            <path
+              d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+            />
+          </svg>
+          <span>
+            Copy
+          </span>
+        </button>
+      </div>
+      <div
+        class="flex items-center gap-1.5 mt-0.5 flex-wrap"
+      >
+        <span
+          class="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20"
+        >
+          Linear
+        </span>
+        <span
+          class="text-[10px] font-medium px-1.5 py-0.5 rounded bg-zinc-700/40 text-zinc-400 border border-zinc-700/60"
+        >
+          revocable
+        </span>
+      </div>
+    </div>
+    <span
+      class="text-xs font-medium px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-400"
+    >
+      Vesting
+    </span>
+  </div>
+  <div
+    class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-zinc-400"
+  >
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Grantor
+      </span>
+      <div
+        class="flex flex-col gap-1 mt-0.5"
+      >
+        <div
+          class="flex items-center gap-2 flex-wrap"
+        >
+          <span
+            class="text-sm font-mono text-zinc-300 break-all"
+            title="GGRANTORAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANHTGK"
+          >
+            GGRA...TGK
+          </span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Beneficiary
+      </span>
+      <div
+        class="flex flex-col gap-1 mt-0.5"
+      >
+        <div
+          class="flex items-center gap-2 flex-wrap"
+        >
+          <span
+            class="text-sm font-mono text-zinc-300 break-all"
+            title="GMOCKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHQF"
+          >
+            GMOC...HQF
+          </span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Total
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        10.0
+         XLM
+      </p>
+      <p
+        class="text-zinc-500 text-xs"
+      >
+        $1.20
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Claimed
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        0.0
+         XLM
+      </p>
+      <p
+        class="text-zinc-500 text-xs"
+      >
+        $0.00
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Starts
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        Jun 27, 2026
+      </p>
+    </div>
+    <div>
+      <span
+        class="text-zinc-600"
+      >
+        Ends
+      </span>
+      <p
+        class="text-zinc-300 mt-0.5"
+      >
+        Jun 27, 2027
+      </p>
+    </div>
+    <div
+      class="col-span-2"
+    >
+      <span
+        class="text-zinc-600"
+      >
+        Token Contract
+      </span>
+      <p
+        class="font-mono text-zinc-300 mt-0.5 break-all"
+      >
+        native
+      </p>
+    </div>
+  </div>
+  <div>
+    <div
+      class="flex justify-between items-center text-xs text-zinc-500 mb-1.5"
+    >
+      <div
+        class="flex items-center gap-3"
+      >
+        <span
+          class="flex items-center gap-1"
+        >
+          <span
+            aria-hidden="true"
+            class="inline-block w-2 h-2 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500"
+          />
+          Vested 
+          8
+          %
+        </span>
+        <span
+          class="flex items-center gap-1"
+        >
+          <span
+            aria-hidden="true"
+            class="inline-block w-2 h-2 rounded-full bg-emerald-500"
+          />
+          Claimed 
+          0
+          %
+        </span>
+      </div>
+      <span
+        class="text-zinc-600"
+      >
+        10.0
+         
+        Token (native)
+      </span>
+    </div>
+    <div
+      aria-label="Vesting progress: 8% vested, 0% claimed"
+      aria-valuemax="100"
+      aria-valuemin="0"
+      aria-valuenow="8"
+      class="relative h-2.5 rounded-full bg-white/5 overflow-hidden"
+      role="progressbar"
+    >
+      <div
+        class="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500 transition-all duration-700"
+        style="width: 8%;"
+      />
+    </div>
+  </div>
+  <div>
+    <button
+      class="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+    >
+      Show chart ▼
+    </button>
+  </div>
+  <div
+    class="flex flex-col sm:flex-row gap-2 mt-1"
+  >
+    <button
+      class="btn-primary text-xs rounded-lg px-3 py-1.5 font-semibold text-white flex-1 sm:flex-auto truncate"
+    >
+      <span
+        class="sm:hidden"
+      >
+        Claim 
+        0.8
+         XLM
+      </span>
+      <span
+        class="hidden sm:inline"
+      >
+        Claim 
+        0.8
+         XLM
+         ($0.10)
+      </span>
+    </button>
+  </div>
+</div>
+`;

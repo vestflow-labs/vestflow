@@ -93,10 +93,12 @@ class VestFlowWidget extends HTMLElement {
     const schedule = this.data.schedule;
     const now = Math.floor(Date.now() / 1000);
     const endTime = schedule.start_time + schedule.duration;
-    const progress = Math.max(
-      0,
-      Math.min(100, ((now - schedule.start_time) / schedule.duration) * 100)
-    );
+    const progress = schedule.duration <= 0
+      ? (now >= schedule.start_time ? 100 : 0)
+      : Math.max(
+          0,
+          Math.min(100, ((now - schedule.start_time) / schedule.duration) * 100)
+        );
 
     const formatAmount = (amount: string) => {
       const num = Number(amount) / 10_000_000;

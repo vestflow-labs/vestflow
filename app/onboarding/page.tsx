@@ -174,7 +174,7 @@ export default function OnboardingPage() {
   const { publicKey, setPublicKey } = useWallet();
   const router = useRouter();
 
-  const [step, setStep] = useState(0);
+  const [step, setStep] = useState(1);
   const [err, setErr] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [checkingFreighter, setCheckingFreighter] = useState(false);
@@ -229,7 +229,14 @@ export default function OnboardingPage() {
     router.push("/app");
   };
 
-  if (step === 0) return null;
+  if (step === 0) return (
+    <>
+      <Navbar />
+      <main className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-violet-500" />
+      </main>
+    </>
+  );
 
   return (
     <>

@@ -2,6 +2,9 @@
 import { useEffect, useMemo, useState } from "react";
 import Navbar from "@/components/Navbar";
 import ScheduleCard from "@/components/ScheduleCard";
+import RecentlyViewedSchedules from "@/components/RecentlyViewedSchedules";
+import SearchFilterBar from "@/components/SearchFilterBar";
+import { matchesAddressOrToken } from "@/lib/tokens";
 import { ScheduleListSkeleton } from "@/components/ScheduleCardSkeleton";
 import {
   NoSchedulesEmptyState,
@@ -13,21 +16,44 @@ import {
   getAllSchedules,
   getClaimableBulk,
   getVestedAmountBulk,
+  getGrantorScheduleIds,
+  getBeneficiaryScheduleIds,
+  getScheduleBatch,
   ScheduleData,
   vestingProgress,
   NATIVE_TOKEN,
+  NETWORK,
+  stroopsToXlm,
+  revokeSchedule,
+  setStream,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import { useCountUp } from "@/hooks/useCountUp";
 import { useAddressBook } from "@/hooks/useAddressBook";
+import { useRecentlyViewed } from "@/hooks/useRecentlyViewed";
+import { useStreamNotifications } from "@/hooks/useStreamNotifications";
 import Link from "next/link";
 
 import { buildCombinedExportCSV, downloadCSV } from "@/lib/csvExport";
+import WalletQrModal from "@/components/WalletQrModal";
+import GiveModal from "@/components/GiveModal";
+import OnboardingTour from "@/components/OnboardingTour";
+import CycleCountdown from "@/components/CycleCountdown";
+import IncomingStreamsList from "@/components/IncomingStreamsList";
+import StreamListSkeleton from "@/components/StreamListSkeleton";
+import TopUpModal from "@/components/TopUpModal";
+import StreamExpiryBanner from "@/components/StreamExpiryBanner";
+import StreamBalanceBadge from "@/components/StreamBalanceBadge";
+import ActivityFeed from "@/components/ActivityFeed";
+import AnimatedClaimableCard from "@/components/AnimatedClaimableCard";
+import { balanceStatus, isExpiringSoon, maxEndTime } from "@/lib/streamHealth";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
 type StatusFilter = "all" | "active" | "completed" | "revoked";
+type KindFilter = "all" | "Linear" | "Cliff" | "LinearWithCliff" | "Graded";
 type SortKey = "newest" | "ending-soon" | "largest-amount" | "status";
 const PAGE_SIZE = 10;
+const STREAM_BALANCE_POLL_MS = 30_000;
 
 interface DashboardStats {
   totalGranted: bigint;
@@ -35,6 +61,35 @@ interface DashboardStats {
   claimableNow: bigint;
   totalVested: bigint;
   activeSchedules: number;
+}
+
+interface IndexedEvent {
+  id: string;
+  event_type: string;
+  ledger: number;
+  ledger_closed_at: string;
+  grantor?: string | null;
+  beneficiary?: string | null;
+  amount?: string | null;
+  token?: string | null;
+}
+
+interface StreamTokenSummary {
+  token: string;
+  dripped: bigint;
+  received: bigint;
+}
+
+function tokenLabel(token: string): string {
+  if (token === NATIVE_TOKEN) return "XLM";
+  return `${token.slice(0, 6)}...${token.slice(-4)}`;
+}
+
+function formatAmount(value: bigint): string {
+  return Number(stroopsToXlm(value)).toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 4,
+  });
 }
 
 // ── Animated stats bar (#94) ──────────────────────────────────────────────────
@@ -68,7 +123,7 @@ function AnimatedStatCard({
   );
 }
 
-function AnimatedStats({ stats }: { stats: DashboardStats }) {
+function AnimatedStats({ stats, schedules, publicKey }: { stats: DashboardStats; schedules: ScheduleData[]; publicKey: string }) {
   const [fired, setFired] = useState(false);
   useEffect(() => {
     // Trigger animation on the frame after mount so we get the count-up from 0
@@ -76,7 +131,8 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
     return () => cancelAnimationFrame(id);
   }, []);
 
-  const toXlm = (v: bigint) => Number(v) / 10_000_000;
+  const toXlm = (v: bigint) => parseFloat(stroopsToXlm(v));
+  const beneficiarySchedules = schedules.filter(s => s.beneficiary === publicKey);
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
@@ -101,12 +157,9 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
         decimals={4}
         enabled={fired}
       />
-      <AnimatedStatCard
-        label="Claimable Now"
-        value={toXlm(stats.claimableNow)}
-        unit="XLM available"
-        color="text-emerald-400"
-        decimals={4}
+      <AnimatedClaimableCard
+        value={stats.claimableNow}
+        beneficiarySchedules={beneficiarySchedules}
         enabled={fired}
       />
       <AnimatedStatCard
@@ -120,27 +173,419 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
   );
 }
 
+function StreamsAnalyticsSummary({ publicKey, refreshKey }: { publicKey: string; refreshKey: number }) {
+  const [summaries, setSummaries] = useState<StreamTokenSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetch(`/api/events?address=${publicKey}&network=${NETWORK}&limit=200`)
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("events unavailable")))
+      .then((data) => {
+        if (cancelled) return;
+        const byToken = new Map<string, StreamTokenSummary>();
+        for (const event of (data.events ?? []) as IndexedEvent[]) {
+          if (event.event_type !== "given" && event.event_type !== "collected") continue;
+          const token = event.token ?? NATIVE_TOKEN;
+          const amount = BigInt(event.amount ?? "0");
+          const current = byToken.get(token) ?? { token, dripped: 0n, received: 0n };
+          if (event.event_type === "given") {
+            if (event.grantor === publicKey) current.dripped += amount;
+            if (event.beneficiary === publicKey) current.received += amount;
+          }
+          if (event.event_type === "collected" && event.beneficiary === publicKey) {
+            current.received += amount;
+          }
+          byToken.set(token, current);
+        }
+        setSummaries([...byToken.values()].sort((a, b) => tokenLabel(a.token).localeCompare(tokenLabel(b.token))));
+      })
+      .catch(() => {
+        if (!cancelled) setSummaries([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [publicKey, refreshKey]);
+
+  if (loading) {
+    return (
+      <div className="card p-4 mb-6">
+        <p className="text-sm text-zinc-400">Loading stream analytics...</p>
+      </div>
+    );
+  }
+
+  if (summaries.length === 0) return null;
+
+  return (
+    <div className="card p-5 mb-6">
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <div>
+          <h2 className="text-lg font-semibold">Streams Analytics</h2>
+          <p className="text-sm text-zinc-500">All-time dripped and received totals by token</p>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {summaries.map((summary) => {
+          const net = summary.received - summary.dripped;
+          const netPositive = net >= 0n;
+          return (
+            <div key={summary.token} className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+              <p className="text-xs text-zinc-500 mb-3 font-mono">{tokenLabel(summary.token)}</p>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between gap-3">
+                  <span className="text-zinc-500">Dripped</span>
+                  <span className="text-red-300 tabular-nums">{formatAmount(summary.dripped)}</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="text-zinc-500">Received</span>
+                  <span className="text-emerald-300 tabular-nums">{formatAmount(summary.received)}</span>
+                </div>
+                <div className="flex justify-between gap-3 border-t border-white/10 pt-2">
+                  <span className="text-zinc-400">Net</span>
+                  <span className={`tabular-nums font-semibold ${netPositive ? "text-emerald-300" : "text-red-300"}`}>
+                    {netPositive ? "+" : "-"}{formatAmount(netPositive ? net : -net)}
+                  </span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Outgoing Streams List (#632) ──────────────────────────────────────────────
+
+function OutgoingStreamsList({
+  schedules,
+  publicKey,
+  claimableMap,
+  vestedMap,
+  onEdit,
+  onStop,
+  onTopUp,
+}: {
+  schedules: ScheduleData[];
+  publicKey: string;
+  claimableMap: Map<number, bigint>;
+  vestedMap: Map<number, bigint>;
+  onEdit: (s: ScheduleData) => void;
+  onStop: (s: ScheduleData) => void;
+  onTopUp: (s: ScheduleData) => void;
+}) {
+  const [outgoingTokenFilter, setOutgoingTokenFilter] = useState<string>("all");
+  const [outgoingPage, setOutgoingPage] = useState(1);
+  const PAGE_SIZE = 20;
+
+  const outgoing = schedules.filter(
+    (s) => s.grantor === publicKey && !s.revoked,
+  );
+
+  const uniqueOutgoingTokens = Array.from(new Set(outgoing.map(s => s.token))).sort();
+
+  const filteredOutgoing = outgoing.filter(s =>
+    outgoingTokenFilter === "all" || s.token === outgoingTokenFilter
+  );
+
+  if (outgoing.length === 0) return null;
+
+  const totalPages = Math.ceil(filteredOutgoing.length / PAGE_SIZE);
+  const startIdx = (outgoingPage - 1) * PAGE_SIZE;
+  const endIdx = startIdx + PAGE_SIZE;
+  const paginatedOutgoing = filteredOutgoing.slice(startIdx, endIdx);
+  const canGoNext = outgoingPage < totalPages;
+  const canGoPrev = outgoingPage > 1;
+
+  const handleOutgoingFilterChange = (token: string) => {
+    setOutgoingTokenFilter(token);
+    setOutgoingPage(1);
+  };
+
+  const now = Math.floor(Date.now() / 1000);
+
+  return (
+    <div className="card p-5 mb-6">
+      <div className="mb-4 flex items-center justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold">Outgoing Streams</h2>
+          <p className="text-sm text-zinc-500">All active vesting schedules sent from your wallet</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <label htmlFor="outgoing-token-filter" className="text-xs text-zinc-500">Filter by token:</label>
+          <select
+            id="outgoing-token-filter"
+            value={outgoingTokenFilter}
+            onChange={(e) => handleOutgoingFilterChange(e.target.value)}
+            className="text-xs bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5 text-zinc-300 outline-none focus:border-violet-500/50 transition-colors"
+          >
+            <option value="all">All tokens</option>
+            {uniqueOutgoingTokens.map(token => {
+              const isNative = token === NATIVE_TOKEN;
+              const label = isNative ? "XLM (Native)" : `${token.slice(0, 8)}...${token.slice(-4)}`;
+              return (
+                <option key={token} value={token}>
+                  {label}
+                </option>
+              );
+            })}
+          </select>
+        </div>
+      </div>
+      <div className="divide-y divide-white/10">
+        {paginatedOutgoing.map((s) => {
+          const ratePerSec = s.duration > 0 ? s.total_amount / BigInt(s.duration) : 0n;
+          const ratePerDay = ratePerSec * 86400n;
+          const endTime = s.start_time + s.duration;
+          const secsLeft = Math.max(0, endTime - now);
+          const daysLeft = Math.floor(secsLeft / 86400);
+          const isNative = s.token === NATIVE_TOKEN;
+          const tokenSym = isNative ? "XLM" : `${s.token.slice(0, 5)}…`;
+          const isBeneficiary = s.beneficiary === publicKey;
+          const claimable = claimableMap.get(s.id) ?? 0n;
+          const status = balanceStatus(s, vestedMap.get(s.id));
+          const expiringSoon = status === "healthy" && isExpiringSoon(s, now);
+
+          return (
+            <div key={s.id} className="py-4 text-sm">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0 flex-1 space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Link
+                    href={`/schedule/${s.id}`}
+                    className="font-semibold text-zinc-200 hover:text-violet-300 transition-colors"
+                  >
+                    Schedule #{s.id}
+                  </Link>
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-400 border border-violet-500/20">
+                    {s.kind === "LinearWithCliff" ? "Lin+Cliff" : s.kind}
+                  </span>
+                  <StreamBalanceBadge status={status} onTopUp={() => onTopUp(s)} />
+                </div>
+                <p className="text-zinc-500 font-mono text-xs truncate">
+                  → {s.beneficiary.slice(0, 10)}…{s.beneficiary.slice(-6)}
+                </p>
+                <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-zinc-500">
+                  <span>
+                    Rate:{" "}
+                    <span className="text-zinc-300">
+                      {stroopsToXlm(ratePerDay)} {tokenSym}/day
+                    </span>
+                  </span>
+                  <span>
+                    Remaining:{" "}
+                    <span className={daysLeft < 7 ? "text-amber-400" : "text-zinc-300"}>
+                      {daysLeft}d
+                    </span>
+                  </span>
+                  <span>
+                    Total:{" "}
+                    <span className="text-zinc-300">
+                      {stroopsToXlm(s.total_amount)} {tokenSym}
+                    </span>
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+                <button
+                  onClick={() => onEdit(s)}
+                  className="px-3 py-2 min-h-[44px] rounded-lg text-xs font-medium border border-white/10 text-zinc-300 hover:border-white/20 transition-colors"
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => onStop(s)}
+                  aria-label="Stop stream"
+                  className="px-3 py-2 min-h-[44px] rounded-lg text-xs font-medium bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 transition-colors"
+                >
+                  Stop stream
+                </button>
+                {isBeneficiary && claimable > 0n && (
+                  <button
+                    onClick={() => {
+                      // TODO: implement collect call
+                    }}
+                    className="px-3 py-2 min-h-[44px] rounded-lg text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-500 transition-colors flex items-center gap-2 grow sm:grow-0">
+                    Collect {stroopsToXlm(claimable)} XLM
+                  </button>
+                )}
+              </div>
+            </div>
+            {expiringSoon && (
+              <StreamExpiryBanner
+                scheduleId={s.id}
+                endTime={maxEndTime(s)}
+                onTopUp={() => onTopUp(s)}
+              />
+            )}
+            </div>
+          );
+        })}
+      </div>
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-4 mt-4 pt-4 border-t border-white/10">
+          <button
+            onClick={() => setOutgoingPage(Math.max(1, outgoingPage - 1))}
+            disabled={!canGoPrev}
+            className="px-4 py-2 text-sm font-medium border border-white/10 rounded-lg text-zinc-300 hover:border-white/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            aria-label="Previous page"
+          >
+            ← Previous
+          </button>
+          <span className="text-sm text-zinc-400">
+            Page {outgoingPage} of {totalPages}
+          </span>
+          <button
+            onClick={() => setOutgoingPage(Math.min(totalPages, outgoingPage + 1))}
+            disabled={!canGoNext}
+            className="px-4 py-2 text-sm font-medium border border-white/10 rounded-lg text-zinc-300 hover:border-white/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            aria-label="Next page"
+          >
+            Next →
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RecentGives({ publicKey, refreshKey }: { publicKey: string; refreshKey: number }) {
+  const [gives, setGives] = useState<IndexedEvent[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/events?address=${publicKey}&event_type=given&network=${NETWORK}&limit=50`)
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("gives unavailable")))
+      .then((data) => {
+        if (cancelled) return;
+        const sorted = ((data.events ?? []) as IndexedEvent[])
+          .filter((event) => event.event_type === "given")
+          .sort((a, b) => b.ledger - a.ledger)
+          .slice(0, 5);
+        setGives(sorted);
+      })
+      .catch(() => {
+        if (!cancelled) setGives([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [publicKey, refreshKey]);
+
+  if (gives.length === 0) return null;
+
+  return (
+    <div className="card p-5 mb-6">
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <div>
+          <h2 className="text-lg font-semibold">Recent Gives</h2>
+          <p className="text-sm text-zinc-500">Latest one-time gives sent or received</p>
+        </div>
+        <Link href="/app/history" className="text-sm text-violet-300 hover:text-violet-200 transition-colors">
+          See all
+        </Link>
+      </div>
+      <div className="divide-y divide-white/10">
+        {gives.map((give) => {
+          const sent = give.grantor === publicKey;
+          const counterparty = sent ? give.beneficiary : give.grantor;
+          return (
+            <div key={give.id} className="flex items-center justify-between gap-3 py-3 text-sm">
+              <div className="min-w-0">
+                <p className={`font-medium ${sent ? "text-red-300" : "text-emerald-300"}`}>
+                  {sent ? "Sent" : "Received"} {formatAmount(BigInt(give.amount ?? "0"))} {tokenLabel(give.token ?? NATIVE_TOKEN)}
+                </p>
+                {counterparty && (
+                  <Link
+                    href={`/app/profile/${encodeURIComponent(counterparty)}`}
+                    className="font-mono text-xs text-zinc-500 hover:text-violet-300 transition-colors"
+                  >
+                    {counterparty.slice(0, 10)}...{counterparty.slice(-6)}
+                  </Link>
+                )}
+              </div>
+              <time className="text-xs text-zinc-500 whitespace-nowrap" dateTime={give.ledger_closed_at}>
+                {new Date(give.ledger_closed_at).toLocaleDateString()}
+              </time>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RpcErrorBanner({ onDismiss }: { onDismiss: () => void }) {
+  return (
+    <div
+      role="alert"
+      className="flex items-start gap-3 mb-6 px-4 py-3 rounded-xl border border-red-500/30 bg-red-500/10 text-red-300 text-sm"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mt-0.5 shrink-0" aria-hidden="true">
+        <circle cx="12" cy="12" r="10" />
+        <line x1="12" y1="8" x2="12" y2="12" />
+        <line x1="12" y1="16" x2="12.01" y2="16" />
+      </svg>
+      <span className="flex-1">
+        Could not reach the Stellar RPC — check your connection and refresh.
+      </span>
+      <button
+        onClick={onDismiss}
+        aria-label="Dismiss error banner"
+        className="text-red-400 hover:text-red-200 transition-colors ml-2 leading-none"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const { publicKey } = useWallet();
   const { getLabel } = useAddressBook();
+  const { recentlyViewed } = useRecentlyViewed();
   const [schedules, setSchedules] = useState<ScheduleData[]>([]);
+  const [claimableMap, setClaimableMap] = useState<Map<number, bigint>>(new Map());
+  const [vestedMap, setVestedMap] = useState<Map<number, bigint>>(new Map());
+  const [topUpTarget, setTopUpTarget] = useState<ScheduleData | null>(null);
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
+  const [rpcError, setRpcError] = useState(false);
   const [roleFilter, setRoleFilter] = useState<RoleFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [tokenFilter, setTokenFilter] = useState<string>("all");
+  const [kindFilter, setKindFilter] = useState<KindFilter>("all");
   const [startDateFilter, setStartDateFilter] = useState<string>("");
   const [endDateFilter, setEndDateFilter] = useState<string>("");
   const [sortBy, setSortBy] = useState<SortKey>("newest");
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState("");
+  const [showQrModal, setShowQrModal] = useState(false);
+  const [showGiveModal, setShowGiveModal] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [stopConfirmSchedule, setStopConfirmSchedule] = useState<ScheduleData | null>(null);
+  const [stoppingId, setStoppingId] = useState<number | null>(null);
 
   const load = async () => {
     setLoading(true);
+    setRpcError(false);
     try {
-      const all = await getAllSchedules(publicKey ?? undefined);
       if (publicKey) {
-        const userSchedules = all.filter(s => s.grantor === publicKey || s.beneficiary === publicKey);
+        // Use the on-chain grantor/beneficiary index instead of fetching all schedules.
+        const [grantorIds, beneficiaryIds] = await Promise.all([
+          getGrantorScheduleIds(publicKey),
+          getBeneficiaryScheduleIds(publicKey),
+        ]);
+        const allIds = [...new Set([...grantorIds, ...beneficiaryIds])].sort((a, b) => a - b);
+        const userSchedules = allIds.length > 0
+          ? (await getScheduleBatch(allIds, publicKey)).filter(Boolean) as ScheduleData[]
+          : [];
         setSchedules(userSchedules);
 
         // Compute aggregate stats
@@ -148,12 +593,14 @@ export default function DashboardPage() {
         const claimableAmounts = await getClaimableBulk(userIds, publicKey);
         const vestedAmounts = await getVestedAmountBulk(userIds, publicKey);
         
-        const claimableMap = new Map<number, bigint>();
-        const vestedMap = new Map<number, bigint>();
+        const newClaimableMap = new Map<number, bigint>();
+        const newVestedMap = new Map<number, bigint>();
         userIds.forEach((id, i) => {
-          claimableMap.set(id, claimableAmounts[i] ?? 0n);
-          vestedMap.set(id, vestedAmounts[i] ?? 0n);
+          newClaimableMap.set(id, claimableAmounts[i] ?? 0n);
+          newVestedMap.set(id, vestedAmounts[i] ?? 0n);
         });
+        setClaimableMap(newClaimableMap);
+        setVestedMap(newVestedMap);
 
         const now = Math.floor(Date.now() / 1000);
         let totalGranted = 0n;
@@ -168,8 +615,8 @@ export default function DashboardPage() {
           }
           if (s.beneficiary === publicKey) {
             totalReceiving += s.total_amount;
-            claimableNow += claimableMap.get(s.id) ?? 0n;
-            totalVested += vestedMap.get(s.id) ?? 0n;
+            claimableNow += newClaimableMap.get(s.id) ?? 0n;
+            totalVested += newVestedMap.get(s.id) ?? 0n;
           }
           if (!s.revoked && vestingProgress(s, now) < 100) {
             activeSchedules++;
@@ -178,13 +625,81 @@ export default function DashboardPage() {
 
         setStats({ totalGranted, totalReceiving, claimableNow, totalVested, activeSchedules });
       } else {
+        const all = await getAllSchedules();
         setSchedules(all.slice(0, 6));
         setStats(null);
       }
-    } finally { setLoading(false); }
+    } catch (err) {
+      const isNetworkError =
+        err instanceof TypeError ||
+        (err instanceof Error && /fetch|network|rpc|connect|econnrefused|timeout/i.test(err.message));
+      if (isNetworkError) {
+        setRpcError(true);
+      }
+    } finally {
+      setLoading(false);
+      setRefreshKey((value) => value + 1);
+    }
   };
 
   useEffect(() => { load(); }, [publicKey]);
+
+  // Poll vested amounts of active outgoing streams so a stream whose balance
+  // hits zero is flagged within one polling cycle (#810).
+  useEffect(() => {
+    if (!publicKey) return;
+    const outgoingIds = schedules
+      .filter((s) => s.grantor === publicKey && !s.revoked)
+      .map((s) => s.id);
+    if (outgoingIds.length === 0) return;
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const amounts = await getVestedAmountBulk(outgoingIds, publicKey);
+        if (cancelled) return;
+        setVestedMap((prev) => {
+          const next = new Map(prev);
+          outgoingIds.forEach((id, i) => next.set(id, amounts[i] ?? 0n));
+          return next;
+        });
+      } catch {
+        // keep last known values; next cycle will retry
+      }
+    };
+    const id = setInterval(poll, STREAM_BALANCE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [publicKey, schedules]);
+
+  // Keyboard shortcut Shift+G to open Give modal (#816)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.shiftKey && e.key === 'G') {
+        const target = e.target as HTMLElement;
+        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
+          return;
+        }
+        e.preventDefault();
+        setShowGiveModal(true);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  // Stream notifications for incoming streams
+  useStreamNotifications(publicKey ? schedules : null, publicKey);
+
+  // Recently viewed schedules (#416), resolved from the wallet-filtered list
+  // and ordered most-recent-first.
+  const recentSchedules = useMemo(() => {
+    return recentlyViewed
+      .map((id) => schedules.find((s) => s.id === id))
+      .filter((s): s is ScheduleData => !!s);
+  }, [recentlyViewed, schedules]);
 
   // Apply role filter on top of the wallet-filtered list
   const roleFiltered = useMemo(() => {
@@ -219,6 +734,11 @@ export default function DashboardPage() {
       filtered = filtered.filter(s => s.token === tokenFilter);
     }
 
+    // Vesting kind filter
+    if (kindFilter !== "all") {
+      filtered = filtered.filter(s => s.kind === kindFilter);
+    }
+
     // Date range filters
     if (startDateFilter) {
       const startTimestamp = new Date(startDateFilter).getTime() / 1000;
@@ -230,7 +750,7 @@ export default function DashboardPage() {
     }
 
     return filtered;
-  }, [roleFiltered, statusFilter, tokenFilter, startDateFilter, endDateFilter]);
+  }, [roleFiltered, statusFilter, tokenFilter, kindFilter, startDateFilter, endDateFilter]);
 
   // Apply sort on top of the multi-filtered list
   const sortedSchedules = useMemo(() => {
@@ -255,21 +775,22 @@ export default function DashboardPage() {
     return list;
   }, [multiFiltered, sortBy]);
 
-  // Apply address search on top of sorted list
+  // Apply address prefix and token search on top of sorted list (Issue #647)
   const q = query.trim().toLowerCase();
   const searchFiltered = useMemo(() => {
     if (!q) return sortedSchedules;
-    return sortedSchedules.filter(
-      s =>
-        s.grantor.toLowerCase().includes(q) ||
-        s.beneficiary.toLowerCase().includes(q) ||
-        (getLabel(s.grantor) ?? "").toLowerCase().includes(q) ||
-        (getLabel(s.beneficiary) ?? "").toLowerCase().includes(q)
+    return sortedSchedules.filter(s =>
+      matchesAddressOrToken(
+        q,
+        [s.grantor, s.beneficiary],
+        [s.token],
+        [getLabel(s.grantor), getLabel(s.beneficiary)]
+      )
     );
   }, [sortedSchedules, q, getLabel]);
 
   // Reset to page 1 whenever the filtered set changes
-  useEffect(() => { setPage(1); }, [searchFiltered.length, roleFilter, statusFilter, tokenFilter, startDateFilter, endDateFilter, sortBy]);
+  useEffect(() => { setPage(1); }, [searchFiltered.length, roleFilter, statusFilter, tokenFilter, kindFilter, startDateFilter, endDateFilter, sortBy]);
 
   const totalPages = Math.max(1, Math.ceil(searchFiltered.length / PAGE_SIZE));
   const pageStart = (page - 1) * PAGE_SIZE;
@@ -284,17 +805,21 @@ export default function DashboardPage() {
   const clearAllFilters = () => {
     setStatusFilter("all");
     setTokenFilter("all");
+    setKindFilter("all");
     setStartDateFilter("");
     setEndDateFilter("");
     setQuery("");
   };
 
-  const hasActiveFilters = statusFilter !== "all" || tokenFilter !== "all" || startDateFilter || endDateFilter || query;
+  const hasActiveFilters = statusFilter !== "all" || tokenFilter !== "all" || kindFilter !== "all" || startDateFilter || endDateFilter || query;
 
   return (
     <>
       <Navbar />
       <main className="max-w-5xl mx-auto px-4 sm:px-6 pt-24 sm:pt-28 pb-20">
+        {/* RPC offline banner (#278) */}
+        {rpcError && <RpcErrorBanner onDismiss={() => setRpcError(false)} />}
+
         {/* Header row */}
         <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
           <div>
@@ -302,6 +827,18 @@ export default function DashboardPage() {
             <p className="text-zinc-400 mt-1">Your active vesting schedules</p>
           </div>
           <div className="flex gap-3 flex-wrap items-center">
+            {publicKey && (
+              <button
+                onClick={() => setShowQrModal(true)}
+                className="text-sm text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3 py-2 transition-colors flex items-center gap-1.5"
+                aria-label="Show wallet QR code"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                </svg>
+                Wallet QR
+              </button>
+            )}
             <button
               onClick={load}
               disabled={loading}
@@ -323,8 +860,35 @@ export default function DashboardPage() {
           </div>
         </div>
 
+        {/* Cycle countdown timer (#630) */}
+        {publicKey && (
+          <div className="mb-6">
+            <CycleCountdown onCycleEnd={() => setRefreshKey((k) => k + 1)} />
+          </div>
+        )}
+
         {/* Summary stats — animated count-up (#270) */}
-        {publicKey && stats && <AnimatedStats stats={stats} />}
+        {publicKey && stats && <AnimatedStats stats={stats} schedules={schedules} publicKey={publicKey} />}
+        {publicKey && <IncomingStreamsList publicKey={publicKey} refreshKey={refreshKey} />}
+        {publicKey && <ActivityFeed publicKey={publicKey} refreshKey={refreshKey} />}
+        {publicKey && <StreamsAnalyticsSummary publicKey={publicKey} refreshKey={refreshKey} />}
+        {publicKey && loading ? (
+          <StreamListSkeleton count={6} />
+        ) : publicKey && schedules.length > 0 && (
+          <OutgoingStreamsList
+            schedules={schedules}
+            publicKey={publicKey}
+            claimableMap={claimableMap}
+            vestedMap={vestedMap}
+            onEdit={(s) => { window.location.href = `/schedule/${s.id}`; }}
+            onStop={(s) => setStopConfirmSchedule(s)}
+            onTopUp={(s) => setTopUpTarget(s)}
+          />
+        )}
+        {publicKey && <RecentGives publicKey={publicKey} refreshKey={refreshKey} />}
+
+        {/* Recently viewed schedules (#416) */}
+        {publicKey && <RecentlyViewedSchedules schedules={recentSchedules} />}
 
         {/* Role filter tabs (only when wallet connected and there are schedules) */}
         {publicKey && schedules.length > 0 && (
@@ -360,7 +924,7 @@ export default function DashboardPage() {
               )}
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
               {/* Status filter */}
               <div>
                 <label htmlFor="status-filter" className="block text-xs text-zinc-500 mb-1.5">
@@ -376,6 +940,25 @@ export default function DashboardPage() {
                   <option value="active">Active</option>
                   <option value="completed">Completed</option>
                   <option value="revoked">Revoked</option>
+                </select>
+              </div>
+
+              {/* Vesting kind filter */}
+              <div>
+                <label htmlFor="kind-filter" className="block text-xs text-zinc-500 mb-1.5">
+                  Vesting Kind
+                </label>
+                <select
+                  id="kind-filter"
+                  value={kindFilter}
+                  onChange={e => setKindFilter(e.target.value as KindFilter)}
+                  className="w-full text-xs bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-zinc-300 outline-none focus:border-violet-500/50 transition-colors"
+                >
+                  <option value="all">All kinds</option>
+                  <option value="Linear">Linear</option>
+                  <option value="Cliff">Cliff</option>
+                  <option value="LinearWithCliff">Linear with Cliff</option>
+                  <option value="Graded">Graded</option>
                 </select>
               </div>
 
@@ -452,25 +1035,15 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Address search input */}
-        <div className="relative mb-6">
-          <input
-            type="text"
+        {/* Search / filter bar (Issue #647) */}
+        <div className="mb-6">
+          <SearchFilterBar
             value={query}
-            onChange={e => setQuery(e.target.value)}
-            placeholder="Search by address or label…"
-            className="input pr-8"
-            aria-label="Search schedules by address or label"
+            onChange={setQuery}
+            placeholder="Filter streams by address prefix or token symbol…"
+            resultCount={searchFiltered.length}
+            totalCount={multiFiltered.length}
           />
-          {query && (
-            <button
-              onClick={() => setQuery("")}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white transition-colors"
-              aria-label="Clear search"
-            >
-              ×
-            </button>
-          )}
         </div>
 
         {/* Schedule grid */}
@@ -537,6 +1110,145 @@ export default function DashboardPage() {
           </>
         )}
       </main>
+
+      {/* QR Code Modal */}
+      {publicKey && (
+        <WalletQrModal
+          address={publicKey}
+          open={showQrModal}
+          onClose={() => setShowQrModal(false)}
+        />
+      )}
+
+      {/* Give Modal (#816) */}
+      <GiveModal
+        open={showGiveModal}
+        onClose={() => setShowGiveModal(false)}
+        onSuccess={() => setRefreshKey(k => k + 1)}
+      />
+
+      {/* Top Up Modal for outgoing stream warnings (#809, #810) */}
+      {topUpTarget && (
+        <TopUpModal
+          scheduleId={topUpTarget.id}
+          open={!!topUpTarget}
+          onClose={() => setTopUpTarget(null)}
+          onSuccess={() => {
+            // Reload schedules so the extended end time / new balance clears the warning
+            load();
+          }}
+        />
+      )}
+
+      {/* Onboarding Tour */}
+      <OnboardingTour />
+
+      {/* Stop Stream confirmation dialog (#801) */}
+      {stopConfirmSchedule && (() => {
+        const now = Math.floor(Date.now() / 1000);
+        const vested = vestedMap.get(stopConfirmSchedule.id) ?? (
+          (stopConfirmSchedule.total_amount * BigInt(vestingProgress(stopConfirmSchedule, now))) / 100n
+        );
+        const remainingStreamable = stopConfirmSchedule.total_amount > vested
+          ? stopConfirmSchedule.total_amount - vested
+          : 0n;
+        const isNative = stopConfirmSchedule.token === NATIVE_TOKEN;
+        const tokenLabel = isNative ? "XLM" : `${stopConfirmSchedule.token.slice(0, 8)}…${stopConfirmSchedule.token.slice(-4)}`;
+
+        return (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Stop stream confirmation"
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          >
+            <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setStopConfirmSchedule(null)} />
+            <div className="relative z-10 w-full max-w-md rounded-2xl border border-white/10 bg-zinc-900 p-6 shadow-2xl space-y-4">
+              <div>
+                <h2 className="text-lg font-bold text-white">Stop Stream?</h2>
+                <p className="text-sm text-zinc-400 mt-1">
+                  Stopping this stream will halt all future token distributions to the receiver.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-white/5 p-4 space-y-2.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">Receiver</span>
+                  <span className="font-mono text-zinc-200" title={stopConfirmSchedule.beneficiary}>
+                    {stopConfirmSchedule.beneficiary.slice(0, 10)}…{stopConfirmSchedule.beneficiary.slice(-6)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">Token</span>
+                  <span className="font-medium text-zinc-200">{tokenLabel}</span>
+                </div>
+                <div className="flex items-center justify-between border-t border-white/5 pt-2">
+                  <span className="text-zinc-400">Remaining streamable balance</span>
+                  <span className="font-semibold text-amber-400">
+                    {stroopsToXlm(remainingStreamable)} {tokenLabel}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400">Estimated unused balance remaining</span>
+                  <span className="font-semibold text-emerald-400">
+                    {stroopsToXlm(remainingStreamable)} {tokenLabel}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setStopConfirmSchedule(null)}
+                  disabled={stoppingId !== null}
+                  className="flex-1 rounded-xl border border-white/10 py-2.5 text-sm font-semibold text-zinc-300 hover:border-white/20 transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={stoppingId !== null}
+                  onClick={async () => {
+                    if (!publicKey || !stopConfirmSchedule) return;
+                    setStoppingId(stopConfirmSchedule.id);
+                    try {
+                      try {
+                        await setStream(
+                          publicKey,
+                          stopConfirmSchedule.token,
+                          [{ receiver: stopConfirmSchedule.beneficiary, amt_per_sec: 0n }],
+                          0n
+                        );
+                      } catch {
+                        await revokeSchedule(publicKey, stopConfirmSchedule.id);
+                      }
+                      setStopConfirmSchedule(null);
+                      setRefreshKey((k) => k + 1);
+                    } catch {
+                      // leave dialog open on error so user sees failure
+                    } finally {
+                      setStoppingId(null);
+                    }
+                  }}
+                  className="flex-1 rounded-xl bg-red-600 hover:bg-red-700 py-2.5 text-sm font-semibold text-white transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {stoppingId === stopConfirmSchedule.id ? (
+                    <>
+                      <svg className="animate-spin h-4 w-4 text-white" viewBox="0 0 24 24" fill="none">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                      </svg>
+                      <span>Stopping…</span>
+                    </>
+                  ) : (
+                    "Confirm"
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </>
   );
 }

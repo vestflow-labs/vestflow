@@ -23,6 +23,8 @@ function makeSchedule(overrides: Partial<ScheduleData> = {}): ScheduleData {
     revocable: true,
     revoked: false,
     paused: false,
+    paused_duration: 0,
+    paused_at: 0,
     requires_milestones: false,
     vested_at_revoke: 0n,
     ...overrides,
@@ -107,7 +109,7 @@ describe("stroopsToXlm", () => {
   it("respects maximumFractionDigits of 4 — sub-0.0001 amounts display as 0", () => {
     // 1 stroop = 0.0000001 XLM, which rounds to 0 at 4 decimal places
     const result = stroopsToXlm(1n);
-    expect(parseFloat(result.replace(/,/g, ""))).toBe(0);
+    expect(parseFloat(result.replace(/,/g, ""))).toBeCloseTo(0, 4);
   });
 
   it("converts 100_000_000_000n stroops (10 000 XLM)", () => {

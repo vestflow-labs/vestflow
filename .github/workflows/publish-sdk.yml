@@ -1,0 +1,54 @@
+name: Publish @vestflow/sdk to npm
+
+# Triggered when a release tag vX.Y.Z is pushed, OR manually via workflow_dispatch.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (--dry-run flag — does not publish)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+permissions:
+  contents: read
+  id-token: write  # for npm provenance
+
+jobs:
+  publish:
+    name: Build & publish @vestflow/sdk
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Publish (or dry-run)
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            npm publish --access public --provenance --dry-run
+          else
+            npm publish --access public --provenance
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

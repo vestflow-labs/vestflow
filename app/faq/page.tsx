@@ -184,8 +184,8 @@ const faqs: FAQItem[] = [
         </p>
         <ul className="list-disc list-inside text-zinc-400 space-y-1">
           <li>
-            <strong className="text-zinc-300">Vested tokens</strong> remain locked in the
-            contract and can still be claimed by the beneficiary at any time.
+            <strong className="text-zinc-300">Vested tokens</strong> are automatically released
+            to the beneficiary at the moment of revocation.
           </li>
           <li>
             <strong className="text-zinc-300">Unvested tokens</strong> are immediately returned
@@ -237,6 +237,153 @@ const faqs: FAQItem[] = [
         </a>
         , the canonical Stellar block explorer. Click any transaction hash in the UI to open
         the full on-chain details, including operations, effects, and ledger state changes.
+      </p>
+    ),
+  },
+  {
+    question: 'Why am I seeing "Schedule not found"?',
+    answer: (
+      <p>
+        This error comes from <code className="text-violet-300">get_schedule</code>,{" "}
+        <code className="text-violet-300">claim</code>, or <code className="text-violet-300">revoke</code>{" "}
+        being called with a schedule ID that does not exist on-chain. Double-check the ID —
+        schedule IDs are assigned sequentially starting at 1 when a schedule is created.
+      </p>
+    ),
+  },
+  {
+    question: 'Why does "Claim" fail with "Nothing to claim yet"?',
+    answer: (
+      <p>
+        The contract only lets you claim tokens that have actually vested. If the schedule
+        has a cliff, nothing is claimable before the cliff date. If you have already claimed
+        everything that has vested so far, you&apos;ll need to wait for more time to elapse
+        before claiming again.
+      </p>
+    ),
+  },
+  {
+    question: 'Why can\'t I revoke a schedule ("Schedule is not revocable" / "Already revoked")?',
+    answer: (
+      <div className="flex flex-col gap-2">
+        <p>Revocation fails for one of two reasons:</p>
+        <ul className="list-disc list-inside text-zinc-400 space-y-1">
+          <li>
+            <strong className="text-zinc-300">&quot;Schedule is not revocable&quot;:</strong> the
+            schedule was created as irrevocable. This is permanent — no admin override exists.
+          </li>
+          <li>
+            <strong className="text-zinc-300">&quot;Already revoked&quot;:</strong> the schedule
+            was already revoked once. A schedule can only be revoked a single time.
+          </li>
+        </ul>
+      </div>
+    ),
+  },
+  {
+    question: 'Why does "Create Schedule" reject my inputs?',
+    answer: (
+      <div className="flex flex-col gap-2">
+        <p>
+          <code className="text-violet-300">create_schedule</code> validates its parameters
+          on-chain before locking any tokens. Common validation errors:
+        </p>
+        <ul className="list-disc list-inside text-zinc-400 space-y-1">
+          <li>
+            <strong className="text-zinc-300">&quot;Amount must be positive&quot;:</strong> the
+            total amount to vest is zero or negative.
+          </li>
+          <li>
+            <strong className="text-zinc-300">&quot;Duration must be positive&quot;:</strong> the
+            schedule duration is zero.
+          </li>
+          <li>
+            <strong className="text-zinc-300">&quot;Cliff cannot exceed duration&quot;:</strong>{" "}
+            the cliff period is longer than the total vesting duration.
+          </li>
+          <li>
+            <strong className="text-zinc-300">&quot;Lockup cannot be less than cliff&quot;:</strong>{" "}
+            the lockup duration is shorter than the cliff duration.
+          </li>
+          <li>
+            <strong className="text-zinc-300">
+              &quot;Beneficiary must differ from grantor&quot;:
+            </strong>{" "}
+            you cannot create a schedule where you are both the grantor and the beneficiary.
+          </li>
+          <li>
+            <strong className="text-zinc-300">
+              &quot;Start time cannot be in the past&quot;:
+            </strong>{" "}
+            the chosen start time is earlier than the current ledger time.
+          </li>
+          <li>
+            <strong className="text-zinc-300">&quot;Invalid token&quot;:</strong> the token
+            address is not a recognised Stellar Asset Contract.
+          </li>
+        </ul>
+      </div>
+    ),
+  },
+  {
+    question: 'Why does "Claim" fail with "Insufficient balance or below minimum reserve"?',
+    answer: (
+      <p>
+        Token transfers on Stellar must respect the account&apos;s minimum balance reserve.
+        This error means the transfer of vested tokens would leave the contract or recipient
+        account below the balance Stellar requires it to maintain. It usually resolves itself
+        once the relevant account holds enough of a reserve, or by claiming a smaller amount
+        if the schedule supports partial claims.
+      </p>
+    ),
+  },
+  {
+    question: "What are the contract upgrade errors I might see as a grantor or beneficiary?",
+    answer: (
+      <div className="flex flex-col gap-2">
+        <p>
+          VestFlow supports a time-locked, authority-gated upgrade process for the contract
+          itself. These errors relate to that process, not to individual vesting schedules:
+        </p>
+        <ul className="list-disc list-inside text-zinc-400 space-y-1">
+          <li>
+            <strong className="text-zinc-300">
+              &quot;Upgrade authority already initialized&quot;:
+            </strong>{" "}
+            the upgrade authority was already set and cannot be set again.
+          </li>
+          <li>
+            <strong className="text-zinc-300">
+              &quot;Upgrade authority not initialized&quot;:
+            </strong>{" "}
+            an upgrade was announced or executed before an authority was configured.
+          </li>
+          <li>
+            <strong className="text-zinc-300">&quot;Unauthorized upgrade authority&quot;:</strong>{" "}
+            the transaction was not signed by the configured upgrade authority address.
+          </li>
+          <li>
+            <strong className="text-zinc-300">&quot;No pending upgrade&quot;:</strong> execution
+            or cancellation was attempted without an upgrade having been announced first.
+          </li>
+          <li>
+            <strong className="text-zinc-300">&quot;Upgrade timelock still active&quot;:</strong>{" "}
+            an announced upgrade must wait 48 hours before it can be executed, as a safety
+            window for the community to review the change.
+          </li>
+        </ul>
+      </div>
+    ),
+  },
+  {
+    question:
+      'Why do I get "Performance oracle must be initialized before enabling milestones"?',
+    answer: (
+      <p>
+        Performance-based milestone vesting requires an oracle to be configured first via{" "}
+        <code className="text-violet-300">initialize_performance_oracle</code>. Calling{" "}
+        <code className="text-violet-300">enable_performance_milestones</code> before that
+        step will fail with this error — set up the oracle first, then enable milestones.
       </p>
     ),
   },

@@ -1,0 +1,6 @@
+export { GET } from "./../../../../analytics/gives/total"
+export { POST } from "./../../../../analytics/gives/total"
+export { PUT } from "./../../../../analytics/gives/total"
+export { PATCH } from "./../../../../analytics/gives/total"
+export { DELETE } from "./../../../../analytics/gives/total"
+export { HEAD } from "./../../../../analytics/gives/total"

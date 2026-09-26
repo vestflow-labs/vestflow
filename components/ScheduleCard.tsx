@@ -14,27 +14,38 @@ import { useWallet } from "@/lib/WalletContext";
 import CopyButton from "@/components/CopyButton";
 import ClaimModal from "@/components/ClaimModal";
 import RevokeModal from "@/components/RevokeModal";
+import TransferBeneficiaryModal from "@/components/TransferBeneficiaryModal";
+import { SqueezeModal } from "@/components/SqueezeModal";
 import VestingChart from "@/components/VestingChart";
 import AddressLabel from "@/components/AddressLabel";
 import { useXlmPrice, formatUsd } from "@/lib/price";
+import { useCountdown, formatCountdown } from "@/hooks/useCountdown";
+import WalletConnectionGuard from "@/components/WalletConnectionGuard";
 
 export default function ScheduleCard({
   schedule,
   onAction,
 }: {
   schedule: ScheduleData;
-  onAction: () => void;
+  onAction?: () => void;
 }) {
   const { publicKey } = useWallet();
   const [showChart, setShowChart] = useState(false);
   const [showClaimModal, setShowClaimModal] = useState(false);
   const [showRevokeModal, setShowRevokeModal] = useState(false);
+  const [showTransferModal, setShowTransferModal] = useState(false);
+  const [showSqueezeModal, setShowSqueezeModal] = useState(false);
   const xlmPrice = useXlmPrice();
 
   const now = Math.floor(Date.now() / 1000);
   const progress = vestingProgress(schedule, now);
   const lockupEndsAt = schedule.start_time + schedule.lockup_duration;
   const isInLockup = schedule.lockup_duration > 0 && now < lockupEndsAt;
+
+  const cliffUnlockAt = schedule.start_time + schedule.cliff_duration;
+  const inCliffPeriod =
+    schedule.kind === "Cliff" && schedule.cliff_duration > 0 && now < cliffUnlockAt && !schedule.revoked;
+  const cliffCountdown = useCountdown(inCliffPeriod ? cliffUnlockAt : now);
 
   // Claimed percentage relative to total (for the dual progress bar)
   const claimedPct =
@@ -51,20 +62,31 @@ export default function ScheduleCard({
   const isNative = schedule.token === NATIVE_TOKEN;
   const tokenSymbol = isNative ? "XLM" : `Token (${truncate(schedule.token, 4, 4)})`;
 
+  const vestingEndTime = schedule.start_time + schedule.duration;
+  const isFullyVested = progress >= 100;
+
   const statusColor = schedule.revoked
     ? "bg-red-500/10 text-red-400"
-    : progress >= 100
+    : isFullyVested
     ? "bg-green-500/10 text-green-400"
     : "bg-violet-500/10 text-violet-400";
 
   const statusLabel = schedule.revoked
     ? "Revoked"
-    : progress >= 100
+    : isFullyVested
     ? "Fully Vested"
     : "Vesting";
 
+  const KIND_BADGE: Record<string, string> = {
+    Linear:          "bg-blue-500/10 text-blue-400 border border-blue-500/20",
+    Cliff:           "bg-amber-500/10 text-amber-400 border border-amber-500/20",
+    LinearWithCliff: "bg-cyan-500/10 text-cyan-400 border border-cyan-500/20",
+    Graded:          "bg-purple-500/10 text-purple-400 border border-purple-500/20",
+  };
+  const kindStyle = KIND_BADGE[schedule.kind] ?? "bg-zinc-500/10 text-zinc-400 border border-zinc-500/20";
+
   return (
-    <div className="card p-5 flex flex-col gap-3">
+    <div className="card p-5 flex flex-col gap-3" data-tour="schedule-card">
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
@@ -74,7 +96,21 @@ export default function ScheduleCard({
             </Link>
             <CopyButton value={String(schedule.id)} label={`Copy schedule ${schedule.id}`} />
           </div>
-          <p className="text-xs text-zinc-500 mt-0.5">{schedule.kind} vesting{schedule.revocable ? " · revocable" : ""}</p>
+          <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+            <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${kindStyle}`}>
+              {schedule.kind}
+            </span>
+            {schedule.revocable && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-zinc-700/40 text-zinc-400 border border-zinc-700/60">
+                revocable
+              </span>
+            )}
+            {isFullyVested && !schedule.revoked && (
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-green-500/10 text-green-400 border border-green-500/20">
+                ✓ {formatDate(vestingEndTime)}
+              </span>
+            )}
+          </div>
         </div>
         <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${statusColor}`}>
           {statusLabel}
@@ -198,17 +234,16 @@ export default function ScheduleCard({
             </div>
 
             {/* Cliff label */}
-            {schedule.kind === "Cliff" &&
-              schedule.cliff_duration > 0 &&
-              now < schedule.start_time + schedule.cliff_duration &&
-              !schedule.revoked && (
-                <p className="text-xs text-zinc-500 mt-1.5">
-                  Unlocks on{" "}
-                  <span className="text-zinc-300">
-                    {formatCliffDate(schedule.cliff_duration, schedule.start_time)}
-                  </span>
-                </p>
-              )}
+            {inCliffPeriod && (
+              <p className="text-xs text-zinc-500 mt-1.5">
+                Unlocks on{" "}
+                <span className="text-zinc-300">
+                  {formatCliffDate(schedule.cliff_duration, schedule.start_time)}
+                </span>
+                {" "}
+                <span className="text-violet-400">({formatCountdown(cliffCountdown)})</span>
+              </p>
+            )}
           </>
         )}
 
@@ -241,21 +276,58 @@ export default function ScheduleCard({
       </div>
 
       {/* Actions */}
-      {publicKey && !schedule.revoked && (
+      {!schedule.revoked && (
         <div className="flex flex-col sm:flex-row gap-2 mt-1">
           {isBeneficiary && claimableAmt > 0n && (
-            <button onClick={() => setShowClaimModal(true)} className="btn-primary text-xs rounded-lg px-3 py-1.5 font-semibold text-white flex-1 sm:flex-auto truncate">
-              <span className="sm:hidden">Claim {stroopsToXlm(claimableAmt)} XLM</span>
-              <span className="hidden sm:inline">Claim {stroopsToXlm(claimableAmt)} XLM{xlmPrice !== null ? ` (${formatUsd(claimableAmt, xlmPrice)})` : ""}</span>
-            </button>
+            <WalletConnectionGuard
+              onAction={() => setShowClaimModal(true)}
+              actionName="claim tokens"
+            >
+              {({ onClick }) => (
+                <button onClick={onClick} className="btn-primary text-xs rounded-lg px-3 py-1.5 font-semibold text-white flex-1 sm:flex-auto truncate">
+                  <span className="sm:hidden">Claim {stroopsToXlm(claimableAmt)} XLM</span>
+                  <span className="hidden sm:inline">Claim {stroopsToXlm(claimableAmt)} XLM{xlmPrice !== null ? ` (${formatUsd(claimableAmt, xlmPrice)})` : ""}</span>
+                </button>
+              )}
+            </WalletConnectionGuard>
           )}
           {isGrantor && schedule.revocable && progress < 100 && (
-            <button
-              onClick={() => setShowRevokeModal(true)}
-              className="text-xs rounded-lg px-3 py-1.5 border border-red-500/30 text-red-400 hover:border-red-500/60 transition-colors"
+            <WalletConnectionGuard
+              onAction={() => setShowRevokeModal(true)}
+              actionName="revoke schedule"
             >
-              Revoke
+              {({ onClick }) => (
+                <button
+                  onClick={onClick}
+                  className="text-xs rounded-lg px-3 py-1.5 border border-red-500/30 text-red-400 hover:border-red-500/60 transition-colors"
+                >
+                  Revoke
+                </button>
+              )}
+            </WalletConnectionGuard>
+          )}
+          {isBeneficiary && !schedule.revoked && (
+            <button
+              onClick={() => setShowTransferModal(true)}
+              className="text-xs rounded-lg px-3 py-1.5 border border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200 transition-colors"
+            >
+              Transfer
             </button>
+          )}
+          {isBeneficiary && !schedule.revoked && progress > 0 && progress < 100 && (
+            <WalletConnectionGuard
+              onAction={() => setShowSqueezeModal(true)}
+              actionName="squeeze stream"
+            >
+              {({ onClick }) => (
+                <button
+                  onClick={onClick}
+                  className="text-xs rounded-lg px-3 py-1.5 border border-emerald-500/30 text-emerald-400 hover:border-emerald-500/60 transition-colors"
+                >
+                  Squeeze
+                </button>
+              )}
+            </WalletConnectionGuard>
           )}
         </div>
       )}
@@ -266,7 +338,7 @@ export default function ScheduleCard({
         tokenSymbol={tokenSymbol}
         open={showClaimModal}
         onClose={() => setShowClaimModal(false)}
-        onSuccess={() => { setShowClaimModal(false); onAction(); }}
+        onSuccess={() => { setShowClaimModal(false); onAction?.(); }}
       />
       <RevokeModal
         schedule={schedule}
@@ -274,8 +346,22 @@ export default function ScheduleCard({
         tokenSymbol={tokenSymbol}
         open={showRevokeModal}
         onClose={() => setShowRevokeModal(false)}
-        onSuccess={() => { setShowRevokeModal(false); onAction(); }}
+        onSuccess={() => { setShowRevokeModal(false); onAction?.(); }}
       />
+      <TransferBeneficiaryModal
+        schedule={schedule}
+        open={showTransferModal}
+        onClose={() => setShowTransferModal(false)}
+        onSuccess={() => { setShowTransferModal(false); onAction?.(); }}
+      />
+      {showSqueezeModal && publicKey && (
+        <SqueezeModal
+          schedule={schedule}
+          publicKey={publicKey}
+          onClose={() => setShowSqueezeModal(false)}
+          onSuccess={() => { setShowSqueezeModal(false); onAction?.(); }}
+        />
+      )}
     </div>
   );
 }

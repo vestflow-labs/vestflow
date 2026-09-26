@@ -1,0 +1,6 @@
+export { GET } from "./../../../contracts/version"
+export { POST } from "./../../../contracts/version"
+export { PUT } from "./../../../contracts/version"
+export { PATCH } from "./../../../contracts/version"
+export { DELETE } from "./../../../contracts/version"
+export { HEAD } from "./../../../contracts/version"

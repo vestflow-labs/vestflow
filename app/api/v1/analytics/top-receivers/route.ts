@@ -1,0 +1,6 @@
+export { GET } from "./../../../analytics/top-receivers"
+export { POST } from "./../../../analytics/top-receivers"
+export { PUT } from "./../../../analytics/top-receivers"
+export { PATCH } from "./../../../analytics/top-receivers"
+export { DELETE } from "./../../../analytics/top-receivers"
+export { HEAD } from "./../../../analytics/top-receivers"

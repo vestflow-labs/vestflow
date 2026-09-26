@@ -3,6 +3,11 @@ name = "vestflow"
 version = "0.1.0"
 edition = "2021"
 
+# Prevent accidental panics from .unwrap() slipping into production code.
+# Use .unwrap_or / .unwrap_or_else / expect("reason") / ? instead.
+[lints.clippy]
+unwrap_used = "deny"
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
@@ -15,3 +20,4 @@ proptest = "1.5.0"
 
 [features]
 testutils = ["soroban-sdk/testutils"]
+fuzz = []

@@ -1,11 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sendVerificationEmail } from "@/lib/email";
+import { isWebPushConfigured } from "@/lib/webPush";
+import { withLogging } from "@/lib/requestLogger";
 
 interface SubscribeRequest {
-  email: string;
+  email?: string;
   scheduleId: number;
   beneficiaryAddress: string;
   notificationType: string;
+  pushSubscription?: {
+    endpoint: string;
+    keys: { p256dh: string; auth: string };
+  };
 }
 
 function getDb() {
@@ -19,22 +25,15 @@ function getDb() {
   }
 }
 
-export async function POST(request: NextRequest): Promise<NextResponse> {
+export const POST = withLogging(async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const body: SubscribeRequest = await request.json();
 
-    const { email, scheduleId, beneficiaryAddress, notificationType } = body;
+    const { email, scheduleId, beneficiaryAddress, notificationType, pushSubscription } = body;
 
-    if (!email || !scheduleId || !beneficiaryAddress || !notificationType) {
+    if (!scheduleId || !beneficiaryAddress || !notificationType) {
       return NextResponse.json(
-        { error: "Missing required fields: email, scheduleId, beneficiaryAddress, notificationType" },
-        { status: 400 }
-      );
-    }
-
-    if (!email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
-      return NextResponse.json(
-        { error: "Invalid email address" },
+        { error: "Missing required fields: scheduleId, beneficiaryAddress, notificationType" },
         { status: 400 }
       );
     }
@@ -58,6 +57,76 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       return NextResponse.json(
         { error: "Database not available" },
         { status: 500 }
+      );
+    }
+
+    // Handle Web Push subscription
+    if (pushSubscription) {
+      if (!isWebPushConfigured()) {
+        db.close();
+        return NextResponse.json(
+          { error: "Web Push is not configured on this server" },
+          { status: 501 }
+        );
+      }
+
+      if (!pushSubscription.endpoint || !pushSubscription.keys?.p256dh || !pushSubscription.keys?.auth) {
+        db.close();
+        return NextResponse.json(
+          { error: "Invalid push subscription: missing endpoint or keys" },
+          { status: 400 }
+        );
+      }
+
+      try {
+        db.prepare(
+          `INSERT INTO web_push_subscriptions (endpoint, p256dh, auth, schedule_id, beneficiary_address)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(endpoint) DO UPDATE SET
+             p256dh = excluded.p256dh,
+             auth = excluded.auth,
+             schedule_id = excluded.schedule_id,
+             beneficiary_address = excluded.beneficiary_address,
+             is_active = 1,
+             updated_at = ?`
+        ).run(
+          pushSubscription.endpoint,
+          pushSubscription.keys.p256dh,
+          pushSubscription.keys.auth,
+          scheduleId,
+          beneficiaryAddress,
+          Math.floor(Date.now() / 1000)
+        );
+
+        db.close();
+        return NextResponse.json(
+          { message: "Web Push subscription created successfully" },
+          { status: 201 }
+        );
+      } catch (dbError) {
+        db.close();
+        console.error("Database error:", dbError);
+        return NextResponse.json(
+          { error: "Failed to create push subscription" },
+          { status: 500 }
+        );
+      }
+    }
+
+    // Handle Email subscription
+    if (!email) {
+      db.close();
+      return NextResponse.json(
+        { error: "Email is required for email notifications" },
+        { status: 400 }
+      );
+    }
+
+    if (!email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) {
+      db.close();
+      return NextResponse.json(
+        { error: "Invalid email address" },
+        { status: 400 }
       );
     }
 
@@ -109,4 +178,4 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 500 }
     );
   }
-}
+});

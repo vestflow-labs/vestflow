@@ -1,18 +1,19 @@
 import { NextResponse } from "next/server";
-import { rpc as StellarRpc } from "@stellar/stellar-sdk";
 import { getCheckpoint } from "@/indexer/src/db";
+import { withLogging } from "@/lib/requestLogger";
 
 const RPC_URL = process.env.NEXT_PUBLIC_NETWORK === "mainnet"
   ? "https://mainnet.sorobanrpc.com"
   : "https://soroban-testnet.stellar.org";
 
-export async function GET(): Promise<NextResponse> {
+export const GET = withLogging(async function GET(): Promise<NextResponse> {
   try {
+    const { rpc: StellarRpc } = await import("@stellar/stellar-sdk");
     const server = new StellarRpc.Server(RPC_URL);
     const latestLedger = await server.getLatestLedger();
     const checkpoint = getCheckpoint();
 
-    const isReady = checkpoint >= latestLedger.sequence;
+    const isReady = checkpoint > 0 && checkpoint >= latestLedger.sequence;
 
     if (!isReady) {
       return NextResponse.json(
@@ -62,4 +63,4 @@ export async function GET(): Promise<NextResponse> {
       }
     );
   }
-}
+});

@@ -90,7 +90,7 @@ describe("CreateForm", () => {
 
       const dateInputs = document.querySelectorAll('input[type="date"]');
       const tomorrow = new Date();
-      tomorrow.setDate(tomorrow.getDate() + 1);
+      tomorrow.setDate(tomorrow.getDate() + 5);
       fireEvent.change(dateInputs[0], {
         target: { value: tomorrow.toISOString().split("T")[0] },
       });
@@ -121,7 +121,7 @@ describe("CreateForm", () => {
       await user.type(screen.getByPlaceholderText("1000.00"), "500");
 
       const tomorrow = new Date();
-      tomorrow.setDate(tomorrow.getDate() + 1);
+      tomorrow.setDate(tomorrow.getDate() + 5);
       const dateInputs = document.querySelectorAll('input[type="date"]');
       fireEvent.change(dateInputs[0], { target: { value: tomorrow.toISOString().split("T")[0] } });
 
