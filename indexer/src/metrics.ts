@@ -59,6 +59,9 @@ export function metricsRoute(pathname: string): string {
   if (/^\/profile\/[^/]+$/.test(pathname)) {
     return "/profile/:address";
   }
+  if (/^\/gives\/summary\/[^/]+$/.test(pathname)) {
+    return "/gives/summary/:address";
+  }
   return pathname;
 }
 

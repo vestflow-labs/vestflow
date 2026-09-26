@@ -20,6 +20,7 @@ import {
   getCheckpoint,
   getDripsStreamingTvl,
   getDripsStreamsLastUpdated,
+  getGiveSummary,
   getTvlStats,
   queryDripsListMembers,
   queryDripsLists,
@@ -534,6 +535,33 @@ function handleGives(
 }
 
 /**
+ * GET /gives/summary/:address — aggregate give activity for an address
+ * across all tokens, computed from the indexed gives table. Addresses with
+ * no activity resolve to zero values (HTTP 200), not 404.
+ */
+function handleGiveSummary(
+  res: http.ServerResponse,
+  address: string,
+  searchParams: URLSearchParams,
+): void {
+  if (!STELLAR_ADDRESS.test(address)) {
+    return json(res, 400, { error: "Invalid Stellar address" });
+  }
+  const network = networkParam(searchParams);
+  if (!network) {
+    return json(res, 400, { error: "network must be mainnet or testnet" });
+  }
+
+  try {
+    const summary = getGiveSummary(address, network);
+    return json(res, 200, summary);
+  } catch (error) {
+    console.error("[server] Give summary query error:", error);
+    return json(res, 500, { error: "Query failed" });
+  }
+}
+
+/**
  * GET /profile/:address — aggregate an address's streams, splits, gives and
  * Drips lists into a single profile payload. Addresses with no activity
  * resolve to an empty profile (HTTP 200), not 404.
@@ -798,6 +826,7 @@ export function createServer(): http.Server {
     );
     const listMembersMatch = url.pathname.match(/^\/lists\/([^/]+)\/members$/);
     const profileMatch = url.pathname.match(/^\/profile\/(G[A-Z2-7]{55})$/);
+    const giveSummaryMatch = url.pathname.match(/^\/gives\/summary\/([^/]+)$/);
     const streamHistoryMatch = url.pathname.match(
       /^\/streams\/history\/([^/]+)\/([^/]+)\/([^/]+)$/,
     );
@@ -882,6 +911,13 @@ export function createServer(): http.Server {
         }
         if (profileMatch) {
           return handleProfile(res, profileMatch[1], url.searchParams);
+        }
+        if (giveSummaryMatch) {
+          return handleGiveSummary(
+            res,
+            decodeURIComponent(giveSummaryMatch[1]),
+            url.searchParams,
+          );
         }
         return json(res, 404, {
           error: "Not found",

@@ -1820,6 +1820,77 @@ export function getCollectedTotal(
   return row?.total_collected_stroops ?? "0";
 }
 
+export interface GiveSummary {
+  total_given: string;
+  total_received: string;
+  unique_senders: number;
+  unique_receivers: number;
+  give_count: number;
+  receive_count: number;
+}
+
+/**
+ * Aggregate give activity for an address across all tokens, computed from
+ * the indexed gives table. Returns zero values when the address has no
+ * activity (never null).
+ */
+export function getGiveSummary(
+  address: string,
+  network?: NetworkName,
+): GiveSummary {
+  const db = getDb(network);
+  const givenRows = db
+    .prepare("SELECT amount_stroops AS value FROM gives WHERE sender = ?")
+    .all(address) as { value: string | null }[];
+  const receivedRows = db
+    .prepare("SELECT amount_stroops AS value FROM gives WHERE receiver = ?")
+    .all(address) as { value: string | null }[];
+
+  let totalGiven = 0n;
+  for (const row of givenRows) {
+    try {
+      totalGiven += BigInt(row.value ?? "0");
+    } catch {
+      // ignore malformed amounts rather than failing the whole summary
+    }
+  }
+
+  let totalReceived = 0n;
+  for (const row of receivedRows) {
+    try {
+      totalReceived += BigInt(row.value ?? "0");
+    } catch {
+      // ignore malformed amounts rather than failing the whole summary
+    }
+  }
+
+  const giveCount = db
+    .prepare("SELECT COUNT(*) AS count FROM gives WHERE sender = ?")
+    .get(address) as { count: number } | undefined;
+  const receiveCount = db
+    .prepare("SELECT COUNT(*) AS count FROM gives WHERE receiver = ?")
+    .get(address) as { count: number } | undefined;
+  const uniqueSenders = db
+    .prepare(
+      "SELECT COUNT(DISTINCT sender) AS count FROM gives WHERE receiver = ?",
+    )
+    .get(address) as { count: number } | undefined;
+  const uniqueReceivers = db
+    .prepare(
+      "SELECT COUNT(DISTINCT receiver) AS count FROM gives WHERE sender = ?",
+    )
+    .get(address) as { count: number } | undefined;
+
+  return {
+    total_given: totalGiven.toString(),
+    total_received: totalReceived.toString(),
+    unique_senders: uniqueSenders?.count ?? 0,
+    unique_receivers: uniqueReceivers?.count ?? 0,
+    give_count: giveCount?.count ?? 0,
+    receive_count: receiveCount?.count ?? 0,
+  };
+}
+
 /**
  * Get all unique schedule IDs from events across all networks
  */
