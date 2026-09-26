@@ -77,13 +77,13 @@
                   "u64": 0
                 },
                 {
-                  "u64": 2000
-                },
-                {
                   "u64": 1000
                 },
                 {
-                  "u64": 1000
+                  "u64": 400
+                },
+                {
+                  "u64": 400
                 },
                 {
                   "vec": [
@@ -129,8 +129,6 @@
     [],
     [],
     [],
-    [],
-    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
@@ -158,7 +156,7 @@
   "ledger": {
     "protocol_version": 22,
     "sequence_number": 0,
-    "timestamp": 1500,
+    "timestamp": 700,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 10,
     "min_persistent_entry_ttl": 10,
@@ -324,7 +322,7 @@
                                 "symbol": "cliff_seconds"
                               },
                               "val": {
-                                "u64": 1000
+                                "u64": 400
                               }
                             },
                             {
@@ -332,7 +330,7 @@
                                 "symbol": "duration_seconds"
                               },
                               "val": {
-                                "u64": 2000
+                                "u64": 1000
                               }
                             },
                             {
@@ -368,7 +366,7 @@
                                 "symbol": "lockup_duration"
                               },
                               "val": {
-                                "u64": 1000
+                                "u64": 400
                               }
                             },
                             {
