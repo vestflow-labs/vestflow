@@ -90,17 +90,19 @@ docs at the top of `contracts/vestflow/src/lib.rs`; the most common ones are:
 | `"Unauthorized upgrade authority"` | Upgrade entry points | Sign with the recorded authority address. |
 | `"No pending upgrade"` | `execute_upgrade`, `cancel_upgrade` | Announce an upgrade first. |
 | `"Upgrade timelock still active"` | `execute_upgrade` | Wait the 48 hours from `announce_upgrade`. |
-| `"At least one stream receiver required"` | `set_stream` | Pass at least one receiver. |
-| `"Top-up must be non-negative"` | `set_stream` | Pass `top_up >= 0`. |
+| `"Stream receiver rate cannot be negative"` | `set_stream` | Pass non-negative rates (`amt_per_sec >= 0`, rate = 0 closes a stream). |
+| `"InsufficientBalance"` | `withdraw`, `set_stream` | Ensure withdrawal amount does not exceed available streaming balance. |
 | `"Streams not configured"` | `receive_streams`, `pause_streams` | Call `set_stream` first. |
 | `"Split receiver weight must be positive"` | `set_splits` | Remove zero-weight receivers. |
 | `"Split receiver weight exceeds maximum"` | `set_splits` | Cap weights at `TOTAL_SPLITS_WEIGHT`. |
+| `"Total split weight must equal TOTAL_SPLITS_WEIGHT"` | `set_splits` | Ensure the sum of receiver weights equals `TOTAL_SPLITS_WEIGHT` (1,000,000). |
 | `"NFT contract not initialized"` | `nft_split` | Call `initialize_nft_contract` first. |
 | `"Not the beneficiary"` | `create_delegation`, `revoke_delegation` | Pass the schedule's beneficiary. |
 | `"Delegate must differ from beneficiary"` | `create_delegation` | Pick a different delegate. |
 | `"Max amount must be positive"` | `create_delegation` | Pass `None` or a positive `max_amount`. |
 | `"Expiry must be in the future"` | `create_delegation` | Use an `expires_at_ledger` after the current sequence. |
 | `"Performance oracle must be initialized before enabling milestones"` | `enable_performance_milestones` | Call `initialize_performance_oracle` first. |
+| `"Segment already squeezed"` | `squeeze_streams` | Squeeze was already performed for this history hash segment; pass a new segment hash. |
 
 ## Related
 
