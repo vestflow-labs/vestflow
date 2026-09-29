@@ -5,6 +5,8 @@ const REQUEST_START_HEADER = "x-request-start";
 const REQUEST_ID_HEADER = "x-request-id";
 const API_VERSION_HEADER = "x-api-version";
 const IS_DEPRECATED_HEADER = "x-is-deprecated";
+const CORS_METHODS = "GET, POST, OPTIONS";
+const CORS_HEADERS = "Content-Type, Authorization";
 
 const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -36,6 +38,33 @@ function generateRequestId(): string {
   return crypto.randomUUID();
 }
 
+function applyCorsHeaders(
+  response: NextResponse,
+  request: NextRequest
+): NextResponse {
+  const configuredOrigins = (process.env.CORS_ORIGIN || "*")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  const requestOrigin = request.headers.get("origin");
+
+  if (configuredOrigins.includes("*")) {
+    response.headers.set("Access-Control-Allow-Origin", "*");
+  } else {
+    response.headers.append("Vary", "Origin");
+    if (requestOrigin && configuredOrigins.includes(requestOrigin)) {
+      response.headers.set("Access-Control-Allow-Origin", requestOrigin);
+    }
+  }
+
+  if (request.method === "OPTIONS") {
+    response.headers.set("Access-Control-Allow-Methods", CORS_METHODS);
+    response.headers.set("Access-Control-Allow-Headers", CORS_HEADERS);
+  }
+
+  return response;
+}
+
 function getApiVersionInfo(pathname: string): {
   pathname: string;
   version: number;
@@ -64,12 +93,16 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  if (request.method === "OPTIONS") {
+    return applyCorsHeaders(new NextResponse(null, { status: 204 }), request);
+  }
+
   const { pathname: versionedPath, version, isDeprecated } = getApiVersionInfo(
     pathname
   );
 
   if (shouldExclude(pathname) && !isDeprecated) {
-    return NextResponse.next();
+    return applyCorsHeaders(NextResponse.next(), request);
   }
 
   // Echo client-sent X-Request-ID or generate a new one
@@ -97,7 +130,7 @@ export function middleware(request: NextRequest) {
         { status: 401 }
       );
       unauthorizedResponse.headers.set(REQUEST_ID_HEADER, requestId);
-      return unauthorizedResponse;
+      return applyCorsHeaders(unauthorizedResponse, request);
     }
 
     const payload = verifyJWT(token);
@@ -107,7 +140,7 @@ export function middleware(request: NextRequest) {
         { status: 401 }
       );
       invalidTokenResponse.headers.set(REQUEST_ID_HEADER, requestId);
-      return invalidTokenResponse;
+      return applyCorsHeaders(invalidTokenResponse, request);
     }
 
     requestHeaders.set("x-wallet-address", payload.sub);
@@ -138,7 +171,7 @@ export function middleware(request: NextRequest) {
     );
   }
 
-  return response;
+  return applyCorsHeaders(response, request);
 }
 
 export const config = {
