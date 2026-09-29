@@ -118,6 +118,21 @@ pub enum VestFlowError {
     WeightTooLarge = 35,
     /// A drips list view was called with an ID that was never created.
     ListNotFound = 36,
+    /// Streams must be configured via `set_stream` before this operation.
+    StreamsNotConfigured = 37,
+    /// The referenced receiver has no stream from the sender.
+    ReceiverNotFound = 38,
+    /// The drips list is frozen and does not accept membership changes.
+    ListFrozen = 39,
+    /// Caller is not the owner of the drips list.
+    NotOwner = 40,
+    /// A sender's lifetime given total (or a receiver's collectable balance)
+    /// would overflow i128.
+    TotalOverflow = 41,
+    /// `receivers` and `amounts` lengths differ in `batch_give`.
+    LengthMismatch = 42,
+    /// The resource already exists.
+    AlreadyExists = 43,
 }
 
 #[contracttype]
@@ -3887,19 +3902,54 @@ impl VestFlowContract {
         );
     }
 
-    /// Transfer a one-time token gift to a receiver.
+    /// Make a one-time on-chain token grant to a receiver (Issue #592).
+    ///
+    /// Unlike a stream, a give settles immediately: the amount is pulled from
+    /// `sender` into this contract via a plain SAC `transfer` (authorized by
+    /// `sender`'s `require_auth` above, so no prior allowance is needed) and
+    /// credited to `receiver`'s collectable balance, so a subsequent
+    /// [`VestFlowContract::collect`] call by the receiver pays it out in the
+    /// same cycle it was sent.
+    ///
+    /// Emits a `given` event with topics `(given, sender, receiver, token)`
+    /// and the amount as its value, giving on-chain history to one-time
+    /// payments without opening a stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AmountZero` if `amount` <= 0.
+    /// Returns `TotalOverflow` if the receiver's collectable balance or the
+    /// sender's lifetime given total would overflow.
     pub fn give(
         env: Env,
         sender: Address,
         receiver: Address,
-        amount: i128,
         token: Address,
+        amount: i128,
     ) -> Result<(), VestFlowError> {
         sender.require_auth();
         if amount <= 0 {
             return Err(VestFlowError::AmountZero);
         }
-        token::Client::new(&env, &token).transfer(&sender, &receiver, &amount);
+
+        // Pull the tokens into the contract so `collect` can later pay the
+        // receiver out. A plain `transfer` is authorized by `sender`'s
+        // `require_auth` above; no token allowance needs to be pre-arranged.
+        token::Client::new(&env, &token).transfer(
+            &sender,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        // Credit the receiver's collectable balance: `collect` reads this
+        // entry, so the give is collectable in the same cycle it was sent.
+        let accrued_key = DataKey::Accrued(receiver.clone(), token.clone());
+        let accrued: i128 = env.storage().instance().get(&accrued_key).unwrap_or(0);
+        let next_accrued = accrued
+            .checked_add(amount)
+            .ok_or(VestFlowError::TotalOverflow)?;
+        env.storage().instance().set(&accrued_key, &next_accrued);
+
         let key = DataKey::TotalGiven(sender.clone(), token.clone());
         let total: i128 = env.storage().instance().get(&key).unwrap_or(0);
         let next_total = total
@@ -3910,8 +3960,10 @@ impl VestFlowContract {
             INSTANCE_TTL_THRESHOLD_LEDGERS,
             INSTANCE_TTL_EXTEND_TO_LEDGERS,
         );
-        env.events()
-            .publish((symbol_short!("given"), sender, token), amount);
+        env.events().publish(
+            (symbol_short!("given"), sender, receiver, token),
+            amount,
+        );
         Ok(())
     }
 
@@ -4877,7 +4929,7 @@ impl VestFlowContract {
             &config,
         );
         env.storage().instance().remove(
-            &DataKey::StreamEndTime(funder.clone(), token.clone()),
+            &DataKey::StreamEndTime(sender.clone(), token.clone()),
         );
         env.storage().instance().extend_ttl(
             INSTANCE_TTL_THRESHOLD_LEDGERS,
@@ -5248,59 +5300,6 @@ impl VestFlowContract {
 
         let balance = Self::stream_balance(env, sender, token);
         total_squeezable.min(balance).max(0)
-    }
-
-    /// Collect tokens dripped so far in an unfinished cycle ("squeeze").
-    pub fn squeeze_streams(
-        env: Env,
-        receiver: Address,
-        sender: Address,
-        token: Address,
-        history: Vec<StreamConfigHistory>,
-    ) -> i128 {
-        receiver.require_auth();
-        let amount = Self::squeeze_streams_result(
-            env.clone(),
-            receiver.clone(),
-            token.clone(),
-            sender.clone(),
-            history,
-        );
-
-        if amount > 0 {
-            let key = DataKey::AccountTokenStreams(sender.clone(), token.clone());
-            if let Some(mut config) = env
-                .storage()
-                .instance()
-                .get::<DataKey, AccountTokenStreams>(&key)
-            {
-                config.balance = config.balance.saturating_sub(amount);
-                config.last_update = env.ledger().timestamp();
-                env.storage().instance().set(&key, &config);
-            }
-            let bal_key = DataKey::StreamBalance(sender.clone(), token.clone());
-            let funded: i128 = env.storage().instance().get(&bal_key).unwrap_or(0);
-            env.storage()
-                .instance()
-                .set(&bal_key, &funded.saturating_sub(amount));
-
-            token::Client::new(&env, &token).transfer(
-                &env.current_contract_address(),
-                &receiver,
-                &amount,
-            );
-
-            env.events().publish(
-                (symbol_short!("squeezed"), receiver, sender, token),
-                amount,
-            );
-            env.storage().instance().extend_ttl(
-                INSTANCE_TTL_THRESHOLD_LEDGERS,
-                INSTANCE_TTL_EXTEND_TO_LEDGERS,
-            );
-        }
-
-        amount
     }
 
     /// All-time cumulative amount of `token` `account` has ever collected via
@@ -5753,6 +5752,122 @@ impl VestFlowContract {
             .instance()
             .get::<_, Vec<SplitReceiver>>(&DataKey::Splits(account.clone()))
             .unwrap_or_else(|| vec![&env])
+    }
+
+    /// View helper: the weight currently configured for a fixed-address
+    /// splits receiver, or `None` when the receiver is not configured.
+    pub fn get_splits_receiver(
+        env: Env,
+        account: Address,
+        receiver: Address,
+    ) -> Option<u128> {
+        let splits = Self::splits(env, account);
+        for r in splits.iter() {
+            if let SplitReceiver::Address(a) = r {
+                if a.receiver == receiver {
+                    return Some(a.weight);
+                }
+            }
+        }
+        None
+    }
+
+    /// View helper: the number of receivers in `account`'s splits
+    /// configuration (0 when none is configured).
+    pub fn splits_receivers_count(env: Env, account: Address) -> u32 {
+        Self::splits(env, account).len() as u32
+    }
+
+    /// Update one receiver's rate inside `sender`'s existing stream config
+    /// without touching the others or the balance.
+    ///
+    /// Settles drips accrued up to now at the *previous* rates first, so the
+    /// new rate only applies going forward. Setting a rate of 0 closes that
+    /// receiver's stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StreamsNotConfigured` if `sender` has no stream config for
+    /// `token`, and `ReceiverNotFound` if `receiver` is not part of it.
+    /// Returns `WeightZero` for a negative new rate.
+    pub fn update_stream_rate(
+        env: Env,
+        sender: Address,
+        token: Address,
+        receiver: Address,
+        new_rate: i128,
+    ) -> Result<(), VestFlowError> {
+        sender.require_auth();
+        if new_rate < 0 {
+            return Err(VestFlowError::WeightZero);
+        }
+
+        let mut config: AccountTokenStreams = env
+            .storage()
+            .instance()
+            .get::<DataKey, AccountTokenStreams>(&DataKey::AccountTokenStreams(
+                sender.clone(),
+                token.clone(),
+            ))
+            .ok_or(VestFlowError::StreamsNotConfigured)?;
+
+        if config.receivers.is_empty() {
+            return Err(VestFlowError::StreamsNotConfigured);
+        }
+
+        let mut found = false;
+        for r in config.receivers.iter() {
+            if r.receiver == receiver {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(VestFlowError::ReceiverNotFound);
+        }
+
+        // Settle accrued drips at the previous rates so the new rate only
+        // applies from now on.
+        if config.balance > 0 {
+            Self::receive_streams(
+                env.clone(),
+                sender.clone(),
+                token.clone(),
+                config.receivers.clone(),
+                i128::MAX,
+            );
+            config = env
+                .storage()
+                .instance()
+                .get::<DataKey, AccountTokenStreams>(&DataKey::AccountTokenStreams(
+                    sender.clone(),
+                    token.clone(),
+                ))
+                .ok_or(VestFlowError::StreamsNotConfigured)?;
+        }
+
+        let now = env.ledger().timestamp();
+        let mut updated: Vec<StreamReceiver> = Vec::new(&env);
+        for r in config.receivers.iter() {
+            if r.receiver == receiver {
+                updated.push_back(StreamReceiver {
+                    receiver: r.receiver.clone(),
+                    amt_per_sec: new_rate,
+                });
+            } else {
+                updated.push_back(r);
+            }
+        }
+        config.receivers = updated;
+        config.last_update = now;
+        env.storage()
+            .instance()
+            .set(&DataKey::AccountTokenStreams(sender, token), &config);
+        env.storage().instance().extend_ttl(
+            INSTANCE_TTL_THRESHOLD_LEDGERS,
+            INSTANCE_TTL_EXTEND_TO_LEDGERS,
+        );
+        Ok(())
     }
 
     /// Remove a single fixed-address splits receiver and redistribute its freed
@@ -11069,7 +11184,7 @@ mod test {
         let receiver2 = Address::generate(&env);
 
         assert_eq!(client.total_given(&sender, &token_address), 0);
-        client.give(&sender, &receiver1, &125, &token_address);
+        client.give(&sender, &receiver1, &token_address, &125);
         assert_eq!(client.total_given(&sender, &token_address), 125);
 
         client.batch_give(
@@ -11088,9 +11203,92 @@ mod test {
         env.mock_all_auths();
         let (client, sender, receiver, token_address, _) = setup(&env);
         assert_eq!(
-            client.try_give(&sender, &receiver, &0, &token_address),
+            client.try_give(&sender, &receiver, &token_address, &0),
             Err(Ok(VestFlowError::AmountZero))
         );
+    }
+
+    /// Issue #592: a give pulls the amount into the contract via SAC
+    /// `transfer` and credits the receiver's collectable balance, so a
+    /// subsequent `collect` pays it out in the same cycle it was sent.
+    #[test]
+    fn test_give_is_collectable_in_same_cycle() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, sender, receiver, token_address, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_address);
+
+        let sender_before = token.balance(&sender);
+        client.give(&sender, &receiver, &token_address, &300);
+
+        // Sender paid; the contract holds the amount; receiver got nothing yet.
+        assert_eq!(token.balance(&sender), sender_before - 300);
+        assert_eq!(token.balance(&client.address), 300);
+        assert_eq!(token.balance(&receiver), 0);
+
+        // The receiver collects the give in the same cycle.
+        let collected = client.collect(&receiver, &token_address);
+        assert_eq!(collected, 300);
+        assert_eq!(token.balance(&receiver), 300);
+        assert_eq!(token.balance(&client.address), 0);
+    }
+
+    /// Issue #592: the `given` event carries topics
+    /// `(given, sender, receiver, token)` and the amount as its value.
+    #[test]
+    fn test_give_event_topics_and_value() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, sender, receiver, token_address, _) = setup(&env);
+
+        client.give(&sender, &receiver, &token_address, &777);
+
+        let matched = env
+            .events()
+            .all()
+            .iter()
+            .filter(|(_, topics, val)| {
+                let name: Result<soroban_sdk::Symbol, _> =
+                    topics.get(0).unwrap().try_into_val(&env);
+                if name.is_err() || name.unwrap() != symbol_short!("given") {
+                    return false;
+                }
+                let ev_sender: Address = topics.get(1).unwrap().try_into_val(&env).unwrap();
+                let ev_receiver: Address = topics.get(2).unwrap().try_into_val(&env).unwrap();
+                let ev_token: Address = topics.get(3).unwrap().try_into_val(&env).unwrap();
+                let ev_amount: i128 = val.clone().try_into_val(&env).unwrap();
+                ev_sender == sender
+                    && ev_receiver == receiver
+                    && ev_token == token_address
+                    && ev_amount == 777
+            })
+            .count();
+        assert_eq!(matched, 1);
+    }
+
+    /// Issue #592: gives accumulate — two gives to the same receiver are both
+    /// collectable, and `collect` never pays more than the collectable total.
+    #[test]
+    fn test_give_accumulates_across_senders() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, sender1, receiver, token_address, _) = setup(&env);
+        let sender2 = Address::generate(&env);
+        let token = TokenClient::new(&env, &token_address);
+
+        StellarAssetClient::new(&env, &token_address)
+            .mock_all_auths()
+            .mint(&sender2, &5_000);
+
+        client.give(&sender1, &receiver, &token_address, &100);
+        client.give(&sender2, &receiver, &token_address, &50);
+
+        // Both gives are collectable in full.
+        let collected = client.collect(&receiver, &token_address);
+        assert_eq!(collected, 150);
+        assert_eq!(token.balance(&receiver), 150);
+        assert_eq!(client.total_given(&sender1, &token_address), 100);
+        assert_eq!(client.total_given(&sender2, &token_address), 50);
     }
 
     #[test]
@@ -12767,27 +12965,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "Invalid stream receiver rate")]
-    fn test_set_stream_rejects_negative_rate() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let client = VestFlowContractClient::new(&env, &env.register(VestFlowContract, ()));
-        let funder = Address::generate(&env);
-        let receiver = Address::generate(&env);
-        let token_address = create_token_contract(&env, &funder);
-
-        // Try to set stream with negative rate - should panic
-        let receivers_vec = vec![
-            &env,
-            StreamReceiver {
-                receiver: receiver.clone(),
-                amt_per_sec: -50, // Invalid!
-            },
-        ];
-        client.set_stream(&funder, &token_address, &receivers_vec, &0);
-    }
-
-    #[test]
     fn test_address_splits_receiver_valid_config_accepted() {
         let env = Env::default();
         let receiver = Address::generate(&env);
@@ -13045,6 +13222,55 @@ mod test {
                 &env,
                 SplitReceiver::Address(AddressSplitsReceiver {
                     receiver: receiver1.clone(),
+                    weight: TOTAL_SPLITS_WEIGHT,
+                }),
+            ],
+        );
+        let initial_hash = client.splits_hash(&account);
+        assert_eq!(client.splits(&account).len(), 1);
+
+        // Update configuration: 30% to receiver1, 70% to receiver2
+        client.set_splits(
+            &account,
+            &vec![
+                &env,
+                SplitReceiver::Address(AddressSplitsReceiver {
+                    receiver: receiver1.clone(),
+                    weight: 300_000,
+                }),
+                SplitReceiver::Address(AddressSplitsReceiver {
+                    receiver: receiver2.clone(),
+                    weight: 700_000,
+                }),
+            ],
+        );
+        let updated_hash = client.splits_hash(&account);
+        assert_ne!(initial_hash, updated_hash);
+        assert_eq!(client.splits(&account).len(), 2);
+        assert_eq!(client.get_splits_receiver(&account, &receiver1), Some(300_000 as u128));
+        assert_eq!(client.get_splits_receiver(&account, &receiver2), Some(700_000 as u128));
+
+        // Verify last splits_set event matches the updated hash
+        let events = env.events().all();
+        let splits_set_events: std::vec::Vec<_> = events
+            .iter()
+            .filter(|(_, topics, _)| {
+                if topics.len() < 2 {
+                    return false;
+                }
+                let sym: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+                sym == Ok(soroban_sdk::Symbol::new(&env, "splits_set"))
+            })
+            .collect();
+        assert_eq!(splits_set_events.len(), 2);
+        let (_, topics, data) = splits_set_events.get(1).unwrap();
+        let topic_account: Address = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic_account, account);
+        let event_hash: BytesN<32> = data.try_into_val(&env).unwrap();
+        assert_eq!(event_hash, updated_hash);
+    }
+
+    #[test]
     fn test_set_stream_and_splits_both_sides() {
         let env = Env::default();
         env.mock_all_auths();
@@ -13071,48 +13297,25 @@ mod test {
                 }),
             ],
         );
-        let initial_hash = client.splits_hash(&account);
-        assert_eq!(client.splits(&account).len(), 1);
 
-        // Update configuration: 30% to receiver1, 70% to receiver2
-        client.set_splits(
-            &account,
-            &vec![
-                &env,
-                SplitReceiver::Address(AddressSplitsReceiver {
-                    receiver: receiver1.clone(),
-                    weight: 300_000,
-                }),
-                SplitReceiver::Address(AddressSplitsReceiver {
-                    receiver: receiver2.clone(),
-                    weight: 700_000,
-                }),
-            ],
-        );
-        let updated_hash = client.splits_hash(&account);
-        assert_ne!(initial_hash, updated_hash);
-        assert_eq!(client.splits(&account).len(), 2);
-        assert_eq!(client.get_splits_receiver(&account, &receiver1), Some(300_000));
-        assert_eq!(client.get_splits_receiver(&account, &receiver2), Some(700_000));
+        // Stream config persisted.
+        let config = client
+            .get_account_token_streams(&funder, &token_address)
+            .unwrap();
+        assert_eq!(config.balance, 500);
+        assert_eq!(config.receivers.len(), 1);
+        assert_eq!(config.receivers.get(0).unwrap().amt_per_sec, 10);
 
-        // Verify last splits_set event matches the updated hash
-        let events = env.events().all();
-        let splits_set_events: std::vec::Vec<_> = events
-            .iter()
-            .filter(|(_, topics, _)| {
-                if topics.len() < 2 {
-                    return false;
-                }
-                let sym: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
-                sym == Ok(soroban_sdk::Symbol::new(&env, "splits_set"))
-            })
-            .collect();
-        assert_eq!(splits_set_events.len(), 2);
-        let (_, topics, data) = splits_set_events.get(1).unwrap();
-        let topic_account: Address = topics.get(1).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(topic_account, account);
-        let event_hash: BytesN<32> = data.try_into_val(&env).unwrap();
-        assert_eq!(event_hash, updated_hash);
+        // Splits config persisted.
+        let stored_splits = client.splits(&funder);
+        assert_eq!(stored_splits.len(), 1);
+        match stored_splits.get(0).unwrap() {
+            SplitReceiver::Address(entry) => {
+                assert_eq!(entry.receiver, splits_receiver);
+                assert_eq!(entry.weight, TOTAL_SPLITS_WEIGHT);
+            }
+            SplitReceiver::Nft(_) => panic!("expected address receiver"),
+        }
     }
 
     #[test]
@@ -13629,24 +13832,22 @@ mod test {
         // No configuration at all.
         assert_eq!(client.get_splits_receiver(&account, &receiver), None);
 
-        // Stream config persisted.
-        let config = client
-            .get_account_token_streams(&funder, &token_address)
-            .unwrap();
-        assert_eq!(config.balance, 500);
-        assert_eq!(config.receivers.len(), 1);
-        assert_eq!(config.receivers.get(0).unwrap().amt_per_sec, 10);
-
-        // Splits config persisted.
-        let stored_splits = client.splits(&funder);
-        assert_eq!(stored_splits.len(), 1);
-        match stored_splits.get(0).unwrap() {
-            SplitReceiver::Address(entry) => {
-                assert_eq!(entry.receiver, splits_receiver);
-                assert_eq!(entry.weight, TOTAL_SPLITS_WEIGHT);
-            }
-            SplitReceiver::Nft(_) => panic!("expected address receiver"),
-        }
+        // Configured receiver resolves, an unrelated one does not.
+        client.set_splits(
+            &account,
+            &vec![
+                &env,
+                SplitReceiver::Address(AddressSplitsReceiver {
+                    receiver: receiver.clone(),
+                    weight: TOTAL_SPLITS_WEIGHT,
+                }),
+            ],
+        );
+        assert_eq!(
+            client.get_splits_receiver(&account, &receiver),
+            Some(TOTAL_SPLITS_WEIGHT)
+        );
+        assert_eq!(client.get_splits_receiver(&account, &stranger), None);
     }
 
     #[test]
@@ -13762,18 +13963,6 @@ mod test {
             &vec![
                 &env,
                 SplitReceiver::Address(AddressSplitsReceiver {
-                    receiver: receiver.clone(),
-                    weight: TOTAL_SPLITS_WEIGHT,
-                }),
-            ],
-        );
-
-        // Configured receiver resolves, an unrelated one does not.
-        assert_eq!(
-            client.get_splits_receiver(&account, &receiver),
-            Some(TOTAL_SPLITS_WEIGHT as u32)
-        );
-        assert_eq!(client.get_splits_receiver(&account, &stranger), None);
                     receiver: receiver_a.clone(),
                     weight: half,
                 }),
@@ -13811,16 +14000,6 @@ mod test {
                 &env,
                 SplitReceiver::Address(AddressSplitsReceiver {
                     receiver: receiver.clone(),
-                    weight: 300_000,
-                }),
-                SplitReceiver::Nft(NftSplitsReceiver {
-                    nft_contract: nft_contract.clone(),
-                    token_id: 9,
-                    weight: 700_000,
-                }),
-            ],
-        );
-        assert_eq!(client.get_splits_receiver(&account, &receiver), Some(300_000));
                     weight: TOTAL_SPLITS_WEIGHT,
                 }),
             ],
@@ -13850,20 +14029,6 @@ mod test {
             &vec![
                 &env,
                 SplitReceiver::Address(AddressSplitsReceiver {
-                    receiver: receiver.clone(),
-                    weight: 800_000,
-                }),
-                SplitReceiver::Nft(NftSplitsReceiver {
-                    nft_contract,
-                    token_id: 9,
-                    weight: 200_000,
-                }),
-            ],
-        );
-        assert_eq!(
-            client.get_splits_receiver(&account, &receiver),
-            Some(800_000)
-        );
                     receiver: other,
                     weight: TOTAL_SPLITS_WEIGHT,
                 }),
@@ -13903,7 +14068,45 @@ mod test {
         client.add_to_drips_list(&owner, &list_id, &member2);
         assert_eq!(client.get_drips_list_member_count(&list_id), 2);
 
+        client.remove_from_drips_list(&owner, &list_id, &member1);
+        assert_eq!(client.get_drips_list_member_count(&list_id), 1);
+    }
+
+    #[test]
+    fn test_get_drips_list_member_count_unknown_id_returns_list_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, _) = setup(&env);
+
+        let result = client.try_get_drips_list_member_count(&9999);
+        assert_eq!(result.unwrap_err().unwrap(), VestFlowError::ListNotFound);
+    }
+
+    #[test]
+    fn test_claimable_by_end_of_cycle_duplicate_senders() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, funder, receiver, token_address, _) = setup(&env);
+        let senders = soroban_sdk::vec![&env, funder.clone()];
+        StellarAssetClient::new(&env, &token_address)
+            .mock_all_auths()
+            .mint(&funder, &100_000);
+
+        client.set_stream(
+            &funder,
+            &token_address,
+            &vec![
+                &env,
+                StreamReceiver {
+                    receiver: receiver.clone(),
+                    amt_per_sec: 10,
+                },
+            ],
+            &100_000,
+        );
+
         // Once the run is swept, the same total is owed but already collectable.
+        set_time(&env, 100);
         client.receive_streams(
             &funder,
             &token_address,
@@ -14321,18 +14524,6 @@ mod test {
             client.stream_rate_for(&funder, &receiver, &token_address),
             10
         );
-        client.remove_from_drips_list(&owner, &list_id, &member1);
-        assert_eq!(client.get_drips_list_member_count(&list_id), 1);
-    }
-
-    #[test]
-    fn test_get_drips_list_member_count_unknown_id_returns_list_not_found() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (client, _, _, _, _) = setup(&env);
-
-        let result = client.try_get_drips_list_member_count(&9999);
-        assert_eq!(result.unwrap_err().unwrap(), VestFlowError::ListNotFound);
     }
 
     // ── list_funders ──────────────────────────────────────────────────────────

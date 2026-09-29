@@ -121,7 +121,7 @@ fn measure_single_give(env: &Env) -> u64 {
     let receiver = Address::generate(env);
 
     reset_instructions(env);
-    client.give(&f.grantor, &receiver, &100, &f.token);
+    client.give(&f.grantor, &receiver, &f.token, &100);
     cpu_instructions(env)
 }
 
