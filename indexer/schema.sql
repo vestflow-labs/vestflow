@@ -175,6 +175,9 @@ CREATE TABLE IF NOT EXISTS stream_history (
 
 CREATE INDEX IF NOT EXISTS idx_stream_history_lookup
   ON stream_history (sender, receiver, token, ledger, id);
+-- Sender-only rate-change lookups for GET /streams/rate-changes/:address.
+CREATE INDEX IF NOT EXISTS idx_stream_history_sender_ledger
+  ON stream_history (sender, ledger DESC, id DESC);
 
 -- Current streaming balances are keyed by account and token. A zero balance
 -- is retained so the projection can be updated idempotently by the indexer.
@@ -204,7 +207,8 @@ CREATE TABLE IF NOT EXISTS gives (
   token          TEXT NOT NULL,
   amount_stroops TEXT NOT NULL,
   ledger         INTEGER NOT NULL,
-  timestamp      INTEGER NOT NULL
+  timestamp      INTEGER NOT NULL,
+  deleted_at     INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_gives_sender_timestamp
@@ -216,6 +220,8 @@ CREATE INDEX IF NOT EXISTS idx_gives_sender_token_timestamp
   ON gives (sender, token, timestamp DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_gives_receiver_token_timestamp
   ON gives (receiver, token, timestamp DESC, id DESC);
+-- Soft-deleted gives are excluded from listings via `deleted_at IS NULL`.
+CREATE INDEX IF NOT EXISTS idx_gives_deleted_at ON gives (deleted_at);
 
 CREATE TABLE IF NOT EXISTS collected_totals (
   account                  TEXT NOT NULL,
@@ -542,7 +548,8 @@ CREATE TABLE IF NOT EXISTS gives (
   ledger      INTEGER NOT NULL,
   raw_topics  TEXT NOT NULL,
   raw_value   TEXT NOT NULL,
-  created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+  created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+  deleted_at  INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_gives_sender    ON gives (sender);

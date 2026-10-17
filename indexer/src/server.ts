@@ -29,18 +29,21 @@ import {
   queryDripsLists,
   queryDripsSplits,
   queryDripsStreams,
-  queryEvents,
   DEFAULT_EXPIRY_WINDOW_DAYS,
   queryExpiringStreams,
   queryGives,
   queryGivesForAccount,
   queryHistory,
+  queryRecentActivity,
   queryStreamConfig,
   queryStreamHistory,
+  queryStreamRateChanges,
   queryStreamCycles,
   queryTopReceivers,
+  softDeleteGive,
 } from "./db";
 import type { EventQueryParams, GiveQueryParams } from "./types";
+import { extractBearerToken, verifyAuthToken } from "./auth";
 import { routeWebhookRequest } from "./webhook-api";
 import { routeNotificationsRequest } from "./notifications-api";
 import { startNotificationFanout, registerBalanceStream } from "./sse";
@@ -668,6 +671,109 @@ function handleGiveSummary(
 }
 
 /**
+ * DELETE /gives/:id — soft-delete a give record. Only the give's sender may
+ * delete it. Requires `Authorization: Bearer <wallet JWT>`.
+ * Returns 404 for an unknown give id and 403 when the caller is not the
+ * give sender.
+ */
+function handleDeleteGive(
+  res: http.ServerResponse,
+  id: string,
+  authorization: string | undefined,
+): void {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    return json(res, 503, {
+      error: "JWT_SECRET is not configured — give deletion is disabled",
+    });
+  }
+  const token = extractBearerToken(authorization);
+  const payload = token ? verifyAuthToken(token, secret) : null;
+  if (!payload) {
+    return json(res, 401, { error: "Missing or invalid bearer token" });
+  }
+
+  const result = softDeleteGive(id, payload.sub);
+  if (!result.ok) {
+    if (result.existingSender === null) {
+      return json(res, 404, { error: "Give not found" });
+    }
+    return json(res, 403, {
+      error: "Only the give sender can delete this give",
+    });
+  }
+  return json(res, 200, { ok: true, id });
+}
+
+/**
+ * GET /profile/:address/recent-activity — the 10 most recent on-chain actions
+ * for an address (give, receive, stream_set, collect), most recent first.
+ */
+function handleRecentActivity(
+  res: http.ServerResponse,
+  address: string,
+  searchParams: URLSearchParams,
+): void {
+  if (!STELLAR_ADDRESS.test(address)) {
+    return json(res, 400, { error: "address must be a valid Stellar address" });
+  }
+  const network = networkParam(searchParams);
+  if (!network) {
+    return json(res, 400, { error: "network must be mainnet or testnet" });
+  }
+  try {
+    const events = queryRecentActivity(address, network);
+    return json(res, 200, {
+      address,
+      network,
+      events,
+      count: events.length,
+    });
+  } catch (error) {
+    console.error("[server] Recent activity query error:", error);
+    return json(res, 500, { error: "Query failed" });
+  }
+}
+
+/**
+ * GET /streams/rate-changes/:address — paginated log of stream rate changes
+ * for a sender address: timestamp, token, old_rate, new_rate.
+ */
+function handleRateChanges(
+  res: http.ServerResponse,
+  address: string,
+  searchParams: URLSearchParams,
+): void {
+  if (!STELLAR_ADDRESS.test(address)) {
+    return json(res, 400, { error: "address must be a valid Stellar address" });
+  }
+  const network = networkParam(searchParams);
+  if (!network) {
+    return json(res, 400, { error: "network must be mainnet or testnet" });
+  }
+  const limitRaw = limitParam(searchParams);
+  const limit = limitRaw === undefined ? 50 : Math.min(limitRaw, 200);
+
+  try {
+    const page = queryStreamRateChanges({
+      sender: address,
+      limit,
+      cursor: searchParams.get("cursor") ?? undefined,
+      network,
+    });
+    return json(res, 200, {
+      sender: address,
+      network,
+      rate_changes: page.items,
+      next_cursor: page.next_cursor,
+    });
+  } catch (error) {
+    console.error("[server] Stream rate changes query error:", error);
+    return json(res, 500, { error: "Query failed" });
+  }
+}
+
+/**
  * GET /profile/:address — aggregate an address's streams, splits, gives and
  * Drips lists into a single profile payload. Addresses with no activity
  * resolve to an empty profile (HTTP 200), not 404.
@@ -1021,6 +1127,39 @@ export function createServer(): http.Server {
       res.write("retry: 1000\n\n");
       registerBalanceStream(account, token, res);
       return;
+    }
+
+    // DELETE /gives/:id — soft-delete a give (sender-only, bearer auth).
+    const giveDeleteMatch = url.pathname.match(/^\/gives\/([^/]+)$/);
+    if (giveDeleteMatch) {
+      if (req.method === "DELETE") {
+        return handleDeleteGive(
+          res,
+          decodeURIComponent(giveDeleteMatch[1]),
+          req.headers.authorization,
+        );
+      }
+      return json(res, 405, { error: "Method not allowed" });
+    }
+
+    // GET /profile/:address/recent-activity
+    const recentActivityMatch = url.pathname.match(
+      /^\/profile\/(G[A-Z2-7]{55})\/recent-activity$/,
+    );
+    if (recentActivityMatch) {
+      return handleRecentActivity(
+        res,
+        recentActivityMatch[1],
+        url.searchParams,
+      );
+    }
+
+    // GET /streams/rate-changes/:address
+    const rateChangesMatch = url.pathname.match(
+      /^\/streams\/rate-changes\/(G[A-Z2-7]{55})$/,
+    );
+    if (rateChangesMatch) {
+      return handleRateChanges(res, rateChangesMatch[1], url.searchParams);
     }
 
     if (req.method !== "GET") {

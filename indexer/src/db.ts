@@ -290,6 +290,7 @@ export function getDb(network = parseNetwork(undefined)): Database.Database {
       "materialized_at",
       "materialized_at INTEGER",
     );
+    ensureColumn(db, "gives", "deleted_at", "deleted_at INTEGER");
     ensureColumn(
       db,
       "drips_lists",
@@ -1868,9 +1869,9 @@ export function queryGivesForAccount(
   return getDb(network)
     .prepare(
       `SELECT id, sender, receiver, token, amount_stroops, ledger, timestamp
-     FROM gives
-     WHERE sender = ? OR receiver = ?
-     ORDER BY timestamp DESC, id DESC`,
+      FROM gives
+      WHERE (sender = ? OR receiver = ?) AND deleted_at IS NULL
+      ORDER BY timestamp DESC, id DESC`,
     )
     .all(account, account) as Array<{
     id: string;
@@ -1954,14 +1955,16 @@ export function queryGives(params: GiveQueryParams): Array<{
     values.push(cursor.timestamp, cursor.timestamp, cursor.id);
   }
 
+  where.push("deleted_at IS NULL");
+
   const limit = Math.min(params.limit ?? 20, 100);
   const clause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
   return getDb(params.network)
     .prepare(
       `SELECT id, sender, receiver, token, amount_stroops AS amount, ledger, timestamp
        FROM gives ${clause}
-       ORDER BY timestamp DESC, id DESC
-       LIMIT ?`,
+        ORDER BY timestamp DESC, id DESC
+        LIMIT ?`,
     )
     .all(...values, limit) as Array<{
     id: string;
@@ -1972,6 +1975,168 @@ export function queryGives(params: GiveQueryParams): Array<{
     ledger: number;
     timestamp: number;
   }>;
+}
+
+/**
+ * Soft-delete a give record. Returns the recorded sender when the row exists
+ * (so the caller can enforce ownership), and whether the delete was applied.
+ * A give that is already soft-deleted is treated as a successful no-op.
+ */
+export function softDeleteGive(
+  id: string,
+  requestingSender: string,
+  network?: NetworkName,
+): { ok: boolean; existingSender: string | null } {
+  const db = getDb(network);
+  const row = db
+    .prepare("SELECT sender, deleted_at FROM gives WHERE id = ?")
+    .get(id) as { sender: string; deleted_at: number | null } | undefined;
+  if (!row) return { ok: false, existingSender: null };
+  if (row.deleted_at != null) return { ok: true, existingSender: row.sender };
+  if (row.sender !== requestingSender) {
+    return { ok: false, existingSender: row.sender };
+  }
+  db.prepare(
+    "UPDATE gives SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
+  ).run(Math.floor(Date.now() / 1000), id);
+  return { ok: true, existingSender: row.sender };
+}
+
+/** A single recent-activity event for a profile feed. */
+export interface RecentActivityEvent {
+  type: string;
+  counterparty: string;
+  token: string | null;
+  amount: string | null;
+  timestamp: number;
+}
+
+/**
+ * Return the 10 most recent on-chain actions for `address` (give, receive,
+ * stream_set, collect) as a chronological feed, most recent first.
+ */
+export function queryRecentActivity(
+  address: string,
+  network?: NetworkName,
+): RecentActivityEvent[] {
+  const db = getDb(network);
+  const rows = db
+    .prepare(
+      `SELECT event_type, grantor, beneficiary, token, amount, ledger_closed_at, created_at
+       FROM schedule_events
+       WHERE (grantor = ? OR beneficiary = ?)
+         AND event_type IN ('given', 'collected', 'stream_set', 'stream_received')
+       ORDER BY ledger DESC, id DESC
+       LIMIT 10`,
+    )
+    .all(address, address) as Array<{
+    event_type: string;
+    grantor: string | null;
+    beneficiary: string | null;
+    token: string | null;
+    amount: string | null;
+    ledger_closed_at: string;
+    created_at: number;
+  }>;
+
+  return rows.map((row) => {
+    const counterparty = row.grantor === address ? row.beneficiary : row.grantor;
+    let timestamp = row.created_at;
+    if (row.ledger_closed_at) {
+      const parsed = Date.parse(row.ledger_closed_at);
+      if (Number.isFinite(parsed)) timestamp = Math.floor(parsed / 1000);
+    }
+    return {
+      type: row.event_type,
+      counterparty: counterparty ?? "",
+      token: row.token,
+      amount: row.amount,
+      timestamp,
+    };
+  });
+}
+
+export interface StreamRateChange {
+  timestamp: number;
+  token: string;
+  old_rate: string;
+  new_rate: string;
+}
+
+interface StreamRateChangeCursor {
+  ledger: number;
+  id: string;
+}
+
+function decodeStreamRateChangeCursor(
+  cursor?: string,
+): StreamRateChangeCursor | null {
+  if (!cursor) return { ledger: 0, id: "" };
+  try {
+    const value = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    ) as Partial<StreamRateChangeCursor>;
+    if (
+      !value ||
+      typeof value !== "object" ||
+      !Number.isSafeInteger(value.ledger) ||
+      (value.ledger as number) < 0 ||
+      typeof value.id !== "string" ||
+      value.id === ""
+    ) {
+      return null;
+    }
+    return { ledger: value.ledger as number, id: value.id };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Paginated log of stream rate changes for a sender address. Each entry
+ * carries the token, the old and new rate, and the timestamp of the change.
+ */
+export function queryStreamRateChanges(params: {
+  sender: string;
+  limit?: number;
+  cursor?: string;
+  network?: NetworkName;
+}): { items: StreamRateChange[]; next_cursor: string | null } {
+  const db = getDb(params.network);
+  const cursor = decodeStreamRateChangeCursor(params.cursor);
+  if (cursor === null) return { items: [], next_cursor: null };
+
+  const values: unknown[] = [params.sender];
+  let after = "";
+  if (params.cursor) {
+    after = "AND (ledger < ? OR (ledger = ? AND id < ?))";
+    values.push(cursor.ledger, cursor.ledger, cursor.id);
+  }
+
+  const limit = Math.min(params.limit ?? 50, 200);
+  const rows = db
+    .prepare(
+      `SELECT id, ledger, timestamp, old_rate, new_rate
+       FROM stream_history
+       WHERE sender = ? ${after}
+       ORDER BY ledger DESC, id DESC
+       LIMIT ?`,
+    )
+    .all(...values, limit + 1) as Array<
+    StreamRateChange & { id: string }
+  >;
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return {
+    items: page.map(({ id: _id, ...row }) => row),
+    next_cursor:
+      hasMore && last
+        ? Buffer.from(
+            JSON.stringify({ ledger: last.ledger, id: last.id }),
+          ).toString("base64url")
+        : null,
+  };
 }
 
 export function getCollectedTotal(
@@ -2007,10 +2172,10 @@ export function getGiveSummary(
 ): GiveSummary {
   const db = getDb(network);
   const givenRows = db
-    .prepare("SELECT amount_stroops AS value FROM gives WHERE sender = ?")
+    .prepare("SELECT amount_stroops AS value FROM gives WHERE sender = ? AND deleted_at IS NULL")
     .all(address) as { value: string | null }[];
   const receivedRows = db
-    .prepare("SELECT amount_stroops AS value FROM gives WHERE receiver = ?")
+    .prepare("SELECT amount_stroops AS value FROM gives WHERE receiver = ? AND deleted_at IS NULL")
     .all(address) as { value: string | null }[];
 
   let totalGiven = 0n;
@@ -2032,19 +2197,19 @@ export function getGiveSummary(
   }
 
   const giveCount = db
-    .prepare("SELECT COUNT(*) AS count FROM gives WHERE sender = ?")
+    .prepare("SELECT COUNT(*) AS count FROM gives WHERE sender = ? AND deleted_at IS NULL")
     .get(address) as { count: number } | undefined;
   const receiveCount = db
-    .prepare("SELECT COUNT(*) AS count FROM gives WHERE receiver = ?")
+    .prepare("SELECT COUNT(*) AS count FROM gives WHERE receiver = ? AND deleted_at IS NULL")
     .get(address) as { count: number } | undefined;
   const uniqueSenders = db
     .prepare(
-      "SELECT COUNT(DISTINCT sender) AS count FROM gives WHERE receiver = ?",
+      "SELECT COUNT(DISTINCT sender) AS count FROM gives WHERE receiver = ? AND deleted_at IS NULL",
     )
     .get(address) as { count: number } | undefined;
   const uniqueReceivers = db
     .prepare(
-      "SELECT COUNT(DISTINCT receiver) AS count FROM gives WHERE sender = ?",
+      "SELECT COUNT(DISTINCT receiver) AS count FROM gives WHERE sender = ? AND deleted_at IS NULL",
     )
     .get(address) as { count: number } | undefined;
 

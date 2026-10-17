@@ -29,6 +29,10 @@ export class ApiError extends Error {
     return new ApiError(404, "not_found", message, details);
   }
 
+  public static unprocessable(message: string, details?: unknown): ApiError {
+    return new ApiError(422, "unprocessable", message, details);
+  }
+
   public static upstream(message: string, details?: unknown): ApiError {
     return new ApiError(502, "upstream_error", message, details);
   }
